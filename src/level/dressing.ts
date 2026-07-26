@@ -30,6 +30,7 @@ export function crate(b: LevelBuild, x: number, y: number, z: number, size: numb
     .multiply(new THREE.Matrix4().makeRotationX(rng.range(-0.04, 0.04)))
     .multiply(new THREE.Matrix4().makeRotationZ(rng.range(-0.04, 0.04)));
   b.xf.pushAbsolute(m);
+  b.m('wood').setUvShift(rng.range(0, 20), rng.range(0, 20));
   b.solid('wood', 0, 0, 0, size / 2, size / 2, size / 2 * rng.range(0.85, 1.1), { groundY: y });
   // Batten frame: eight edge strips. A plain cube reads as a placeholder; a
   // battened crate reads as a crate at any distance.
@@ -38,6 +39,7 @@ export function crate(b: LevelBuild, x: number, y: number, z: number, size: numb
     for (const sz of [-1, 1]) b.m('wood').boxAt(0, sy * s, sz * s, s + 0.012, 0.03, 0.03, 1, 0x3f);
     for (const sx of [-1, 1]) b.m('wood').boxAt(sx * s, sy * s, 0, 0.03, 0.03, s + 0.012, 1, 0x3f);
   }
+  b.m('wood').clearUvShift();
   b.xf.pop();
 }
 
@@ -88,6 +90,58 @@ export function barrel(b: LevelBuild, x: number, y: number, z: number, rng: Rng,
  * archetypal piece of "cover that reads as cover" — the bag courses give it a
  * silhouette that is unmistakable at 80 m.
  */
+/**
+ * The three tones a sandbag comes in. LEVEL has a fifteen-material budget and
+ * cannot mint a tinted material per bag, so per-instance albedo variation is
+ * bought by picking among materials that already exist and are already in the
+ * draw list: hessian (0x9c8557), sun-bleached (0xb6a179) and dirt-stained
+ * (0x8b7c62). Three albedos, no new draw calls, and the run stops reading as one
+ * extruded colour.
+ */
+const BAG_MATS: readonly MatKey[] = ['fabric', 'sand', 'rubble', 'fabric', 'sand'];
+
+/**
+ * ONE BAG. A chamfered, jittered, individually-rotated solid rather than a
+ * cuboid.
+ *
+ * Round 1's critique of this emitter is worth quoting because everything here is
+ * a direct answer to it: *"~20 instances of one cuboid with zero variation.
+ * Every block is the identical size, identical orientation, laid on an exact grid
+ * with the courses perfectly aligned; every visible end face carries the same
+ * dark blue-grey branching smear in the same position and orientation. All twelve
+ * edges of every block are razor-sharp 90°."*
+ *
+ *  - identical size        → ±8 % non-uniform scale per bag
+ *  - identical orientation → ±9° yaw, ±5° roll and pitch
+ *  - exact grid            → per-bag along/across/height offsets, and a course
+ *                            pitch that is not a divisor of the run length
+ *  - the same smear        → per-bag UV phase (`setUvShift`), so the albedo,
+ *                            height and wear maps all land somewhere different
+ *  - razor-sharp edges     → a 3.5 cm chamfer on all twelve arrises, which under
+ *                            an 11° sun is a bright rim on the sunward edges
+ *  - one colour            → `BAG_MATS`
+ */
+function sandbag(
+  b: LevelBuild,
+  mat: MatKey,
+  cx: number, cy: number, cz: number,
+  hw: number, hh: number, hd: number,
+  rng: Rng,
+): void {
+  const m = new THREE.Matrix4().makeTranslation(cx, cy, cz)
+    .multiply(new THREE.Matrix4().makeRotationY(rng.range(-0.16, 0.16)))
+    .multiply(new THREE.Matrix4().makeRotationZ(rng.range(-0.085, 0.085)))
+    .multiply(new THREE.Matrix4().makeRotationX(rng.range(-0.085, 0.085)));
+  b.xf.push(m);
+  const g = b.m(mat);
+  g.setUvShift(rng.range(0, 24), rng.range(0, 24));
+  // The chamfer is a fifth of the bag's depth: enough that the silhouette of a
+  // stack is a row of pillows rather than a row of bricks.
+  g.chamferBox(0, 0, 0, hw, hh, hd, Math.min(hh, hd) * 0.42, 1, rng, 0.16);
+  g.clearUvShift();
+  b.xf.pop();
+}
+
 export function sandbagWall(
   b: LevelBuild,
   x: number, y: number, z: number,
@@ -103,24 +157,64 @@ export function sandbagWall(
   const bagH = 0.2;
   const bagD = 0.28;
   const perCourse = Math.max(2, Math.round(length / bagW));
+  /**
+   * SETTLEMENT. A stack of bags on sand is not level: it sinks where the load is
+   * heaviest and the courses sag toward the middle and toward whichever end the
+   * ground gave way under. Two out-of-phase sines over the run, scaled by the
+   * course index so the top course sags most, does the whole job — and because it
+   * is a continuous field rather than per-bag noise, the sag reads as ONE wall
+   * settling rather than as forty bags jittering independently.
+   */
+  const sagPhase = rng.range(0, Math.PI * 2);
+  const sagAmp = bagH * rng.range(0.5, 1.1);
+  const leanAmt = rng.range(-0.05, 0.05);
   for (let c = 0; c < courses; c++) {
-    // Each course is offset half a bag, like real bond.
-    const off = (c % 2) * bagW * 0.5;
+    // Each course is offset by an irrational fraction of a bag rather than a
+    // clean half, so no two courses ever line their joints up down the wall.
+    const off = ((c * 0.618) % 1) * bagW;
+    // A course occasionally runs one bag short at one end: a real emplacement is
+    // built up in a wedge, not squared off.
+    const drop = c >= courses - 2 && rng.bool(0.55) ? 1 + rng.int(2) : 0;
+    const fromEnd = rng.bool(0.5);
     for (let i = 0; i < perCourse; i++) {
-      const px = -length / 2 + off + (i + 0.5) * (length / perCourse);
+      if (drop > 0 && (fromEnd ? i >= perCourse - drop : i < drop)) continue;
+      // One bag in twenty-five has been pulled out or has slumped out of line.
+      const stray = rng.bool(0.04);
+      const px = -length / 2 + off + (i + 0.5) * (length / perCourse) + rng.range(-0.05, 0.05);
       const t = px / (length / 2);
       const pz = curve * t * t;
       const inset = c * 0.035;
-      b.m('fabric').boxAt(
-        px + rng.range(-0.02, 0.02),
-        bagH * (c + 0.5),
-        pz + rng.range(-0.025, 0.025),
-        bagW * 0.5 * rng.range(0.9, 1.02),
-        bagH * 0.5 * rng.range(0.88, 1.0),
-        (bagD - inset) * rng.range(0.9, 1.05),
-        1, 0x3f,
+      const sag = Math.sin(px * 1.7 + sagPhase) * 0.6 + Math.sin(px * 0.63 - sagPhase) * 0.4;
+      const settle = sag * sagAmp * (c + 1) / courses + leanAmt * px * 0.05;
+      sandbag(
+        b,
+        rng.pick(BAG_MATS),
+        px,
+        bagH * (c + 0.5) + settle,
+        pz + rng.range(-0.05, 0.05) + (stray ? rng.range(0.12, 0.3) * rng.sign() : 0),
+        bagW * 0.5 * rng.range(0.9, 1.08),
+        bagH * 0.5 * rng.range(0.86, 1.06),
+        (bagD - inset) * rng.range(0.88, 1.1),
+        rng,
       );
     }
+  }
+  // One or two bags off the top course, lying on the ground at the foot. The
+  // cheapest possible piece of history, and it also breaks the wall's own
+  // base line where it meets the sand.
+  const fallen = 1 + rng.int(2);
+  for (let i = 0; i < fallen; i++) {
+    const px = rng.range(-length / 2, length / 2);
+    const fm = new THREE.Matrix4()
+      .makeTranslation(px, bagH * 0.5, curve * (px / (length / 2)) ** 2 + rng.range(0.35, 0.95) * rng.sign())
+      .multiply(new THREE.Matrix4().makeRotationY(rng.range(0, Math.PI * 2)))
+      .multiply(new THREE.Matrix4().makeRotationZ(rng.range(-0.35, 0.35)));
+    b.xf.push(fm);
+    const g = b.m(rng.pick(BAG_MATS));
+    g.setUvShift(rng.range(0, 24), rng.range(0, 24));
+    g.chamferBox(0, 0, 0, bagW * 0.52, bagH * 0.46, bagD * 0.95, bagH * 0.19, 1, rng, 0.2);
+    g.clearUvShift();
+    b.xf.pop();
   }
   b.xf.pop();
   const h = bagH * courses;
@@ -145,6 +239,7 @@ export function concreteBarrier(b: LevelBuild, x: number, y: number, z: number, 
   const L = rng.range(1.5, 2.1);
   // Tapered profile, cast in one piece: wide foot, narrow top.
   const g = b.m('concrete');
+  g.setUvShift(rng.range(0, 18), rng.range(0, 18));
   const prof: [number, number][] = [[0.32, 0], [0.24, 0.22], [0.11, 0.55], [0.1, 0.92]];
   for (let i = 0; i < prof.length - 1; i++) {
     const [w0, y0] = prof[i];
@@ -167,6 +262,7 @@ export function concreteBarrier(b: LevelBuild, x: number, y: number, z: number, 
   }
   g.boxAt(0, 0.94, 0, L / 2, 0.03, 0.1, 1, 0x3f);
   for (const s of [1, -1]) g.boxAt(s * L / 2, 0.46, 0, 0.02, 0.46, 0.22, 1, 0x3f);
+  g.clearUvShift();
   b.xf.pop();
   b.collider({
     matrix: new THREE.Matrix4().makeTranslation(x, y + 0.48, z).multiply(new THREE.Matrix4().makeRotationY(yaw)),
@@ -196,6 +292,10 @@ export function container(
     .multiply(new THREE.Matrix4().makeRotationY(yaw))
     .multiply(new THREE.Matrix4().makeRotationZ(rng.range(-0.012, 0.012)));
   b.xf.pushAbsolute(m);
+  // Per-container UV phase, so nine containers in a stack do not all carry the
+  // same rust streak in the same place down their doors.
+  b.m(mat).setUvShift(rng.range(0, 30), rng.range(0, 30));
+  b.m('rust').setUvShift(rng.range(0, 30), rng.range(0, 30));
   b.solid(mat, 0, 0, 0, L / 2, H, W, { groundY: y, occluder: long });
   // Corrugation: vertical ribs on the long sides, which is what makes a
   // container silhouette read at 150 m instead of being a coloured brick.
@@ -216,6 +316,8 @@ export function container(
   for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
     b.m('rust').boxAt(sx * (L / 2 - 0.09), sy * (H - 0.09), sz * (W - 0.09), 0.1, 0.1, 0.1, 1, 0x3f);
   }
+  b.m(mat).clearUvShift();
+  b.m('rust').clearUvShift();
   b.xf.pop();
   b.deck(x, y + H * 2, z, L / 2, W, yaw, 0);
 }

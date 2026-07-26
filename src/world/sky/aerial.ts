@@ -134,7 +134,11 @@ ${HAZE_GLSL}
     // that survives the colour-space round trip three puts it through.
     vec3 sunChroma = clamp(fogColor, vec3(0.05), vec3(1.0));
 
-    vec3 tau = ironHazeTau(dist, eyePos.y, eyePos.y + eyeVec.y, sigmaScale);
+    // The drift factor is what stops this being a fog constant: the same medium
+    // at the same distance is denser in one place than another, which is what
+    // air actually does and what the reference corpus shows on every frame.
+    vec3 tau = ironHazeTau(dist, eyePos.y, eyePos.y + eyeVec.y, sigmaScale)
+             * ironHazeDrift(eyePos + eyeVec * 0.5);
     vec3 trans = exp(-tau);
     vec3 inscatter = ironHazeRadiance(dir, sunDir, sunChroma, 3.4, 0.0) * IRON_SKY_SCALE;
     return surface * trans + inscatter * (1.0 - trans);

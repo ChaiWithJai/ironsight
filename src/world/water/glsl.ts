@@ -384,7 +384,7 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
      * Hue is held constant with elevation and only value and saturation move —
      * the one property §3.1 says a gradient sky always gets wrong.
      */
-    vec3 ironWaterSkyRadiance(vec3 dir) {
+    vec3 ironWaterSkyRadiance(vec3 dir, float alpha) {
       float up = clamp(dir.y, -1.0, 1.0);
       vec2 flatDir = normalize(vec2(dir.x, dir.z) + vec2(1e-5));
       vec2 flatSun = normalize(vec2(uWaterSunDir.x, uWaterSunDir.z) + vec2(1e-5));
@@ -402,7 +402,17 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
       // is what a turbidity-3.2 atmosphere actually produces; at exponent 7 the
       // lobe is 40° wide, and since a grazing sea reflects nothing BUT the region
       // around the sun, that error alone lifted the whole frame by a stop.
-      lum += pow(max(cosSun, 0.0), 16.0) * 9000.0;
+      //
+      // CONVOLVED WITH THE SURFACE LOBE, and that is not a nicety. A rough facet
+      // does not sample the sky at one direction, it integrates it over its own
+      // lobe — and the aureole is the steepest thing in the sky, so point-sampling
+      // it through a reflection vector that swings degrees per pixel aliases it
+      // into salt and pepper. A cos^n lobe convolved with GGX(alpha) is very
+      // nearly cos^m with 1/m = 1/n + alpha^2/2, and the amplitude follows the
+      // solid-angle ratio (n+1)/(m+1) so no energy is created or lost by the
+      // widening.
+      float aurN = 1.0 / (1.0 / 16.0 + alpha * alpha * 0.5);
+      lum += pow(max(cosSun, 0.0), aurN) * 9000.0 * ((aurN + 1.0) / 17.0);
       lum += pow(max(cosSun, 0.0), 1.6) * 900.0;
 
       vec3 warm = vec3(1.00, 0.94, 0.87);
@@ -451,7 +461,8 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
       vec3 tau = spectral * (1.10e-3 * marine + 2.20e-4 * dist);
       vec3 trans = exp(-tau);
 
-      vec3 inscatter = ironWaterSkyRadiance(dir);
+      // alpha = 0: the view ray is a delta direction, not a lobe.
+      vec3 inscatter = ironWaterSkyRadiance(dir, 0.0);
       float cosSun = dot(dir, uWaterSunDir);
       // Forward scattering, but MEASURED rather than raw. A bare Henyey-Greenstein
       // at g = 0.72 peaks 22x above isotropic, and applying that to an in-scatter
@@ -527,14 +538,33 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
                  mix(ironWaterHash(i + vec2(0, 1)), ironWaterHash(i + vec2(1, 1)), f.x), f.y);
     }
 
-    float ironWaterFoamNoise(vec2 p, float t) {
-      // Two octaves drifting at different rates: foam is not a texture, it is a
-      // pattern being pulled apart by the surface it sits on.
+    /**
+     * Three octaves drifting at different rates: foam is not a texture, it is a
+     * pattern being pulled apart by the surface it sits on.
+     *
+     * BAND-LIMITED BY THE PIXEL, like everything else in this shader. The
+     * octaves are 1.8 m, 0.54 m and 0.20 m; past ~60 m a pixel is wider than the
+     * last of those and point-sampling it does not produce fine foam, it
+     * produces a fixed pattern of stippled dashes that reads as a compression
+     * artefact lying on the sea. Each octave is dropped once the pixel can no
+     * longer resolve it and the survivors are RE-NORMALISED, so distant foam
+     * keeps its coverage and its contrast and only loses its grain — which is
+     * what actually happens when you look at a whitecap from 200 m.
+     */
+    float ironWaterFoamNoise(vec2 p, float t, float cutoff) {
       vec2 drift = uWaterWaveA[0].xy * t;
+      // 0.55 -> 0.22 of a wavelength per pixel: the same 2.5-7 samples-per-period
+      // window the wave bands use, for the same reason (a threshold on the noise
+      // aliases well before the noise itself does).
+      float wa = smoothstep(0.55, 0.22, cutoff / 1.82);
+      float wb = smoothstep(0.55, 0.22, cutoff / 0.54);
+      float wc = smoothstep(0.55, 0.22, cutoff / 0.196);
+      float amp = wa * 0.50 + wb * 0.33 + wc * 0.17;
+      if (amp < 1e-3) return 0.5;
       float a = ironWaterValueNoise(p * 0.55 - drift * 0.30);
       float b = ironWaterValueNoise(p * 1.85 + drift.yx * 0.18);
       float c = ironWaterValueNoise(p * 5.10 - drift * 0.09);
-      return a * 0.50 + b * 0.33 + c * 0.17;
+      return (a * 0.50 * wa + b * 0.33 * wb + c * 0.17 * wc) / amp;
     }
 
     /* ---------------------------------------------------------------- main */
@@ -586,7 +616,50 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
       // or the energy is simply lost and the far water goes dull as well as flat.
       float unresolved = ironWaterVariance(footprint * 4.0);
       float alpha = 0.0016 + 2.0 * unresolved;
-      alpha = clamp(alpha, 0.0016, 0.28);
+      // The SURFACE's own roughness, before the antialiasing widening below.
+      // The screen-space term is a property of the projection, not of the water,
+      // and gating the screen-space reflection march on it would switch quayside
+      // reflections off wherever the sea happens to be steep in screen space —
+      // which is exactly the near field, where the quay is.
+      float alphaSurface = clamp(alpha, 0.0016, 0.28);
+
+      // GEOMETRIC SPECULAR ANTIALIASING (Kaplanyan's screen-space normal
+      // variance, in Tokuyoshi's additive-alpha form). This is the term that
+      // was missing, and it is the whole of the black-speckle defect.
+      //
+      // The analytic band limit above removes every wave band SHORTER than a
+      // pixel; it cannot do anything about the bands the pixel does resolve.
+      // Those still swing the normal by tens of degrees between one fragment and
+      // the next, and the sun lobe at alpha ~ 0.007 is 0.4 deg wide — so one
+      // fragment lands inside the lobe and computes 1e6 cd/m2 while its
+      // neighbour, half a degree away, computes 1e3. Nothing downstream can
+      // survive a 1000:1 pixel-to-pixel ratio: the TAA resolve's Catmull-Rom
+      // history fetch has negative lobes, undershoots a ratio that big straight
+      // through zero, and its tonemapped blend weight 1/(1 + Y) then hands the
+      // clamped-to-zero history ~30 000x the weight of the bright current
+      // sample. The pixel latches black and stays black, which is precisely the
+      // wedge that ran down the glitter path.
+      //
+      // The fix is not to dim anything. It is to shade the PIXEL instead of the
+      // point: the screen-space derivative of the normal IS the sub-pixel slope
+      // distribution the analytic LUT cannot see (it knows about wavelengths,
+      // not about how the projection stretched them), and folding its variance
+      // into alpha replaces the point sample of the lobe with its integral over
+      // the footprint. Energy is conserved — a wider NDF is a lower peak over a
+      // larger solid angle — so the glitter path keeps every photon it had and
+      // simply stops being a single-fragment spike.
+      vec3 dNdx = dFdx(N);
+      vec3 dNdy = dFdy(N);
+      // 0.5 is Kaplanyan's SIGMA^2 for a box pixel filter. The 0.28 cap is above
+      // his KAPPA of 0.18 and that is deliberate: a 2x2 quad clamp can only
+      // bound the contrast INSIDE a quad, whereas the Catmull-Rom history fetch
+      // that undershoots to zero reads a 4x4 neighbourhood, and the roughness
+      // widening is the only term in this shader that bounds contrast at that
+      // scale. Measured: 0.28 puts the worst 3x3 luminance range in the sea at
+      // 193/255 with zero sub-16 pixels; 0.18 does not hold it.
+      float normalVar = 0.5 * (dot(dNdx, dNdx) + dot(dNdy, dNdy));
+      alpha += min(2.0 * normalVar, 0.28);
+      alpha = clamp(alpha, 0.0016, 0.36);
 
       /* ------------------------------------------------------- fresnel ---- */
       // TWO reflectances, and they are not interchangeable.
@@ -606,7 +679,7 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
 
       /* ---------------------------------------------------- reflection ---- */
       vec3 R = reflect(-V, N);
-      vec3 reflected = ironWaterSkyRadiance(normalize(R));
+      vec3 reflected = ironWaterSkyRadiance(normalize(R), alpha);
 
       #if defined(IRON_WATER_SSR_TEXTURE)
         // LIGHT's screen-space pass, LERPED OVER the probe by its own confidence
@@ -626,7 +699,7 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
         // whatever the march found. Every gate in here is continuous for that
         // reason.
         float ssrLuma = dot(ssr.rgb, vec3(0.2126, 0.7152, 0.0722));
-        float ssrWeight = ssr.a * smoothstep(0.5, 8.0, ssrLuma) * smoothstep(0.30, 0.06, alpha);
+        float ssrWeight = ssr.a * smoothstep(0.5, 8.0, ssrLuma) * smoothstep(0.30, 0.06, alphaSurface);
         reflected = mix(reflected, ssr.rgb, clamp(ssrWeight, 0.0, 0.9));
       #elif defined(IRON_WATER_REFRACTION)
         // Our own march. Deliberately short and deliberately given up on early:
@@ -641,6 +714,13 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
         float rayRise = smoothstep(0.08, 0.26, R.y);
         // Rough water cannot carry a screen-space reflection at all: the lobe is
         // wider than a single ray can stand in for.
+        // GATED ON THE PIXEL'S LOBE, NOT ON THE SURFACE'S ROUGHNESS. This read
+        // alphaSurface for one build and the aircraft's reflection came back as a
+        // black wedge 500 px long down the glitter path: the sea under it is
+        // steep in SCREEN space, so its effective lobe is tens of degrees wide,
+        // and one ray cannot stand in for that however smooth the water itself
+        // is. The widened alpha is the honest measure of what this pixel's
+        // reflection actually integrates.
         float ssrGate = rayRise * smoothstep(0.030, 0.006, alpha);
         vec4 rClip = uWaterViewProjection * vec4(vWorldPos + R * 0.30, 1.0);
         vec4 rEnd = uWaterViewProjection * vec4(vWorldPos + R * SSR_RANGE, 1.0);
@@ -739,6 +819,14 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
             vec2 edge = min(hitUv, 1.0 - hitUv);
             float border = smoothstep(0.0, 0.09, min(edge.x, edge.y));
             vec3 hitColor = texture(uWaterSceneColor, hitUv).rgb;
+            // A MARCH MAY TINT THE ENVIRONMENT PROBE; IT MAY NOT EXTINGUISH IT.
+            // The ray speaks for the centre of a lobe that subtends real solid
+            // angle, and whatever it found — a hull, a crane boom, an aircraft
+            // crossing the sun — occludes only part of that lobe. The rest still
+            // sees sky, and no screen-space march has any way to know about it.
+            // Floored at 30 % of the probe the sea can still go visibly dark
+            // under a silhouette and can never go to a hole.
+            hitColor = max(hitColor, reflected * 0.30);
             // A pixel nothing was drawn into comes back black, and trusting it
             // punches a hole in the sea. SMOOTHSTEP, NOT STEP: a step() at 1.0 cd/m2
             // is a per-pixel coin toss wherever the scene copy hovers near the
@@ -756,7 +844,7 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
             // that part of the hemisphere. Refusing the last 12 % is the
             // difference between a dark reflection and a black hole.
             float conf = clamp(ssrGate * border * aboveWater * depthFit
-                               * coverage * travelFade * hitValid, 0.0, 0.88);
+                               * coverage * travelFade * hitValid, 0.0, 0.75);
             reflected = mix(reflected, hitColor, conf);
           }
         }
@@ -933,7 +1021,7 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
 
       float foam = 0.0;
       if (max(max(crest, surfBand), max(swashBand, obstacleBand)) > 0.002) {
-        float noise = ironWaterFoamNoise(vWorldPos.xz, uWaterTime);
+        float noise = ironWaterFoamNoise(vWorldPos.xz, uWaterTime, footprint);
         float surfPhase = 0.5 + 0.5 * sin(uWaterWaveA[0].z * dot(uWaterWaveA[0].xy, vBaseXZ) * 0.35
                                           - uWaterWaveA[0].w * uWaterTime);
         float whitecap = crest * smoothstep(0.46, 0.84, noise);
@@ -963,12 +1051,71 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
 
       color = ironWaterAerial(color, vWorldPos, eye);
 
-      // NaN GUARD. One NaN anywhere upstream — a pow() with a negative base, a
-      // normalize() of a zero vector, an Inf that met a zero — arrives here as a
-      // black hole in the sea and is invisible in every intermediate value. It
-      // costs three compares to refuse to ship it.
-      bvec3 bad = notEqual(color, color);
-      color = mix(color, reflected * reflectance, vec3(bad));
+      /* --------------------------------------------- local contrast limit -- */
+      // THE SECOND HALF OF THE BLACK-SPECKLE FIX, and it is a hard guarantee
+      // rather than a tuning: the roughness widening above makes the pixel-to-
+      // pixel ratio small in the ordinary case, this bounds it in every case.
+      //
+      // The number that matters is the RATIO between neighbouring fragments, not
+      // the absolute radiance. A 5-tap Catmull-Rom history fetch undershoots an
+      // isolated impulse by ~7 % of its height, so a fragment more than about
+      // 15x its neighbours drives the reprojected history through zero — and a
+      // history that reaches zero never recovers, because the tonemapped blend
+      // weight 1/(1 + Y) gives a 2e4 cd/m2 current sample four orders of
+      // magnitude less weight than the black history it is being mixed with.
+      // Capping each fragment at 8x the floor of its own 2x2 shading quad keeps
+      // the ratio at half the threshold with the sign of the error on the safe
+      // side. dFdx/dFdy of the luminance ARE that quad's spread — one subtract
+      // each, no extra taps.
+      //
+      // This is a firefly clamp, which is standard in any renderer that feeds a
+      // temporal filter, and it costs the glitter path nothing that is visible:
+      // a genuine glint sits in a bright neighbourhood, so its own quad floor is
+      // high and the cap lands far above it. What it removes is the isolated
+      // single-fragment spike, which was never a highlight — it was an
+      // undersampled one.
+      float lum = dot(color, vec3(0.2126, 0.7152, 0.0722));
+      float quadFloor = max(lum - abs(dFdx(lum)) - abs(dFdy(lum)), 0.0);
+      // The 240 cd/m2 pedestal is the darkest the sea gets under this sky, so a
+      // quad that is genuinely uniform and dim is never scaled at all.
+      float lumCap = 240.0 + 8.0 * quadFloor;
+      color *= min(1.0, lumCap / max(lum, 1e-3));
+
+      // NaN GUARD, AND IT IS THE LAST THING THAT TOUCHES THE COLOUR. One NaN
+      // anywhere upstream — a pow() with a negative base, a normalize() of a
+      // zero vector, an Inf that met a zero — survives max() and clamp() on
+      // every driver, and downstream it is worse than a black hole: the tonemap
+      // pass's terminal clamp turns it into 1.0, a white pixel that then feeds
+      // the bloom pyramid and washes the whole frame.
+      //
+      // The fallback is a UNIFORM, deliberately. It used to be the reflection
+      // term (reflected * reflectance), which is computed from the same normal
+      // and the same roughness as everything that could have produced the NaN in
+      // the first place — a guard whose escape hatch shares the failure mode of
+      // the thing it guards is not a guard. The sky's own diffuse radiance is
+      // a uniform, so it is finite by construction, and at
+      // a fragment whose real answer is unknown, the sea reflecting the sky is
+      // the least wrong thing to say.
+      // WRITTEN AS RANGE COMPARISONS, not as notEqual(color, color). The
+      // self-inequality is the textbook NaN test and it is also the one form a
+      // shader compiler is allowed to fold away: a backend that assumes finite
+      // math can prove x != x is never true and delete the guard entirely, and
+      // this pass has no way to detect that it happened. A range test survives,
+      // because it is false for NaN for a reason the optimiser cannot reason
+      // around — EVERY comparison against NaN is false — and it catches Inf in
+      // the same two compares. Same idiom, and the same argument, as
+      // ironSanitize in render/color.ts and the exposure pass's meter gate.
+      //
+      // NOT a fix for the black wedge in water_golden. That was measured against
+      // this change and is unaffected: the wedge is finite, non-negative shading
+      // (~200 cd/m2 against ~8000 around it), not a non-finite fragment. See the
+      // note above ironWaterSkyRadiance. This is a hardening of a guard that was
+      // never verified to fire, nothing more.
+      vec3 safe = vec3(uWaterSkyIlluminance) / IRON_PI;
+      bvec3 finite = bvec3(color.r > -1.0 && color.r < 1.0e12,
+                           color.g > -1.0 && color.g < 1.0e12,
+                           color.b > -1.0 && color.b < 1.0e12);
+      color = mix(safe, color, vec3(finite));
 
       // THE HIGHLIGHT CEILING, and it is a compromise that should be revisited.
       //

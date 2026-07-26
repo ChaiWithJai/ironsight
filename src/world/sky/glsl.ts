@@ -19,6 +19,8 @@ import {
   ANCHOR,
   HAZE_CHANNEL,
   HAZE_FLOOR,
+  HAZE_GROUND_BAND,
+  HAZE_GROUND_OCC,
   HAZE_K,
   HAZE_P,
   HAZE_ROLLIN,
@@ -187,6 +189,8 @@ const float IRON_HAZE_P = ${f(HAZE_P)};
 const float IRON_HAZE_D0 = ${f(HAZE_ROLLIN)};
 const float IRON_HAZE_HS = ${f(HAZE_SCALE_HEIGHT)};
 const float IRON_HAZE_FLOOR = ${f(HAZE_FLOOR)};
+const float IRON_HAZE_GOCC = ${f(HAZE_GROUND_OCC)};
+const float IRON_HAZE_GBAND = ${f(HAZE_GROUND_BAND)};
 const vec3  IRON_HAZE_CH = ${v3(HAZE_CHANNEL)};
 const vec3  IRON_ANCHOR_ZENITH = ${v3(ANCHOR.zenith)};
 const vec3  IRON_ANCHOR_H_ANTI = ${v3(ANCHOR.horizonAnti)};
@@ -208,6 +212,36 @@ vec3 ironHazeTau(float dist, float y0, float y1, float sigmaScale) {
   float rollIn = pow(d / (d + IRON_HAZE_D0), 1.0 - IRON_HAZE_P);
   float base = IRON_HAZE_K * pow(d, IRON_HAZE_P) * rollIn * hf * sigmaScale;
   return base * IRON_HAZE_CH;
+}
+
+/**
+ * Multiplier on the haze density from the low-frequency structure real air has.
+ *
+ * The rubric's first calibration note is that no reference frame contains clear
+ * air, and its complement — which is the part that is easy to miss — is that no
+ * reference frame contains UNIFORM air either. Haze over water arrives in drifts
+ * and streamers hundreds of metres across, so the same wall reads veiled at one
+ * end and clear at the other. A perfectly smooth exponential veil is a fog
+ * constant no matter how well its exponent is fitted, and it is one of the
+ * things that reads as a draw-distance blanket rather than as weather.
+ *
+ * Three decorrelated sinusoids at 0.67 / 0.89 / 2.0 km, mean exactly 1.0, so the
+ * §3.2 fit is unchanged on average and the CPU-side hazeTau() stays the right
+ * answer for calibration. The height gate keeps it inside the boundary layer:
+ * above ~200 m the air is genuinely well mixed and a modulation up there would
+ * read as banding on the headland.
+ *
+ * Evaluated at the MIDPOINT of the eye→surface segment, which is the correct
+ * single-sample stand-in for an integral of a field that varies far more slowly
+ * than the path length.
+ */
+float ironHazeDrift(vec3 mid) {
+  float a = sin(mid.x * 0.00710 + mid.z * 0.00430);
+  float b = sin(mid.z * 0.00940 - mid.x * 0.00260 + 2.1);
+  float c = sin((mid.x + mid.z) * 0.00310 + 4.7);
+  float band = a * 0.45 + b * 0.35 + c * 0.20;
+  float gate = exp(-max(0.0, mid.y) / 95.0);
+  return 1.0 + 0.24 * band * gate;
 }
 
 /**
@@ -245,9 +279,31 @@ vec3 ironHazeRadiance(vec3 dir, vec3 sunDir, vec3 sunChroma, float turbidity, fl
   float sl = length(sh);
   float cosAz = (dl > 1e-4 && sl > 1e-4) ? dot(dh, sh) / (dl * sl) : 0.0;
 
-  vec3 anti  = mix(IRON_ANCHOR_ZENITH, IRON_ANCHOR_H_ANTI, g);
-  vec3 cross_ = mix(IRON_ANCHOR_ZENITH, IRON_ANCHOR_H_CROSS, g);
-  vec3 sunward = mix(IRON_ANCHOR_ZENITH, IRON_ANCHOR_H_SUN, g);
+  // BELOW-EYELINE OCCLUSION OF THE AMBIENT ANCHORS. With a g = 0.72 forward
+  // lobe the light a scattering volume returns to the eye comes preferentially
+  // from the direction the ray is heading; below the eyeline that direction is
+  // the sea, at an albedo of 0.06, not the sky. The medium in front of the water
+  // is therefore genuinely dimmer than the medium in front of the sky — and it
+  // is the ONLY thing that can draw a horizon, because both sides of that line
+  // saturate to this same function and their directions differ by a
+  // milliradian. See HAZE_GROUND_OCC in model.ts for the full argument and for
+  // the deliberate sharpening of the transition. The aureole and the Rayleigh
+  // term below are single scattering OF THE SUN and are not occluded by what is
+  // underneath the ray.
+  float aboveEye = smoothstep(-IRON_HAZE_GBAND, IRON_HAZE_GBAND, up);
+  float groundOcc = mix(IRON_HAZE_GOCC, 1.0, aboveEye);
+  // The sun terms get HALF the occlusion. They are single scattering of the sun
+  // and their source is not the ground, so the argument above does not apply to
+  // them in full — but the medium in front of a surface still has a finite path
+  // where the medium in front of the sky does not, and on the sunward side the
+  // aureole is most of the in-scatter, so leaving them untouched left the sea
+  // and the sky meeting at the same value on exactly the azimuth where the
+  // horizon matters most.
+  float sunOcc = mix(0.5 + 0.5 * IRON_HAZE_GOCC, 1.0, aboveEye);
+
+  vec3 anti  = mix(IRON_ANCHOR_ZENITH, IRON_ANCHOR_H_ANTI, g) * groundOcc;
+  vec3 cross_ = mix(IRON_ANCHOR_ZENITH, IRON_ANCHOR_H_CROSS, g) * groundOcc;
+  vec3 sunward = mix(IRON_ANCHOR_ZENITH, IRON_ANCHOR_H_SUN, g) * groundOcc;
 
   // The azimuthal blend is pow(cos, 5) toward the sun and pow(cos, 1.5) away.
   //
@@ -277,7 +333,7 @@ vec3 ironHazeRadiance(vec3 dir, vec3 sunDir, vec3 sunChroma, float turbidity, fl
   // horizon sky it sits against (§3.2 property 3). A lerp-to-fog-colour cannot.
   vec3 rayleigh = ironPhaseR(c) * 3.0e3 * vec3(0.30, 0.70, 1.60);
 
-  vec3 col = base + aureole * sunChroma + rayleigh;
+  vec3 col = base + (aureole * sunChroma + rayleigh) * sunOcc;
   if (overcast > 0.0) {
     float grey = dot(col, vec3(0.3333));
     col = mix(col, vec3(grey, grey, grey * 1.02), overcast * 0.8);

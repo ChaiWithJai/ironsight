@@ -42,13 +42,23 @@ import { SUN_PENUMBRA_SLOPE } from '@/render/lighting/photometry';
  */
 const CASTER_DEPTH = 200;
 
-/** Layers that occlude the sun. Decals, water, HUD and the viewmodel do not. */
+/**
+ * Layers that occlude the sun. Decals, water and the HUD do not.
+ *
+ * THE VIEWMODEL IS IN THE LIST AND LOOK_SPEC §2.6 IS WHY: "the viewmodel casts
+ * into cascade 0 ... a weapon that casts nothing reads as a HUD element". It is
+ * drawn through its own near camera, but it is parented to a pivot that tracks
+ * the player camera in WORLD space at world scale, so its shadow lands where a
+ * real weapon's would — about 5× its height down-sun at an 11° sun. When a shot
+ * turns the viewmodel off, the group is hidden and it stops casting with it.
+ */
 const SHADOW_LAYERS: readonly RenderLayer[] = [
   RenderLayer.WorldOpaque,
   RenderLayer.WorldAlphaTest,
   RenderLayer.Vegetation,
   RenderLayer.Impostor,
   RenderLayer.ShadowOnly,
+  RenderLayer.Viewmodel,
 ];
 
 /**
@@ -245,10 +255,15 @@ export class ShadowCascades {
       u.vectors[(V_TILE0 + i) * 4 + 2] = t.w;
       u.vectors[(V_TILE0 + i) * 4 + 3] = t.h;
     }
-    u.vectors[V_BIAS * 4 + 0] = 1.15; // depth bias, cascade texels (capped in metres by the shader)
-    u.vectors[V_BIAS * 4 + 1] = 1.6; // normal-offset bias, cascade texels (likewise capped)
-    // Blocker search radius in cascade TEXELS, not metres: ten texels is ~0.15 m
-    // in cascade 0 and ~1 m in cascade 3, which is the range over which an
+    // Residual depth bias, in cascade texels of DEPTH SPAN on this receiver —
+    // the shader multiplies by texelWorld·tan(slope). It only has to cover
+    // sub-texel non-planarity now that `ironCascade` carries the receiver plane
+    // analytically, so it is 0.6 of a texel rather than the 1.15 it needed when
+    // it was (hopelessly) trying to cover the whole kernel walk on its own.
+    u.vectors[V_BIAS * 4 + 0] = 0.6;
+    u.vectors[V_BIAS * 4 + 1] = 1.5; // normal-offset bias, cascade texels × sin(θ)
+    // Blocker search radius in cascade TEXELS, not metres: ten texels is ~0.17 m
+    // in cascade 0 and ~5 m in cascade 3, which is the range over which an
     // occluder can physically widen this cascade's penumbra. See `ironCascade`.
     u.vectors[V_BIAS * 4 + 2] = 10.0;
     u.vectors[V_BIAS * 4 + 3] = 0.14; // cascade cross-fade band

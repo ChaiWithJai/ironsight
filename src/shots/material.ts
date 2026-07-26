@@ -39,44 +39,66 @@ import { registerShot } from '@/engine/harness';
 registerShot({
   name: 'material_chart',
   description:
-    'The ALPHA market hall’s south-east corner at 5 m, with the raking-lit south ' +
-    'facade running 33 m to the right and the sky-lit east arcade to the left. ' +
-    'Proves: baked PBR reaches the level (albedo, normal, roughness, cavity AO), ' +
-    'curvature wear on convexities, grime in cavities, dust on upward faces, ' +
-    'detail + micro normal holding at arm’s length, and the SAME material read ' +
-    'at 79° incidence and at pure sky light in one frame.',
+    'The ALPHA market hall’s south arcade, entered past a pier standing 2.4 m ' +
+    'from the lens: the same sandstone read at 2 m, at 8 m and at 20 m in one ' +
+    'frame, raking-lit on every south face and pure sky light on every east ' +
+    'return. Proves: baked PBR reaches the level (albedo, normal, roughness, ' +
+    'cavity AO), curvature wear on convexities, grime in cavities, dust on ' +
+    'upward faces, detail + micro normal holding at arm’s length, and the SAME ' +
+    'material read at 79° incidence and at pure sky light in one frame.',
   frames: 14,
   setup(ctx) {
     ctx.seed(0x4d);
     ctx.setTimeOfDay(17.4);
     ctx.setWeather(0.05, { wind: 4.0, fog: 0.0028 });
     ctx.setOverlays({ viewmodel: false, hud: false });
-    // Standing eye height on the square's paving (deck 11.60 + 1.62), 5.4 m off
-    // the hall's south-east corner, sighting 315° — 126° off the light.
+    // Standing eye height on the square's paving (deck 11.60 + 1.62), 1.05 m
+    // clear of the hall's south plinth, sighting 297.6° — 143° off the light.
     //
-    // The corner is the whole shot. The hall is very nearly axis-aligned
-    // (yaw 0.02), so at a light azimuth of 81°:
-    //   - the SOUTH facade (normal 181°) takes the sun at 79° incidence. That is
-    //     raking light: 18 % of full irradiance, but every course joint, every
-    //     chipped arris and every bit of the detail-normal layer throws a shadow
-    //     several times its own depth. This is the face the wear masks are
-    //     judged on, and it runs from 8 m out to 33 m at the frame's right edge,
-    //     so one surface is sampled across two decades of texel density.
-    //   - the EAST facade (normal 271°) sees no sun at all and is lit purely by
-    //     the sky dome. It is the control: same material, no key, and it is what
-    //     proves the ambient is a real two-lobe integration rather than a flat
-    //     term. It fills the left of frame out to 21 m and is the frame's dark
-    //     near-field mass.
+    // WHY IT MOVED. Round 1 stood 5.4 m off the corner with nothing nearer than
+    // that, an empty foreground, and a colonnade that receded cleanly to the
+    // frame's corner and terminated on nothing. Both are §7.2 defects: the eye
+    // ran down the arcade and left the frame.
+    //
+    // The arcade is now entered rather than observed. `buildMarketHall` runs the
+    // south arcade on a 3.05 m bay from the south-east corner (83.8, 87.7)
+    // westward, so the piers land at x ≈ 83.8, 80.8, 77.7, 74.7, 71.6 … on
+    // z ≈ 88.05. From this station:
+    //   -  2.4 m  the pier at x 77.7, 30° left, 5.6 m tall — it runs off the top
+    //             of the frame and clips the left edge, and it is the near-field
+    //             mass §7.2 asks for AND the surface that proves micro-normal at
+    //             arm's length. Both jobs, one pier.
+    //   -  4.8 m / 7.7 m / 11 m  the next three piers march right across the
+    //             frame on the perspective line.
+    //   - 21.3 m  the south-west corner terminates the run, and the street
+    //             between the western blocks closes the vista behind it.
+    // The eye is routed and then stopped, which is what round 1 was missing.
+    //
+    // The light is unchanged and is still the reason for the staging. At a light
+    // azimuth of 81° and the hall at yaw 0.02:
+    //   - every SOUTH face takes the sun at 79° incidence. That is raking light:
+    //     18 % of full irradiance, but every course joint, every chipped arris
+    //     and every bit of the detail-normal layer throws a shadow several times
+    //     its own depth. Sampled here from 2.4 m to 21 m, i.e. across a decade
+    //     of texel density on one surface.
+    //   - every pier's EAST return (normal 271°) sees no sun at all and is lit
+    //     purely by the sky dome. Same material, no key: the control that proves
+    //     the ambient is a real two-lobe integration rather than a flat term,
+    //     and it is repeated four times down the run at four distances.
     // §2.3's "lit face and sky-lit face simultaneously" is therefore satisfied
-    // by construction, on one object, at one corner.
+    // by construction, four times over, on one object.
     //
-    // The station is in the open: it stands 1.5 m clear of the plinth outline
-    // (hall half-extents 13 × 9 plus 0.85 of plinth, centred 71, 97). Two
-    // earlier poses four metres off the hall's WEST wall both rendered black —
-    // they stood inside a plot's geometry, which is invisible from outside and
-    // costs a five-minute capture to discover. Do not move this camera without a
-    // capture to prove the new station is in the open.
-    ctx.poseCamera([88.5, 13.22, 85.0], [70.8, 12.78, 102.7], 50);
+    // NO CINEMATIC LENS, DELIBERATELY. Dropping to ≤ 40° would switch on the
+    // aperture in `src/render/passes/dof.ts` and put 30 px of CoC on the pier at
+    // 2.4 m — which is the one surface this shot exists to read at arm's length.
+    // A material chart has to stay sharp; the near-field bokeh proof lives on
+    // `post_dof_bokeh` and on the three establishing frames.
+    //
+    // The station is in the open. Two earlier poses four metres off the hall's
+    // WEST wall both rendered black — they stood inside a plot's geometry, which
+    // is invisible from outside and costs a five-minute capture to discover. Do
+    // not move this camera without a capture to prove the new station is clear.
+    ctx.poseCamera([79.0, 13.22, 86.0], [43.55, 12.38, 104.53], 50);
   },
 });
 

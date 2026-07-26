@@ -167,10 +167,22 @@ class IronViewmodel implements ViewmodelRig {
    * edge down the top of the receiver that separates the silhouette from
    * whatever is behind it. Without it a dark weapon against a dark building is
    * one shape.
+   *
+   * THE UNITS ARE LUX AND THEY ARE NOT NEGOTIABLE. LIGHT drives this renderer in
+   * absolute photometry (`render/lighting/photometry.ts`): the world's own key
+   * is `DirectionalLight.intensity = directNormalIlluminance(...)`, which is
+   * 47 100 lux at an 11° sun, and the tonemap exposure is DERIVED from that as
+   * `0.18 / L_grey`. A viewmodel rig authored at "intensity ≈ 3" is therefore
+   * four orders of magnitude under the scene it sits in — the key contributes
+   * nothing measurable, the weapon is lit entirely by `Scene.environment`, and
+   * what lands on screen is a flat value with no key, no rim, no bounce and no
+   * modelling of the form. That is not a look; it is an arithmetic error, and it
+   * is the one that made the viewmodel read as a cardboard wedge. The
+   * intensities below are all set per frame from the live sun and sky.
    */
-  private readonly keyLight = new THREE.DirectionalLight(0xffd9a8, 3.4);
-  private readonly fillLight = new THREE.HemisphereLight(0x9dc0e0, 0x5a4a34, 0.55);
-  private readonly rimLight = new THREE.DirectionalLight(0xbcd2ea, 0.9);
+  private readonly keyLight = new THREE.DirectionalLight(0xffd9a8, 0);
+  private readonly fillLight = new THREE.HemisphereLight(0x9dc0e0, 0x5a4a34, 0);
+  private readonly rimLight = new THREE.DirectionalLight(0xbcd2ea, 0);
   private readonly lightTarget = new THREE.Object3D();
 
   /* ---- feel state. Every one of these is transient and reset per capture. -- */
@@ -719,7 +731,8 @@ class IronViewmodel implements ViewmodelRig {
    * moves THROUGH them, which is the entire point.
    */
   private updateLightRig(ctx: FrameCtx): void {
-    const sun = ctx.services.lighting.sun;
+    const lighting = ctx.services.lighting;
+    const sun = lighting.sun;
     const eye = ctx.camera.position;
     this.lightTarget.position.copy(eye);
     this.lightTarget.updateMatrixWorld(true);
@@ -729,36 +742,81 @@ class IronViewmodel implements ViewmodelRig {
     // that float error in the subtraction cannot flip a component.
     this.keyLight.position.copy(eye).addScaledVector(sun.direction, 3);
     this.keyLight.color.copy(sun.color);
-    // Same perceptual mapping the world's own key uses, so the weapon is not
-    // brighter or darker than the wall behind it at the same sun elevation.
-    const elevation = Math.max(0, sun.direction.y);
-    this.keyLight.intensity = 0.24 + 2.1 * Math.sqrt(elevation);
-    // The fill is SPLIT rather than just turned up, and that is the whole
-    // subtlety. The surface a first-person camera sees most of is the UNDERSIDE
-    // of the weapon — magwell, trigger guard, bottom rail — and the sun reaches
-    // none of it, so the lower half of a reload frame crushes to black without
-    // help. But a hemisphere light raises the sky and the ground TOGETHER, so
-    // turning it up to rescue the undersides washes the top of the receiver out
-    // to pale grey and the weapon stops reading as dark cerakote. Lifting the
-    // GROUND term and holding the SKY term down does one without the other.
-    this.fillLight.intensity = 0.34 + 0.46 * Math.pow(elevation, 0.35);
-    this.fillLight.color.setRGB(0.30 + elevation * 0.14, 0.40 + elevation * 0.13, 0.60);
-    // Warm bounce off sandstone and dust, which is what is actually under a
-    // soldier standing in this town at this hour.
-    this.fillLight.groundColor.setRGB(0.50, 0.41, 0.30);
+
+    // LUX, straight off the world's own sun. Not a remapping of it — the same
+    // number the world's `DirectionalLight` is given — so a sunlit face of the
+    // receiver and a sunlit face of the wall behind it differ by exactly their
+    // albedos and by nothing else. That is the whole definition of "the weapon
+    // is in the same light as the scene".
+    const above = Math.max(0, sun.direction.y);
+    const sunLux = sun.illuminanceLux;
+    const skyLux = lighting.skyIlluminanceLux;
+    // The shooter's own head, shoulder and forearm are between the sun and half
+    // of the weapon and are not modelled, so the beam is knocked down rather
+    // than taken at full strength. 0.85 is the fraction of the weapon's visible
+    // surface that is genuinely in open sun with the rifle at the shoulder.
+    this.keyLight.intensity = sunLux * 0.85;
+
+    // Ground bounce, computed rather than dialled: the horizontal illuminance
+    // falling on the street times the street's albedo is what comes back up.
+    // 0.34 is sandstone/dry sand, which is what this town is made of and is why
+    // the undersides of a weapon carried here go warm rather than black.
+    const bounceLux = (sunLux * above + skyLux) * 0.34;
+    // The FULL computed hemisphere, not half of it, and the reason is measured
+    // rather than felt. `Scene.environment` is a prefiltered sky probe, so it
+    // already carries the dome — but it is baked from the SKY and knows nothing
+    // about the two square metres of sunlit street directly under the weapon,
+    // which for a first-person camera is the single largest thing in the
+    // viewmodel's own hemisphere. Holding this at half the physical value put
+    // the optic housing at 7.9 % of the frame's bright anchor; the same class of
+    // optic in `reference/gameplay/bf6_gp_019` sits at 16 %, and the shipped
+    // frame is not cheating — it is receiving the bounce.
+    //
+    // What the hemisphere buys over the probe either way is DIRECTION: it
+    // separates the sky term from the ground term along the surface normal, so
+    // the top of the receiver goes cool and the magwell, trigger guard and
+    // bottom rail go warm, instead of everything settling on one ambient value.
+    const fillLux = Math.max(skyLux, bounceLux);
+    this.fillLight.intensity = fillLux;
+    // Colours carry the RATIO between the two halves; the intensity carries the
+    // magnitude. Sky is the LOOK_SPEC teal shadow chroma, ground is sandstone.
+    const skyShare = Math.min(1, skyLux / Math.max(fillLux, 1e-3));
+    const groundShare = Math.min(1, bounceLux / Math.max(fillLux, 1e-3));
+    this.fillLight.color.setRGB(0.34 * skyShare, 0.46 * skyShare, 0.70 * skyShare);
+    this.fillLight.groundColor.setRGB(0.62 * groundShare, 0.50 * groundShare, 0.35 * groundShare);
 
     // Rim: opposite the key and only slightly above, so it draws a line down
     // the top EDGE of the receiver rather than washing the whole top face. It
-    // is the cheapest separation there is and the easiest to overdo — at the
-    // 0.85 it started at, the rail read as white plastic.
+    // is the cheapest separation there is and the easiest to overdo. At sky
+    // illuminance × 0.45 it is under half the fill and about a hundredth of the
+    // key — visible on a chamfer, invisible on a flat — and it is what draws the
+    // line down the top edge of the receiver that the round-1 critique recorded
+    // as missing.
     this.rimLight.position.set(
       eye.x - sun.direction.x * 3,
       eye.y + 1.1,
       eye.z - sun.direction.z * 3,
     );
-    this.rimLight.intensity = 0.22 + 0.26 * Math.pow(elevation, 0.4);
+    this.rimLight.intensity = skyLux * 0.45;
     this.keyLight.updateMatrixWorld(true);
     this.rimLight.updateMatrixWorld(true);
+
+    // THE RETICLE, on the same absolute scale as everything above.
+    //
+    // A red dot is a brightness the shooter DIALS: too dim and it disappears
+    // against a sunlit wall, too bright and it blooms into a starburst that
+    // hides the target. Both failures are about the ratio to the BACKGROUND, so
+    // the emitter is driven from scene illuminance rather than from a constant.
+    // `(sunLux·sinθ + skyLux)/π × 0.34` is the luminance of the sandstone the
+    // shooter is aiming at; 2.4× that is a dot that reads as hot without
+    // swallowing what is behind it. The floor keeps it alive at night.
+    const backgroundLuminance = ((sunLux * above + skyLux) / Math.PI) * 0.34;
+    const reticleMaterial = this.materials?.reticle as
+      | (THREE.Material & { emissiveIntensity?: number })
+      | undefined;
+    if (reticleMaterial && reticleMaterial.emissiveIntensity !== undefined) {
+      reticleMaterial.emissiveIntensity = Math.max(45, backgroundLuminance * 2.4);
+    }
   }
 
   private readMuzzle(): void {

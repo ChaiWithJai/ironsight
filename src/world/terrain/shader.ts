@@ -78,13 +78,28 @@ float ironTerrainValue(vec2 p) {
   return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
+/** 2x2 rotation. Used to decorrelate noise octaves — see ironTerrainFbm. */
+vec2 ironTerrainRot(vec2 v, float c, float s) {
+  return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
 /**
- * Three octaves at 1.00 / 3.70 / 13.90. The ratios are deliberately
- * non-harmonic: harmonic octaves beat against each other and the beat period is
- * exactly the repeat a viewer's eye finds.
+ * Three octaves at 1.00 / 3.70 / 13.90, EACH ROTATED off the previous one.
+ *
+ * Two separate anti-pattern measures, and both are load-bearing:
+ *   · the frequency ratios are non-harmonic, so the octaves never beat into a
+ *     period the eye can lock onto;
+ *   · every octave is rotated ~37° and ~-71° from the lattice of the one below.
+ *     Smoothstep value noise is built on an axis-aligned integer lattice and its
+ *     second derivative is discontinuous across every lattice line, so stacking
+ *     un-rotated octaves piles those discontinuities on top of each other at
+ *     x = n and z = n. That is what turns into the faint rectangular grid the
+ *     round-1 critique measured across the whole foreground.
  */
 float ironTerrainFbm(vec2 p) {
-  return ironTerrainValue(p) * 0.54 + ironTerrainValue(p * 3.70) * 0.31 + ironTerrainValue(p * 13.90) * 0.15;
+  vec2 p1 = ironTerrainRot(p, 0.7986, 0.6019) * 3.70;   // +37°
+  vec2 p2 = ironTerrainRot(p, 0.3256, -0.9455) * 13.90; // -71°
+  return ironTerrainValue(p) * 0.54 + ironTerrainValue(p1) * 0.31 + ironTerrainValue(p2) * 0.15;
 }
 
 /**
@@ -96,6 +111,34 @@ float ironTerrainFbm(vec2 p) {
  */
 vec4 ironTerrainTriplanar(sampler2D tex, vec3 wp, vec3 an, float upness, float invMetres) {
   vec4 horizontal = texture2D(tex, wp.xz * invMetres);
+  vec2 uvV = an.x > an.z ? wp.zy * invMetres : wp.xy * invMetres;
+  return mix(texture2D(tex, uvV), horizontal, upness);
+}
+
+/**
+ * DE-TILED triplanar, for the layer that covers the ground the player walks on.
+ *
+ * A 1.45 m texture read once per world position repeats about forty times
+ * across the near field, and the round-1 critique found it without hunting:
+ * "a rectangular lattice of cells is directly countable; inside each cell the
+ * same pattern repeats identically". The fix is to break the periodicity of the
+ * SAMPLING, not to hide the texture.
+ *
+ * The horizontal plane is read twice: once at the authored scale and once at
+ * 0.3137× (a deliberately irrational-looking ratio — 3.188 repeats of one per
+ * repeat of the other, so the combined pattern's period is ~46 m rather than
+ * 1.45 m) and rotated 37° so the two reads share no axis. The cross-fade weight
+ * is itself a 23 m noise field, so even the blend ratio does not repeat.
+ *
+ * Three fetches instead of one for the ground layer; the rock layer keeps the
+ * cheap path because cliff faces are read at a distance and at an angle where
+ * the repeat never became visible.
+ */
+vec4 ironTerrainGroundTri(sampler2D tex, vec3 wp, vec3 an, float upness, float invMetres) {
+  vec2 uv0 = wp.xz * invMetres;
+  vec2 uv1 = ironTerrainRot(wp.xz, 0.7986, 0.6019) * (invMetres * 0.3137) + vec2(0.371, 0.617);
+  float k = ironTerrainValue(wp.xz * 0.0435);
+  vec4 horizontal = mix(texture2D(tex, uv0), texture2D(tex, uv1), 0.30 + 0.36 * k);
   vec2 uvV = an.x > an.z ? wp.zy * invMetres : wp.xy * invMetres;
   return mix(texture2D(tex, uvV), horizontal, upness);
 }
@@ -121,7 +164,13 @@ vec3 ironTerrainRelevel(vec4 texel, vec3 mean, vec3 tint) {
   float meanL = max(dot(mean, luma), 0.02);
   float texL = max(dot(texel.rgb, luma), 1e-4);
   vec3 chroma = texel.rgb / texL;
-  return tint * clamp(texL / meanL, 0.55, 1.6) * mix(vec3(1.0), chroma, 0.35);
+  // The contrast window is narrow ON PURPOSE. A generic baked set carries its
+  // own large-scale swirl; let it through at full swing and the ground reads as
+  // marbled wood grain rather than as sand — which is exactly what round 1
+  // measured. ±22 % is enough for the set to contribute mesoscale break-up
+  // while the sand's actual character (ripple, grain, pebbles) is authored
+  // below, where it can be tied to scale and to distance.
+  return tint * clamp(texL / meanL, 0.78, 1.22) * mix(vec3(1.0), chroma, 0.28);
 }
 `;
 
@@ -158,11 +207,26 @@ const SHADE = /* glsl */ `
   // smooth as the camera walks up to it.
   vec2 mesoP = wp.xz * 3.40;
   float meso = ironTerrainFbm(mesoP);
-  // Two macro bands (9 m and 47 m). The long one is what stops 200 m of open
-  // ground reading as one flat tone at range, where the mesoscale has mipped
-  // away and only this survives.
-  float macro = ironTerrainValue(wp.xz * 0.111) * 0.55 + ironTerrainValue(wp.xz * 0.021) * 0.45;
-  float microFade = 1.0 - smoothstep(2.0, 9.0, viewDist);
+  // Three macro bands (9 m, 47 m, 125 m). The longest is LOOK_SPEC §4.1's
+  // "large low-frequency macro variation": at range the mesoscale has mipped
+  // away and this is the only thing left keeping 200 m of open ground from
+  // reading as one flat tone.
+  float macro = ironTerrainValue(wp.xz * 0.111) * 0.42
+              + ironTerrainValue(wp.xz * 0.021 + 11.3) * 0.34
+              + ironTerrainValue(wp.xz * 0.0079 + 3.7) * 0.24;
+
+  // ---- STAGGERED, DITHERED DETAIL FADES ------------------------------------
+  // Round 1 found "a straight-edged wedge where the warm detail stops, the
+  // colour steps and the grass thins — three things changing at one line". That
+  // is what one shared fade radius looks like. Every band below therefore fades
+  // over its own, deliberately different range, and every threshold is
+  // displaced by a 3 m noise field so the front is ragged instead of being a
+  // circle centred on the camera.
+  float jit = ironTerrainValue(wp.xz * 0.33 + 5.1) - 0.5;
+  float fGrain  = 1.0 - smoothstep(2.4 + jit * 1.5, 7.5 + jit * 3.2, viewDist);
+  float fPebble = 1.0 - smoothstep(8.0 + jit * 3.4, 21.0 + jit * 7.5, viewDist);
+  float fRipple = 1.0 - smoothstep(30.0 + jit * 11.0, 74.0 + jit * 22.0, viewDist);
+  float fRelief = 1.0 - smoothstep(52.0 + jit * 16.0, 125.0 + jit * 30.0, viewDist);
 
   // ---- layer 1: sand / dry scrub (one fetch group, two tints) --------------
   vec3 albedo = vec3(0.0);
@@ -173,16 +237,19 @@ const SHADE = /* glsl */ `
   float wGround = wSand + wScrub;
   {
     float invM = 1.0 / uTerrainParams.z;
-    vec4 ga = ironTerrainTriplanar(uTerrainSandAlbedo, wp, an, upness, invM);
-    vec4 gs = ironTerrainTriplanar(uTerrainSandSurface, wp, an, upness, invM);
+    vec4 ga = ironTerrainGroundTri(uTerrainSandAlbedo, wp, an, upness, invM);
+    vec4 gs = ironTerrainGroundTri(uTerrainSandSurface, wp, an, upness, invM);
     vec3 tint = mix(uTerrainScrubTint, uTerrainSandTint, wSand / max(1e-4, wGround));
     albedo += ironTerrainRelevel(ga, textureLod(uTerrainSandAlbedo, vec2(0.5), 12.0).rgb, tint) * wGround;
     rough = mix(rough, mix(0.90, 0.97, wSand / max(1e-4, wGround)) * (0.82 + 0.36 * gs.b), wGround);
     cavity = mix(cavity, gs.a, wGround * 0.8);
-    // Half strength: the baked set's own relief is authored for a wall at
-    // arm's length, and at full strength across a whole beach it reads as
-    // marbling rather than as sand.
-    slopeNormal += (gs.rg * 2.0 - 1.0) * wGround * 0.55;
+    // A THIRD strength. The baked set's relief is authored for a wall at arm's
+    // length; across a whole beach, lit by an 11° sun where a 5° normal tilt is
+    // most of the NdotL range, it is the single biggest contributor to the
+    // "swirled marbled albedo that reads as wood grain" the round-1 critique
+    // measured. The sand's real character is authored below at scales that are
+    // tied to distance; this layer is only here to keep the two sets coherent.
+    slopeNormal += (gs.rg * 2.0 - 1.0) * wGround * 0.34;
   }
 
   // ---- layer 2: sandstone / rock ------------------------------------------
@@ -203,37 +270,110 @@ const SHADE = /* glsl */ `
   }
 
   // ---- multi-scale modulation ---------------------------------------------
-  // ±20 % at 0.29 m. LOOK_SPEC §4.1's acceptance test is a luminance sigma of
-  // 12–40 inside a nominally uniform patch at 1 m, and this term is what pays
-  // for it — it is not decoration, it is the difference between a material and
-  // a colour. Kept FINE deliberately: the same amplitude at half a metre reads
-  // as marbling rather than as grain.
-  albedo *= 0.80 + 0.40 * meso;
-  albedo *= 0.74 + 0.52 * macro;
-  rough = clamp(rough + (meso - 0.5) * 0.16 + (macro - 0.5) * 0.05, 0.30, 1.0);
+  // ±13 % at 0.29 m (mesoscale) and ±7 % over 9–125 m (macro). The macro swing
+  // used to be ±26 %, which is what produced the swirled "wood grain" albedo
+  // round 1 called out: LOOK_SPEC §4.1 puts macro variation at ±8 %, albedo
+  // only, and everything above that amplitude stops reading as sun-bleaching
+  // and starts reading as a marble texture.
+  albedo *= 0.87 + 0.26 * meso;
+  albedo *= 0.93 + 0.14 * macro;
+  // Macro drives HUE as well as level — sun-bleached crests go pale and slightly
+  // cool, sheltered hollows keep the iron-oxide warmth. Same field, so the two
+  // never disagree about where a patch is.
+  albedo *= mix(vec3(1.035, 0.998, 0.952), vec3(0.972, 0.994, 1.030), smoothstep(0.32, 0.72, macro));
+  rough = clamp(rough + (meso - 0.5) * 0.16 + (macro - 0.5) * 0.11, 0.30, 1.0);
   // Cavity darkening only, never a flat AO multiply: LOOK_SPEC is explicit that
   // scaling the final colour by AO is what produces dirty grey shadows.
-  albedo *= mix(1.0, cavity, 0.55);
+  albedo *= mix(1.0, cavity, 0.34);
 
-  // Procedural relief from the noise gradient, so the surface still self-shades
-  // at 0.3 m when the baked normal map has nothing left. Gated on distance:
-  // these taps are pure ALU with no implicit derivatives, so branching around
-  // them is safe, and past 60 m the perturbation is under a pixel anyway.
-  if (viewDist < 60.0) {
+  // ---- near-field mesostructure and microstructure -------------------------
+  // Everything in this block is pure ALU with no implicit derivatives, so the
+  // branch is safe; it is placed past the last band's fade-out so it can never
+  // itself be the boundary. Each layer's weight was computed above with its own
+  // staggered, noise-dithered radius.
+  if (fRelief + fRipple + fPebble + fGrain > 0.004) {
     float m0 = ironTerrainValue(mesoP);
     slopeNormal += vec2(m0 - ironTerrainValue(mesoP + vec2(0.55, 0.0)),
-                        m0 - ironTerrainValue(mesoP + vec2(0.0, 0.55))) * 1.8;
-    // WIND RIPPLE, sand only, dry only. Beach ripple is periodic and has a
-    // direction — an isotropic noise field never reads as sand no matter how
-    // much of it you add, and the corpus's beaches are unmistakably combed.
-    float ripplePhase = dot(wp.xz, vec2(0.94, 0.34)) * 6.8 + m0 * 5.5;
-    slopeNormal.x += cos(ripplePhase) * 0.55 * wSand;
-    if (microFade > 0.02) {
-      vec2 microP = wp.xz * 11.3;
-      float u0 = ironTerrainValue(microP);
-      albedo *= mix(1.0, 0.86 + 0.30 * u0, microFade);
-      slopeNormal += vec2(u0 - ironTerrainValue(microP + vec2(0.35, 0.0)),
-                          u0 - ironTerrainValue(microP + vec2(0.0, 0.35))) * 3.4 * microFade;
+                        m0 - ironTerrainValue(mesoP + vec2(0.0, 0.55))) * 1.15 * fRelief;
+
+    // WIND RIPPLE. Aeolian ripple is periodic and directional — an isotropic
+    // noise field never reads as sand — but a plain cos() of a fixed direction
+    // is a diffraction grating, and that is exactly what round 1 measured:
+    // "dead-straight parallel seams at roughly even spacing". Three things fix
+    // it and all three are real properties of a ripple field:
+    //   · the wind direction wanders, so the ripple bearing is driven by a 55 m
+    //     noise field rather than by a constant;
+    //   · the crest lines are domain-warped by a 2.4 m field, so they meander
+    //     and fork the way ripples actually do instead of running straight;
+    //   · ripple only forms where the wind can load sand, so the amplitude is
+    //     masked by a 12 m patch field and dies out on slopes and on scrub.
+    float bearing = 0.55 + (ironTerrainValue(wp.xz * 0.0182 + 21.7) - 0.5) * 1.9;
+    vec2 rdir = vec2(cos(bearing), sin(bearing));
+    float warp = ironTerrainFbm(wp.xz * 0.42) * 2.15;
+    float rField = smoothstep(0.28, 0.68, ironTerrainValue(wp.xz * 0.083 + 9.4));
+    float rAmp = wSand * rField * upness * fRipple;
+    float phase = dot(wp.xz, rdir) * 8.2 + warp;
+    // Asymmetric profile: a real ripple has a short steep lee face and a long
+    // shallow stoss face, and that asymmetry is most of why a lit ripple field
+    // reads as sand rather than as corrugated iron.
+    float c = cos(phase);
+    slopeNormal -= rdir * c * (0.50 + 0.22 * sin(phase)) * rAmp;
+    // Crests are winnowed pale, troughs collect the darker coarse fraction.
+    albedo *= 1.0 + 0.085 * sin(phase) * rAmp;
+    // A second, much finer ripple set riding on the first, at 11 cm — the scale
+    // that only exists inside a few metres of the lens.
+    slopeNormal -= rdir * cos(phase * 6.7 + warp * 2.1) * 0.30 * rAmp * fPebble;
+
+    // PEBBLES AND CLASTS. Sparse individually-shaded lumps on a 17 cm jittered
+    // lattice. Grain alone still reads as a painted surface, because the eye
+    // judges the scale of a ground plane from discrete objects and their
+    // contact shadows, not from texture frequency. Denser on scrub and gravel
+    // than on clean dune sand, which is also where they really collect.
+    if (fPebble > 0.01) {
+      vec2 pg = wp.xz * 5.9;
+      vec2 pi = floor(pg);
+      float ph = ironTerrainHash(pi);
+      vec2 poff = (vec2(ironTerrainHash(pi + 17.31), ironTerrainHash(pi + 41.77)) - 0.5) * 0.62;
+      vec2 pd = pg - pi - 0.5 - poff;
+      float pr = 0.17 + 0.20 * fract(ph * 7.31);
+      float pn = length(pd) / pr;
+      float occupied = step(0.55 + 0.26 * wSand, ph) * fPebble;
+      float body = (1.0 - smoothstep(0.55, 1.0, pn)) * occupied;
+      // Dome flank: the normal leans outward, strongest at the shoulder.
+      slopeNormal += normalize(pd + 1e-4) * body * min(pn, 1.0) * 2.6;
+      // Clasts are a different rock from the matrix they sit in, and each one
+      // parks a small contact shadow on the sand immediately around it.
+      albedo *= mix(vec3(1.0), vec3(0.62 + 0.66 * fract(ph * 31.7)), body);
+      albedo *= 1.0 - 0.30 * occupied * (1.0 - smoothstep(0.95, 1.7, pn)) * (1.0 - body);
+      rough = mix(rough, 0.68, body * 0.7);
+    }
+
+    // GRAIN. 2 cm relief plus a 6 mm speckle, fading IN over the last 7 m. This
+    // is the layer that answers "surfaces that go smooth as they approach the
+    // camera fail": at 1 m the ground must gain structure, not lose it.
+    if (fGrain > 0.01) {
+      vec2 g0 = wp.xz * 34.0;
+      float u0 = ironTerrainValue(g0);
+      // Grain is mostly RELIEF, barely albedo: sand grains are the same mineral
+      // as each other, so what separates them at 30 cm is self-shadowing, not
+      // colour. Pushing the albedo instead is what makes procedural sand read as
+      // speckled paint.
+      albedo *= mix(1.0, 0.90 + 0.20 * u0, fGrain);
+      slopeNormal += vec2(u0 - ironTerrainValue(g0 + vec2(0.42, 0.0)),
+                          u0 - ironTerrainValue(g0 + vec2(0.0, 0.42))) * 5.6 * fGrain;
+      // The 8 mm band is cubed against distance rather than faded linearly: it
+      // is only resolvable inside about a metre, and past that it is smaller
+      // than a pixel footprint, where keeping it would buy shimmer and nothing
+      // else. TAA cannot rescue detail that is already below Nyquist.
+      float fSpeck = fGrain * fGrain * fGrain;
+      vec2 g1 = ironTerrainRot(wp.xz, 0.3256, -0.9455) * 128.0;
+      float u1 = ironTerrainValue(g1);
+      albedo *= mix(1.0, 0.93 + 0.14 * u1, fSpeck);
+      slopeNormal += vec2(u1 - ironTerrainValue(g1 + vec2(0.5, 0.0)),
+                          u1 - ironTerrainValue(g1 + vec2(0.0, 0.5))) * 3.0 * fSpeck;
+      // Quartz sand is not Lambertian at 30 cm: the grain faces catch a broad
+      // sheen and the shaded sides do not, so roughness has to break up too.
+      rough = clamp(rough - (u0 - 0.5) * 0.13 * fGrain, 0.30, 1.0);
     }
   }
 

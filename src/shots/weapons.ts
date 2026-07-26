@@ -19,10 +19,23 @@
  * exactly would mean holding the weapon somewhere no arm goes. If these shots
  * do not match that layout, the DATA is wrong, not the camera.
  *
- * The camera is posed at eye height on the ALPHA terrace looking north-west
- * across the market square, so the weapon sits against mid-value sunlit
- * sandstone rather than against the sky — a viewmodel silhouetted on a bright
- * sky reads as a cut-out and tells a critic nothing about its shading.
+ * The camera is posed at eye height on the market square's paving, five metres
+ * off the hall's east arcade and sighting down it, so the weapon sits against
+ * mid-value sandstone rather than against the sky — a viewmodel silhouetted on a
+ * bright sky reads as a cut-out and tells a critic nothing about its shading.
+ *
+ * ROUND 2 MOVED THE STATION 22 m. The old one stood in the middle of the square
+ * with nothing inside 30 m: empty sand and grass in the near field, interest
+ * spread evenly across the whole midground, and no out-of-focus shoulder, wall
+ * edge or rock anchoring depth — which LOOK_SPEC §7.2 and the reference
+ * calibration both make a defect on its own. The new one puts an arcade pier
+ * 6.3 m out and 24° LEFT of the sightline (the viewmodel owns the lower right,
+ * §7.3, so the world occluder has to take the other side), runs the arcade away
+ * from it as a leading diagonal, and terminates it on the hall's south-east
+ * corner at 9.8 m dead centre. Note the pier is SHARP, and that is correct:
+ * §6.2's gameplay path caps CoC at 3 px and puts the far side at zero in
+ * hipfire, so a first-person frame earns its depth from occlusion and luminance
+ * banding, not from bokeh. Visible bokeh balls in a gameplay frame are a defect.
  *
  * Every shot drives the REAL state machine through `forceWeaponState`: the
  * trigger, the ADS blend and the reload clock are the ones the game uses, so
@@ -31,10 +44,20 @@
 import { registerShot, type ShotContext } from '@/engine/harness';
 import { forceWeaponState } from '@/weapons/system';
 
-/** Eye on the ALPHA terrace (MACRO_ANCHORS.alpha is 78, 96 at 11.5 m). */
-const EYE: [number, number, number] = [96, 13.2, 118];
-/** North-west across the square, into the low sun, level with the horizon. */
-const LOOK: [number, number, number] = [26, 13.6, 64];
+/**
+ * Eye on the ALPHA square's paving (slab 11.60 + 1.62 standing), 5 m east of the
+ * market hall's east arcade. The hall is 26 × 18 centred on (71, 97), so its
+ * east face is at x ≈ 84.2 and its arcade piers land on a 3.3 m bay down it.
+ */
+const EYE: [number, number, number] = [89.0, 13.22, 96.0];
+/**
+ * Sightline 212°, pitched 0.5° down: the pier at (83.8, 92.5) sits 6.3 m out and
+ * 24° left as the near-field occluder, the next pier and the south-east corner
+ * march to the centre at 8.6 m and 9.8 m, and the terrace and town close the
+ * vista behind them. The sun is 49° left — just outside the frame at the ADS
+ * lens, so the weapon is lit across its left side rather than silhouetted.
+ */
+const LOOK: [number, number, number] = [67.8, 12.87, 62.08];
 /** 68° vertical is `CameraRig.setBaseFov`; the shots match it so they are comparable. */
 const FOV = 68;
 const HOUR = 17.4;

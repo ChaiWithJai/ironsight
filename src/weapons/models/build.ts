@@ -23,7 +23,9 @@ import * as THREE from 'three';
 import type { Rng, WeaponId } from '@/engine/types';
 import {
   bevelBox,
+  boxProjectUv,
   capsuleZ,
+  domePane,
   extrude,
   lathe,
   mergeParts,
@@ -328,15 +330,26 @@ export function buildWeaponModel(id: WeaponId, rng: Rng): WeaponModel {
           opticZ + 0.006,
         ]),
       );
-      // The window leans back ~8°, which is what throws the reflection down and
-      // away from the eye instead of straight into it.
-      add('window', 'glass', 'body', place(bevelBox(inner, inner, 0.0014, 0.0003), [0, sightY, opticZ - 0.028], [-0.14, 0, 0]));
-      add('reticle', 'reticle', 'body', place(tube(0.0016, 0.0008, 12), [0, sightY, opticZ - 0.0268]));
+      // The combiner: a shallow spherical section, leaning back ~8° so the
+      // reflection is thrown down and away from the eye instead of straight
+      // into it. Curved, not flat — see `domePane`; a flat pane has one normal
+      // and therefore no Fresnel gradient, which is what made the aperture read
+      // as an opaque plate rather than as glass.
+      add(
+        'window',
+        'glass',
+        'body',
+        place(domePane(inner, inner, 0.0026, 12), [0, sightY, opticZ - 0.028], [-0.14, 0, 0]),
+      );
+      // In FRONT of the combiner's apex (which now bulges 2.6 mm toward the
+      // eye), so the dot composites over the glass rather than under it.
+      const reticleZ = opticZ - 0.0222;
+      add('reticle', 'reticle', 'body', place(tube(0.0019, 0.0008, 14), [0, sightY, reticleZ]));
       add(
         'reticleRing',
         'reticle',
         'body',
-        place(normaliseTorus(0.0092, 0.00055), [0, sightY, opticZ - 0.0268]),
+        place(normaliseTorus(0.0092, 0.00070), [0, sightY, reticleZ]),
       );
       add('emitter', 'receiver', 'body', place(bevelBox(0.012, 0.010, 0.014, 0.0005), [0, sightY - inner * 0.5 + 0.004, opticZ + 0.028]));
     }
@@ -602,6 +615,25 @@ export function buildWeaponModel(id: WeaponId, rng: Rng): WeaponModel {
     part.geometry.translate(jx, jy, jz);
   }
 
+  /* ---- UV pass ------------------------------------------------------------ */
+  // LAST, after every placement and after the jitter, so the box map is in
+  // weapon space and the pattern is continuous where two parts meet. See
+  // `boxProjectUv` — without it the barrel and every lathed part carry
+  // normalised 0..1 UVs into a shader that reads UV as metres, and the weapon
+  // renders as one stretched blotch of the 2.6 m environment bake.
+  //
+  // Two roles are exempt. The RETICLE is a flat emissive disc whose whole
+  // surface is one colour, and re-projecting it would put a texture seam
+  // through the dot. The GLASS keeps `domePane`'s native 0..1 plane UVs,
+  // because `opticLensChunk` reads them as a radius from the centre of the
+  // combiner to draw the eye box — a weapon-space box map would hand it the
+  // sight's absolute height above the bore instead, which is a different number
+  // on every weapon in the game.
+  for (const part of parts) {
+    if (part.role === 'reticle' || part.role === 'glass') continue;
+    boxProjectUv(part.geometry);
+  }
+
   let triangles = 0;
   for (const p of parts) triangles += (p.geometry.getIndex()?.count ?? 0) / 3;
 
@@ -675,7 +707,11 @@ export function buildHand(side: -1 | 1, wrap: number): THREE.BufferGeometry {
   const arm = capsuleZ(0.030, 0.230, 10);
   place(arm, [0, -0.086, 0.140], [0.36, 0, 0]);
   parts.push(arm);
-  return mergeParts(parts);
+  // Same box map the weapon gets, and for the same reason: `capsuleZ` is a
+  // CapsuleGeometry with 0..1 UVs, so without this the glove renders as one
+  // 1.8 m stucco blotch wrapped round a fist — which is exactly what made the
+  // support hand read as a lump of concrete rather than as a hand.
+  return boxProjectUv(mergeParts(parts));
 }
 
 /* ----------------------------------------------------------------- helpers -- */

@@ -236,6 +236,81 @@ export function slattedShell(
   return mergeParts(parts);
 }
 
+/**
+ * A shallow spherical combiner window, facing +Z (the eye).
+ *
+ * A flat pane is why the optic read as an opaque plate: one constant normal
+ * means one constant Fresnel term, so there is no rim brightening, no eye-box
+ * gradient and nothing anywhere on it that says "glass" rather than "quad".
+ * A real reflex combiner is a section of a sphere — that is how it collimates
+ * the reticle to infinity — and the curvature is what makes the reflectance
+ * climb toward the edge of the aperture.
+ *
+ * `sagitta` is the bulge at the centre in metres; for a 40 mm aperture on a
+ * 75 mm radius it is r²/2R ≈ 2.7 mm, which is the real number for this class of
+ * sight and is also, conveniently, the amount that reads.
+ */
+export function domePane(width: number, height: number, sagitta: number, segments = 12): THREE.BufferGeometry {
+  const g = new THREE.PlaneGeometry(width, height, segments, segments);
+  const position = g.getAttribute('position');
+  const hw = width * 0.5;
+  const hh = height * 0.5;
+  for (let i = 0; i < position.count; i++) {
+    const x = position.getX(i) / hw;
+    const y = position.getY(i) / hh;
+    position.setZ(i, sagitta * (1 - Math.min(1, x * x + y * y)));
+  }
+  g.computeVertexNormals();
+  return normalise(g);
+}
+
+/**
+ * REPROJECT UVs AS A BOX MAP IN WEAPON SPACE, IN METRES.
+ *
+ * This is not a nicety — it is the single thing standing between the viewmodel
+ * and the "flat wedge covered in lichen" read. Every primitive above inherits
+ * three's own UV generator, and those generators disagree violently about what
+ * a UV unit means: `ExtrudeGeometry` emits the SHAPE's coordinates (metres,
+ * so a 44 mm receiver spans 0.044 of a repeat), while `CylinderGeometry` and
+ * `LatheGeometry` emit 0..1 over the whole surface (so one texture repeat is
+ * stretched down 255 mm of barrel and wrapped around 60 mm of circumference —
+ * a 4:1 anisotropic smear). The uber material reads `uv` as WORLD METRES
+ * (`iron-material.ts`: `ironUv = vIronUv / metresPerRepeat`), so the barrel got
+ * one blown-up blotch of the 2.6 m rusted-metal bake dragged along its axis.
+ *
+ * A box map fixes both at once: texel density is uniform across every part of
+ * every weapon, and it is the SAME density on the magazine as on the rail.
+ *
+ * The axis convention is deliberate and load-bearing. On the four faces whose
+ * dominant normal is ±X or ±Y — which is nearly the whole visible surface of a
+ * rifle — `u` runs down the BORE (weapon-space z). That is what lets the
+ * surface shader draw machining and brushing streaks ALONG the receiver rather
+ * than across it, and lets it fade carbon fouling in toward the muzzle from a
+ * single coordinate. Only the muzzle-facing and breech-facing caps use (x, y).
+ *
+ * Call it LAST, after every `place()`, so the projection is in weapon space and
+ * two parts that touch agree about where the pattern is.
+ */
+export function boxProjectUv(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
+  normalise(geometry);
+  const position = geometry.getAttribute('position');
+  const normal = geometry.getAttribute('normal');
+  const uv = geometry.getAttribute('uv') as THREE.BufferAttribute;
+  for (let i = 0; i < position.count; i++) {
+    const x = position.getX(i);
+    const y = position.getY(i);
+    const z = position.getZ(i);
+    const ax = Math.abs(normal.getX(i));
+    const ay = Math.abs(normal.getY(i));
+    const az = Math.abs(normal.getZ(i));
+    if (az >= ax && az >= ay) uv.setXY(i, x, y);
+    else if (ax >= ay) uv.setXY(i, z, y);
+    else uv.setXY(i, z, x);
+  }
+  uv.needsUpdate = true;
+  return geometry;
+}
+
 /** Small raised cylinder — screw heads, pins, sling points, gas block detail. */
 export function stud(radius: number, height: number, segments = 10): THREE.BufferGeometry {
   const g = new THREE.CylinderGeometry(radius, radius * 1.04, height, segments, 1, false);

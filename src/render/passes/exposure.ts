@@ -100,7 +100,14 @@ export class ExposurePass implements RenderPass {
             // the auto-exposure opens up until the rest of the frame is white.
             // Samples below a ten-thousandth of a candela are not scene content
             // and get no vote.
-            w *= step(1.0e-4, l);
+            //
+            // The upper bound is the NaN gate, and it is spelled as a negated
+            // comparison because every comparison against NaN is false: without
+            // it ONE bad texel anywhere in the frame reaches the log sum, the
+            // reduction below returns NaN, and the entire image tonemaps to
+            // uniform white (see ironSanitize in color.ts). step() cannot do
+            // this job — its result for a NaN argument is undefined.
+            if (!(l > 1.0e-4) || !(l < 1.0e12)) w = 0.0;
             logSum += log2(max(l, 1.0e-4)) * w;
             weightSum += w;
           }
@@ -131,8 +138,9 @@ export class ExposurePass implements RenderPass {
         }
         // Nothing in frame passed the floor: keep the anchor rather than
         // inventing an exposure from an empty average.
-        bool metered = weightSum > 1e-4;
+        bool metered = weightSum > 1e-4 && logSum == logSum;
         float greyLuminance = exp2(logSum / max(weightSum, 1e-5));
+        if (!(greyLuminance > 0.0) || !(greyLuminance < 1.0e12)) metered = false;
         // EV is defined here as log2(L_grey / 0.18): exposureScale = 2^-EV puts
         // an 18 % surface on scene-linear 0.18, which AgX puts on display 110.
         float meteredEv = metered ? clamp(log2(max(greyLuminance, 1e-9) / 0.18), -8.0, 24.0) : uPresetEv;
@@ -151,6 +159,11 @@ export class ExposurePass implements RenderPass {
           float k = 1.0 - exp2(-uDt / max(uHalfLife, 1e-3));
           ev = usable ? mix(prevEv, targetEv, k) : targetEv;
         }
+        // Last gate before the value becomes a multiplier on every pixel in the
+        // frame AND is fed back into the next frame's history. An EV that has
+        // gone non-finite is unrecoverable once it is in the history, so it is
+        // replaced by the anchor rather than propagated.
+        if (!(ev > -60.0) || !(ev < 60.0)) ev = uPresetEv;
         outColor = vec4(exp2(-ev), ev, meteredEv, 1.0);
       `,
       {

@@ -75,6 +75,36 @@ export class MeshBuilder {
 
   constructor(private readonly xf: Xform) {}
 
+  /**
+   * PER-INSTANCE UV PHASE.
+   *
+   * The uber material samples its albedo/height/normal set from `uv` (see
+   * `render/material/chunks.ts`, `ironUv = vIronUv * ironScale`), and every
+   * emitter here starts a fresh box or quad at u = v = 0. Two hundred sandbags
+   * therefore all sample the SAME texel neighbourhood and every one of them
+   * carries the identical stain in the identical place — which is precisely the
+   * "twenty instances of one cuboid" read the round-1 critique named as the most
+   * damning region of the ALPHA frame.
+   *
+   * A caller sets this to a per-instance value before emitting and back to 0
+   * after. It costs two adds per vertex and it is the whole fix: the stain, the
+   * crack, the streak and the wear all move independently per instance while the
+   * material count stays at fifteen.
+   */
+  private uShift = 0;
+  private vShift = 0;
+
+  /** Phase this emitter's UVs. Always pair with `clearUvShift()`. */
+  setUvShift(u: number, v: number): void {
+    this.uShift = u;
+    this.vShift = v;
+  }
+
+  clearUvShift(): void {
+    this.uShift = 0;
+    this.vShift = 0;
+  }
+
   get vertexCount(): number {
     return this.position.length / 3;
   }
@@ -89,7 +119,7 @@ export class MeshBuilder {
     _n.set(nx, ny, nz).applyMatrix3(this.xf.normalMatrix).normalize();
     this.position.push(_a.x, _a.y, _a.z);
     this.normal.push(_n.x, _n.y, _n.z);
-    this.uv.push(u, v);
+    this.uv.push(u + this.uShift, v + this.vShift);
     return this.position.length / 3 - 1;
   }
 
@@ -172,6 +202,120 @@ export class MeshBuilder {
   /** Convenience: box from a centre and half-extents. */
   boxAt(cx: number, cy: number, cz: number, hx: number, hy: number, hz: number, uvScale = 1, faces = 0x3f): void {
     this.box(_boxMin.set(cx - hx, cy - hy, cz - hz), _boxMax.set(cx + hx, cy + hy, cz + hz), uvScale, faces);
+  }
+
+  /**
+   * A box with every edge chamfered — the single highest-yield shape change in
+   * this kit and the reason it exists as a primitive rather than as a detail.
+   *
+   * `docs/AAA_RUBRIC.md` axis 2: *"no perfectly sharp 90° edges on anything
+   * weathered. Real edges catch light as a thin bright line because they are
+   * chipped and rounded."* A raw `box` has twelve mathematically perfect arrises
+   * and under an 11° sun each one is a hard value step between a lit face and a
+   * sky-lit face. A 2–5 cm chamfer inserts a third, intermediate-normal facet
+   * along every arris, which reads as a bright rim on the sunward edges and a
+   * soft one elsewhere — the thing that separates a stacked-cover wall in a
+   * shipped title from a stack of primitives.
+   *
+   * The shape is the six shrunken faces, twelve edge bevels and eight corner
+   * triangles: 44 triangles against the plain box's 12. That is affordable
+   * exactly where it matters (cover blocks, sandbags, kerbs, machinery) and
+   * nowhere else, which is why the plain `box` stays.
+   *
+   * `jitter` (0..1) pushes each of the eight corners in by a random fraction of
+   * the chamfer, so a run of them is never a run of identical solids.
+   */
+  chamferBox(
+    cx: number, cy: number, cz: number,
+    hx: number, hy: number, hz: number,
+    chamfer: number,
+    uvScale = 1,
+    rng?: { range(a: number, b: number): number },
+    jitter = 0,
+  ): void {
+    const c = Math.min(chamfer, hx * 0.48, hy * 0.48, hz * 0.48);
+    const ax = hx - c;
+    const ay = hy - c;
+    const az = hz - c;
+    // Eight corner "hubs". Each hub owns three vertices, one per face plane.
+    const j = (): number => (rng && jitter > 0 ? rng.range(1 - jitter, 1) : 1);
+    const jx: number[] = [];
+    const jy: number[] = [];
+    const jz: number[] = [];
+    for (let i = 0; i < 8; i++) {
+      jx.push(j());
+      jy.push(j());
+      jz.push(j());
+    }
+    const idx = (sx: number, sy: number, sz: number): number =>
+      (sx > 0 ? 1 : 0) | (sy > 0 ? 2 : 0) | (sz > 0 ? 4 : 0);
+    /** Corner hub position, with the chamfer inset applied on the named axis. */
+    const P = (sx: number, sy: number, sz: number, axis: 0 | 1 | 2, out: THREE.Vector3): THREE.Vector3 => {
+      const k = idx(sx, sy, sz);
+      const px = cx + sx * (axis === 0 ? hx * jx[k] : ax * jx[k]);
+      const py = cy + sy * (axis === 1 ? hy * jy[k] : ay * jy[k]);
+      const pz = cz + sz * (axis === 2 ? hz * jz[k] : az * jz[k]);
+      return out.set(px, py, pz);
+    };
+    const q4 = (
+      a: THREE.Vector3, b: THREE.Vector3, cc: THREE.Vector3, d: THREE.Vector3,
+    ): void => this.quad(a, b, cc, d, uvScale);
+
+    // ---- six faces, shrunk by the chamfer ---------------------------------
+    q4(P(1, -1, 1, 0, _cb[0]), P(1, -1, -1, 0, _cb[1]), P(1, 1, -1, 0, _cb[2]), P(1, 1, 1, 0, _cb[3]));      // +X
+    q4(P(-1, -1, -1, 0, _cb[0]), P(-1, -1, 1, 0, _cb[1]), P(-1, 1, 1, 0, _cb[2]), P(-1, 1, -1, 0, _cb[3]));  // -X
+    q4(P(-1, 1, 1, 1, _cb[0]), P(1, 1, 1, 1, _cb[1]), P(1, 1, -1, 1, _cb[2]), P(-1, 1, -1, 1, _cb[3]));      // +Y
+    q4(P(-1, -1, -1, 1, _cb[0]), P(1, -1, -1, 1, _cb[1]), P(1, -1, 1, 1, _cb[2]), P(-1, -1, 1, 1, _cb[3]));  // -Y
+    q4(P(-1, -1, 1, 2, _cb[0]), P(1, -1, 1, 2, _cb[1]), P(1, 1, 1, 2, _cb[2]), P(-1, 1, 1, 2, _cb[3]));      // +Z
+    q4(P(1, -1, -1, 2, _cb[0]), P(-1, -1, -1, 2, _cb[1]), P(-1, 1, -1, 2, _cb[2]), P(1, 1, -1, 2, _cb[3]));  // -Z
+
+    // ---- twelve edge bevels ------------------------------------------------
+    // Four edges parallel to X (varying sy, sz), joining the ±Y and ±Z faces.
+    for (const sy of [-1, 1] as const) {
+      for (const sz of [-1, 1] as const) {
+        const a = P(-1, sy, sz, 1, _cb[0]);
+        const b = P(1, sy, sz, 1, _cb[1]);
+        const cc = P(1, sy, sz, 2, _cb[2]);
+        const d = P(-1, sy, sz, 2, _cb[3]);
+        if (sy * sz > 0) q4(d, cc, b, a);
+        else q4(a, b, cc, d);
+      }
+    }
+    // Four edges parallel to Y, joining ±X and ±Z.
+    for (const sx of [-1, 1] as const) {
+      for (const sz of [-1, 1] as const) {
+        const a = P(sx, -1, sz, 2, _cb[0]);
+        const b = P(sx, 1, sz, 2, _cb[1]);
+        const cc = P(sx, 1, sz, 0, _cb[2]);
+        const d = P(sx, -1, sz, 0, _cb[3]);
+        if (sx * sz > 0) q4(d, cc, b, a);
+        else q4(a, b, cc, d);
+      }
+    }
+    // Four edges parallel to Z, joining ±X and ±Y.
+    for (const sx of [-1, 1] as const) {
+      for (const sy of [-1, 1] as const) {
+        const a = P(sx, sy, -1, 0, _cb[0]);
+        const b = P(sx, sy, 1, 0, _cb[1]);
+        const cc = P(sx, sy, 1, 1, _cb[2]);
+        const d = P(sx, sy, -1, 1, _cb[3]);
+        if (sx * sy > 0) q4(d, cc, b, a);
+        else q4(a, b, cc, d);
+      }
+    }
+
+    // ---- eight corner facets ----------------------------------------------
+    for (const sx of [-1, 1] as const) {
+      for (const sy of [-1, 1] as const) {
+        for (const sz of [-1, 1] as const) {
+          const a = P(sx, sy, sz, 0, _cb[0]);
+          const b = P(sx, sy, sz, 1, _cb[1]);
+          const cc = P(sx, sy, sz, 2, _cb[2]);
+          if (sx * sy * sz > 0) this.triangle(a, b, cc, uvScale);
+          else this.triangle(cc, b, a, uvScale);
+        }
+      }
+    }
   }
 
   /**
@@ -388,6 +532,7 @@ export class MeshBuilder {
 }
 
 const _tmpQ = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+const _cb = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
 const _boxMin = new THREE.Vector3();
 const _boxMax = new THREE.Vector3();
 const _tubeUp = new THREE.Vector3();

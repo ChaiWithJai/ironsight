@@ -18,7 +18,7 @@ import * as THREE from 'three';
 import { CollisionGroup, SurfaceId, type Rng } from '@/engine/types';
 import type { LevelBuild } from '@/level/build';
 import { railing, stairs } from '@/level/kit/detail';
-import { groundSkirt, rock, rubblePile } from '@/level/kit/ground';
+import { blockChip, groundSkirt, rock, rubblePile } from '@/level/kit/ground';
 import { barrel, bollard, container, crateStack, sandbagWall, tyreStack } from '@/level/dressing';
 import { BREAKWATER, CRANES, QUAY } from '@/level/layout';
 import type { MatKey } from '@/level/materials';
@@ -118,6 +118,55 @@ export function buildQuay(b: LevelBuild, ground: Ground, rng: Rng): void {
         _v[3].set(p1x, -4, p1z),
         0.5,
       );
+      /**
+       * TIDEMARK. The single most-missed detail on any waterline in this brief.
+       *
+       * A seawall carries three bands, and they are not a texture — they are
+       * where the material CHANGES: dry masonry above the splash line, a bleached
+       * salt band through the splash zone, and a dark weed/algae band from about
+       * 0.9 m above chart datum down. Round 1's harbour critique: *"no tidemark
+       * or algae band where the quay meets the waterline."* Without it the quay
+       * looks like it was dropped into the sea five minutes ago.
+       *
+       * The top edge is deliberately IRREGULAR — swell does not draw a straight
+       * line — and it is emitted as its own quad strip 3 cm proud of the wall so
+       * it is a real surface with its own shading rather than a decal.
+       */
+      const bandTop = (t: number): number => 1.05 + Math.sin((p0x + (p1x - p0x) * t) * 0.55 + (p0z + (p1z - p0z) * t) * 0.31) * 0.34;
+      const algae = b.m('rubble');
+      const salt = b.m('sand');
+      const segs = 4;
+      for (let q = 0; q < segs; q++) {
+        const u0 = q / segs;
+        const u1 = (q + 1) / segs;
+        const ax = p0x + (p1x - p0x) * u0;
+        const az = p0z + (p1z - p0z) * u0;
+        const bx = p0x + (p1x - p0x) * u1;
+        const bz = p0z + (p1z - p0z) * u1;
+        const ay = bandTop(u0);
+        const by = bandTop(u1);
+        // Weed band: irregular top, running down to well below the surface.
+        algae.setUvShift((p0x + q) * 0.7, p0z * 0.7);
+        algae.quad(
+          _v[0].set(bx - nx * 0.03, by, bz - nz * 0.03),
+          _v[1].set(ax - nx * 0.03, ay, az - nz * 0.03),
+          _v[2].set(ax - nx * 0.03, -1.6, az - nz * 0.03),
+          _v[3].set(bx - nx * 0.03, -1.6, bz - nz * 0.03),
+          0.7,
+        );
+        algae.clearUvShift();
+        // Bleached splash band above it, 0.5–0.9 m tall, fading into the wall.
+        salt.setUvShift((p0z + q) * 0.9, p0x * 0.9);
+        salt.quad(
+          _v[0].set(bx - nx * 0.02, by + 0.62, bz - nz * 0.02),
+          _v[1].set(ax - nx * 0.02, ay + 0.62, az - nz * 0.02),
+          _v[2].set(ax - nx * 0.02, ay, az - nz * 0.02),
+          _v[3].set(bx - nx * 0.02, by, bz - nz * 0.02),
+          0.7,
+        );
+        salt.clearUvShift();
+      }
+
       // Coping course along the very edge — the shadow line that reads as a quay.
       const mx = (p0x + p1x) / 2;
       const mz = (p0z + p1z) / 2;
@@ -125,8 +174,65 @@ export function buildQuay(b: LevelBuild, ground: Ground, rng: Rng): void {
       const m = new THREE.Matrix4().makeTranslation(mx + nx * 0.28, deck - 0.03, mz + nz * 0.28)
         .multiply(new THREE.Matrix4().makeRotationY(yaw));
       b.xf.pushAbsolute(m);
-      b.m('concrete').boxAt(0, 0.09, 0, 0.32, 0.1, len / steps / 2, 1, 0x3f);
+      b.m('concrete').setUvShift(rng.range(0, 30), rng.range(0, 30));
+      // Chamfered, so the quay edge catches a bright arris against the water
+      // instead of terminating on a hard 90° line, and occasionally a section is
+      // broken away with the reinforcement showing.
+      b.m('concrete').chamferBox(0, 0.09, 0, 0.32, 0.1, len / steps / 2, 0.035, 1, rng, 0.05);
+      b.m('concrete').clearUvShift();
+      if (rng.bool(0.22)) {
+        const cl = len / steps / 2;
+        for (let r = 0; r < 3; r++) {
+          blockChip(b, 'rubble', rng.range(-0.25, 0.3), 0.2, rng.range(-cl, cl), rng.range(0.1, 0.22), rng);
+        }
+        for (let r = 0; r < 3; r++) {
+          b.m('rust').tube(
+            [new THREE.Vector3(-0.1, 0.19, -cl * 0.4 + r * 0.18), new THREE.Vector3(0.28, 0.24, -cl * 0.4 + r * 0.18)],
+            0.012, 3, 1,
+          );
+        }
+      }
       b.xf.pop();
+
+      /**
+       * THE APRON'S OWN HISTORY. A quay deck is the most worked surface on the
+       * map: expansion joints every few metres, patched excavations, oil under
+       * where the reach stacker parks, grit swept into the coping angle. Round 1
+       * called the deck *"a flat tan plane… and it gets smoother as it approaches
+       * the camera rather than gaining detail"*, which is the exact inversion of
+       * what a density gradient should do.
+       */
+      {
+        const jm = new THREE.Matrix4().makeTranslation(
+          (p0x + p1x) / 2 + nx * QUAY.depth / 2, deck + 0.012, (p0z + p1z) / 2 + nz * QUAY.depth / 2,
+        ).multiply(new THREE.Matrix4().makeRotationY(Math.atan2(p1x - p0x, p1z - p0z)));
+        b.xf.pushAbsolute(jm);
+        // Expansion joints: a shallow recessed strip across the apron.
+        b.m('rubble').boxAt(0, -0.008, 0, QUAY.depth / 2 - 0.4, 0.012, 0.045, 1, 0x3f);
+        // Two patched excavations of a different mix, proud by a centimetre.
+        for (let p = 0; p < 2; p++) {
+          const pw = rng.range(0.9, 2.4);
+          const pl = rng.range(0.8, 2.0);
+          b.m('sandstone').setUvShift(rng.range(0, 30), rng.range(0, 30));
+          b.m('sandstone').chamferBox(
+            rng.range(-QUAY.depth / 2 + 3, QUAY.depth / 2 - 3), 0.006, rng.range(-len / steps / 2, len / steps / 2),
+            pw, 0.014, pl, 0.01, 0.6, rng, 0.12,
+          );
+          b.m('sandstone').clearUvShift();
+        }
+        // Aggregate and swept grit, densest toward the coping.
+        for (let s2 = 0; s2 < 14; s2++) {
+          const u = rng.next();
+          const across = -QUAY.depth / 2 + (1 - Math.sqrt(u)) * QUAY.depth * 0.55 + 0.3;
+          const along = rng.range(-len / steps / 2, len / steps / 2);
+          if (rng.bool(0.45)) blockChip(b, rng.bool(0.5) ? 'rubble' : 'sand', across, -0.006, along, rng.range(0.05, 0.16), rng);
+          else {
+            const s3 = rng.range(0.04, 0.11);
+            rock(b, 'sand', across, -0.004 + s3 * 0.3, along, s3, s3 * 0.4, s3 * 1.2, rng, 5);
+          }
+        }
+        b.xf.pop();
+      }
     }
     // ONE collider for the whole apron segment plus its wall.
     const mx = (a.x + c.x) / 2 + nx * QUAY.depth / 2;
@@ -204,6 +310,40 @@ export function buildCrane(b: LevelBuild, x: number, z: number, yaw: number, hei
       });
     }
   }
+  /**
+   * WHERE THE CRANE MEETS THE QUAY.
+   *
+   * A 900-tonne machine standing on a concrete apron does not meet it on a clean
+   * line: there is a cast pad proud of the deck, a grout course under the sill,
+   * spalled concrete around the rail chairs and forty years of grit swept into
+   * the angle. Round 1's harbour critique named the leg pads specifically as one
+   * of the frame's hard geometric intersections.
+   */
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      const px = sx * span;
+      const pz = sz * legZ;
+      b.m('concrete').setUvShift(rng.range(0, 30), rng.range(0, 30));
+      b.m('concrete').chamferBox(px, 0.11, pz, 1.55, 0.12, 1.8, 0.04, 1, rng, 0.05);
+      b.m('concrete').chamferBox(px, 0.23, pz, 1.15, 0.09, 1.35, 0.03, 1, rng, 0.06);
+      b.m('concrete').clearUvShift();
+      // Holding-down bolts through the pad — human scale on a huge machine.
+      for (const bx of [-1, 1]) for (const bz of [-1, 1]) {
+        b.m('rust').cylinder(px + bx * 1.05, 0.22, pz + bz * 1.3, 0.055, 0.055, 0.14, 6, 1, true, false);
+      }
+      for (let i = 0; i < 7; i++) {
+        const a = rng.range(0, Math.PI * 2);
+        const r = rng.range(1.5, 3.4);
+        blockChip(b, rng.bool(0.5) ? 'rubble' : 'sand', px + Math.cos(a) * r, 0.02, pz + Math.sin(a) * r * 1.2, rng.range(0.09, 0.24), rng);
+      }
+      for (let i = 0; i < 5; i++) {
+        const a = rng.range(0, Math.PI * 2);
+        const r = rng.range(0.9, 2.6);
+        const s = rng.range(0.07, 0.17);
+        rock(b, 'sand', px + Math.cos(a) * r, 0.02 + s * 0.3, pz + Math.sin(a) * r * 1.2, s, s * 0.45, s * 1.1, rng, 5);
+      }
+    }
+  }
   // Portal beam and the sill bracing between leg pairs.
   for (const sz of [-1, 1]) {
     truss(
@@ -229,19 +369,161 @@ export function buildCrane(b: LevelBuild, x: number, z: number, yaw: number, hei
   truss(b, 'steel', new THREE.Vector3(span * 0.35, boomY, 0), apex, 1.2, 4, 0.08);
   b.m('steel').tube([apex.clone(), new THREE.Vector3(-span * 0.4 - 29, boomY - 1.3, 0)], 0.055, 4, 1);
   b.m('steel').tube([apex.clone(), new THREE.Vector3(span * 0.4 + 14, boomY - 0.6, 0)], 0.055, 4, 1);
-  // Machinery house, counterweight and the operator cab under the boom.
-  b.solid('paint', span * 0.4 + 7, boomY + 1.6, 0, 3.2, 1.6, 2.4, { groundY: 0, noBlock: true, noCover: true });
-  b.solid('steel', span * 0.4 + 12.5, boomY - 1.9, 0, 1.6, 1.2, 2.0, { groundY: 0, noBlock: true, noCover: true });
-  b.solid('paint', -span * 0.4 - 8, boomY - 3.4, 0, 1.1, 1.0, 1.3, { groundY: 0, noBlock: true, noCover: true });
-  b.m('glass').boxAt(-span * 0.4 - 8, boomY - 3.4, 1.32, 1.0, 0.7, 0.03, 1, 0x3f);
-  // Hoist cables and the spreader, parked low.
+  /**
+   * THE TOP WORKS — machinery house, counterweight, cab, trolley and load.
+   *
+   * Round 1's atmosphere critique of BRAVO was, in full: *"the boxes slung under
+   * the gantries are untextured flat-shaded cuboids… Worse, most are unsupported:
+   * no hoist cable, no spreader bar and no trolley above them. They are literally
+   * floating."* Every one of those was this block. Backlit at 40 m up, a lattice
+   * truss washes out into a blown sky while a dark cuboid does not, so anything
+   * up here that is not EXPLICITLY carried by something opaque reads as floating
+   * even when it is geometrically resting on steel.
+   *
+   * So: every mass above gets a visible saddle, hanger or gantry that is thicker
+   * than a truss chord, and the machinery gets the ribs, walkway, handrail and
+   * door that separate a machinery house from a box.
+   */
+  const houseX = span * 0.4 + 7;
+
+  // Saddle: two deep plate girders across the backreach that the house sits on,
+  // plus the deck between them. This is the opaque thing that carries the mass.
   for (const sz of [-1, 1]) {
-    b.m('steel').tube(
-      [new THREE.Vector3(-span * 0.4 - 14, boomY - 1.0, sz * 0.9), new THREE.Vector3(-span * 0.4 - 14, 7.5, sz * 0.9)],
-      0.03, 3, 1,
-    );
+    b.m('steel').boxAt(houseX, boomY - 0.1, sz * 2.3, 3.6, 0.42, 0.16, 1, 0x3f);
   }
-  b.solid('rust', -span * 0.4 - 14, 6.7, 0, 3.0, 0.35, 1.3, { groundY: 0, noBlock: true, noCover: true });
+  b.m('steel').boxAt(houseX, boomY - 0.06, 0, 3.7, 0.08, 2.4, 1, 0x3f);
+  for (const sx of [-1, 1]) {
+    b.m('steel').boxAt(houseX + sx * 3.5, boomY - 0.6, 0, 0.16, 0.55, 2.3, 1, 0x3f);
+  }
+
+  // Machinery house: a ribbed box with a shallow roof, a door, louvred vents and
+  // a walkway with a handrail all the way round.
+  const hh = 1.55;
+  b.m('paint').setUvShift(rng.range(0, 40), rng.range(0, 40));
+  b.solid('paint', houseX, boomY + hh, 0, 3.2, hh, 2.2, { groundY: 0, noBlock: true, noCover: true });
+  for (let i = 0; i <= 10; i++) {
+    const px = houseX - 3.2 + (i / 10) * 6.4;
+    for (const sz of [-1, 1]) b.m('paint').boxAt(px, boomY + hh, sz * 2.26, 0.07, hh - 0.12, 0.06, 1, 0x3f);
+  }
+  b.m('paint').clearUvShift();
+  // Roof: a slab with a proud drip lip, and a pair of extract cowls.
+  b.m('steel').boxAt(houseX, boomY + hh * 2 + 0.07, 0, 3.4, 0.07, 2.4, 1, 0x3f);
+  for (const sx of [-1.6, 1.4]) {
+    b.m('rust').cylinder(houseX + sx, boomY + hh * 2 + 0.14, 0.4, 0.34, 0.34, 0.55, 8, 1, true, false);
+    b.m('rust').cylinder(houseX + sx, boomY + hh * 2 + 0.69, 0.4, 0.44, 0.1, 0.22, 8, 1, true, false);
+  }
+  // Door and louvres on the seaward face.
+  b.m('rust').boxAt(houseX - 2.2, boomY + 0.95, -2.28, 0.45, 0.95, 0.05, 1, 0x3f);
+  for (let i = 0; i < 5; i++) {
+    b.m('steel').boxAt(houseX + 0.9, boomY + hh + 0.5 - i * 0.16, -2.3, 0.75, 0.05, 0.05, 1, 0x3f);
+  }
+  // Walkway + handrail around the house: the detail that gives it human scale.
+  b.m('steel').boxAt(houseX, boomY - 0.02, -2.95, 3.6, 0.05, 0.75, 1, 0x3f);
+  railing(b, houseX - 3.6, boomY + 0.03, -3.65, houseX + 3.6, boomY + 0.03, -3.65, 1.05, rng, 'steel');
+
+  /**
+   * COUNTERWEIGHT. A stack of cast slabs in a fabricated cradle, HUNG from two
+   * plate hangers that reach up over the boom's top chord and are visibly wider
+   * than it. Round 1 had a bare cuboid sitting in mid-air 1.3 m below the boom.
+   */
+  const cwX = span * 0.4 + 12.5;
+  const cwTop = boomY - 0.55;
+  for (const sz of [-1, 1]) {
+    b.m('steel').boxAt(cwX, cwTop - 0.5, sz * 2.05, 1.85, 1.1, 0.14, 1, 0x3f);
+  }
+  b.m('steel').boxAt(cwX, cwTop + 0.28, 0, 1.9, 0.16, 2.15, 1, 0x3f);
+  for (let i = 0; i < 4; i++) {
+    b.m('rust').setUvShift(rng.range(0, 40), rng.range(0, 40));
+    b.m('rust').chamferBox(cwX, cwTop - 0.25 - i * 0.42, 0, 1.62, 0.19, 1.85, 0.05, 1, rng, 0.04);
+    b.m('rust').clearUvShift();
+  }
+  b.m('steel').boxAt(cwX, cwTop - 1.95, 0, 1.9, 0.1, 2.0, 1, 0x3f);
+
+  /**
+   * OPERATOR CAB, on a visible trolley frame that rides the jib. Two box beams
+   * up to the boom's bottom chord, a hanger plate, and a glazed nose with a
+   * floor window — a ship-to-shore driver looks straight DOWN at the hatch.
+   */
+  const cabX = -span * 0.4 - 8;
+  b.m('steel').boxAt(cabX, boomY - 1.35, 0, 1.5, 0.22, 1.9, 1, 0x3f);
+  for (const sz of [-1, 1]) {
+    b.m('steel').boxAt(cabX, boomY - 2.2, sz * 1.05, 0.16, 0.75, 0.16, 1, 0x3f);
+  }
+  b.m('paint').setUvShift(rng.range(0, 40), rng.range(0, 40));
+  b.solid('paint', cabX, boomY - 3.5, 0, 1.15, 1.05, 1.35, { groundY: 0, noBlock: true, noCover: true });
+  b.m('paint').clearUvShift();
+  b.m('glass').boxAt(cabX, boomY - 3.4, 1.38, 1.02, 0.72, 0.04, 1, 0x3f);
+  b.m('glass').boxAt(cabX, boomY - 4.57, 0.55, 0.9, 0.03, 0.7, 1, 0x3f);
+  for (const sx of [-1, 1]) b.m('steel').boxAt(cabX + sx * 1.17, boomY - 3.5, 0.9, 0.05, 1.05, 0.05, 1, 0x3f);
+
+  /**
+   * THE HOIST: trolley, four falls of wire, spreader, and a container on it.
+   *
+   * This is the single element that turns three towers into three working
+   * machines, and it is also the answer to "floating boxes": the load is
+   * suspended, and every viewer can trace the load → spreader → four cables →
+   * trolley → boom chain without thinking about it.
+   */
+  const trX = -span * 0.4 - 14;
+  const trolleyY = boomY - 1.15;
+  b.m('steel').boxAt(trX, trolleyY, 0, 1.5, 0.3, 1.7, 1, 0x3f);
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    b.m('steel').cylinder(trX + sx * 1.15, trolleyY + 0.3, sz * 1.35, 0.3, 0.3, 0.16, 8, 1, true, false);
+  }
+  const spreaderY = 8.2;
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      b.m('steel').tube(
+        [
+          new THREE.Vector3(trX + sx * 1.2, trolleyY - 0.28, sz * 1.0),
+          new THREE.Vector3(trX + sx * 2.55, spreaderY + 0.3, sz * 1.05),
+        ],
+        0.035, 4, 1,
+      );
+    }
+  }
+  // Head block and spreader beam.
+  b.m('rust').boxAt(trX, spreaderY + 0.55, 0, 0.7, 0.22, 1.1, 1, 0x3f);
+  b.m('rust').setUvShift(rng.range(0, 40), rng.range(0, 40));
+  b.m('rust').boxAt(trX, spreaderY, 0, 3.2, 0.3, 0.55, 1, 0x3f);
+  for (const sx of [-1, 1]) {
+    b.m('rust').boxAt(trX + sx * 2.95, spreaderY - 0.05, 0, 0.35, 0.42, 1.25, 1, 0x3f);
+    b.m('steel').boxAt(trX + sx * 2.95, spreaderY + 0.32, 0, 0.16, 0.4, 0.16, 1, 0x3f);
+  }
+  b.m('rust').clearUvShift();
+  // The load itself: a corrugated container twist-locked under the spreader, so
+  // the silhouette overhead is a box being MOVED rather than a box left in the
+  // sky. Emitted in the crane's own frame and deliberately WITHOUT a collider or
+  // a nav deck — nothing 30 m up on a wire is standable, and `dressing.container`
+  // gives both, which is why this is not a call to it.
+  {
+    const load: MatKey = rng.pick(['rust', 'paint', 'steel'] as MatKey[]);
+    const L = 6.06;
+    const W = 1.22;
+    const H = 1.3;
+    const cy = spreaderY - 0.32 - H;
+    const gm = b.m(load);
+    gm.setUvShift(rng.range(0, 40), rng.range(0, 40));
+    gm.boxAt(trX, cy, 0, L / 2, H, W, 1, 0x3f);
+    const ribs = Math.round(L / 0.32);
+    for (let i = 0; i <= ribs; i++) {
+      const px = trX - L / 2 + (i / ribs) * L;
+      for (const sz of [1, -1]) gm.boxAt(px, cy, sz * (W + 0.025), 0.06, H - 0.09, 0.03, 1, 0x3f);
+    }
+    for (const sy of [1, -1]) gm.boxAt(trX, cy + sy * (H - 0.06), 0, L / 2 + 0.02, 0.05, W + 0.03, 1, 0x3f);
+    gm.clearUvShift();
+    b.m('rust').boxAt(trX - L / 2 - 0.03, cy, 0, 0.03, H - 0.05, W - 0.04, 1, 0x3f);
+    for (const s of [-0.6, -0.2, 0.2, 0.6]) {
+      b.m('rust').boxAt(trX - L / 2 - 0.06, cy, s * W, 0.03, H - 0.12, 0.035, 1, 0x3f);
+    }
+    for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+      b.m('rust').boxAt(trX + sx * (L / 2 - 0.09), cy + sy * (H - 0.09), sz * (W - 0.09), 0.1, 0.1, 0.1, 1, 0x3f);
+    }
+    // Twist locks: the four short pins that actually hold it on the spreader.
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+      b.m('steel').boxAt(trX + sx * (L / 2 - 0.12), cy + H + 0.16, sz * (W - 0.12), 0.07, 0.18, 0.07, 1, 0x3f);
+    }
+  }
   // Access stair up the landward leg, and a walkway you can actually stand on.
   stairs(b, span * 0.72, 0, legZ + 5.6, Math.PI, 1.1, 6.2, 5.0, 'steel', rng, 2);
   b.xf.pop();
@@ -268,6 +550,10 @@ export function buildWarehouse(
 
   const clad: MatKey = rng.bool(0.5) ? 'rust' : 'steel';
   const plinth: MatKey = 'concrete';
+  // Per-shed UV phase, so three sheds on one apron do not carry the same streak
+  // down the same rib. Cleared at the end of the local frame.
+  b.m(clad).setUvShift(rng.range(0, 50), rng.range(0, 50));
+  b.m(plinth).setUvShift(rng.range(0, 50), rng.range(0, 50));
   // Plinth and slab.
   b.m(plinth).boxAt(0, -0.6, 0, hx + 0.2, 1.0, hz + 0.2, 0.5, 0x3f);
   b.deck(x, g + 0.42, z, hx - 0.6, hz - 0.6, yaw, 0);
@@ -375,6 +661,8 @@ export function buildWarehouse(
     const pz = rng.range(-hz + 1.4, hz - 1.4);
     if (rng.bool(0.4)) b.m('wood').boxAt(px, 0.5, pz, rng.range(0.6, 1.1), 0.1, rng.range(0.5, 0.9), 1, 0x3f);
   }
+  b.m(clad).clearUvShift();
+  b.m(plinth).clearUvShift();
   b.xf.pop();
 
   // Props inside, in world space so their colliders land right.
@@ -404,7 +692,7 @@ export function buildWarehouse(
       { x: x + (hx + 0.3) * Math.cos(yaw) + (-hz - 0.3) * Math.sin(yaw), z: z - (hx + 0.3) * Math.sin(yaw) + (-hz - 0.3) * Math.cos(yaw) },
       { x: x + (-hx - 0.3) * Math.cos(yaw) + (-hz - 0.3) * Math.sin(yaw), z: z - (-hx - 0.3) * Math.sin(yaw) + (-hz - 0.3) * Math.cos(yaw) },
     ],
-    ground, rng, { amount: 1.05 },
+    ground, rng, { amount: 1.3, blockFraction: 0.5 },
   );
 }
 

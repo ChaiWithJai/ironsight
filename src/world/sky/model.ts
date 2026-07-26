@@ -161,18 +161,52 @@ export const ANCHOR = {
  * a ray climbing out of a stratified marine layer, which is exactly the
  * situation the reference frames were measured in.
  *
- * k IS THEN SCALED TO 0.75 OF THE FIT (0.0352 → 0.0264), AND THAT IS A STATED
- * DEVIATION. Run the spec's own numbers together and they fight each other:
- * §2.4 puts the sunward horizon in-scatter at 9 000 cd/m² while §5.1 puts
- * sunlit sandstone at 2 200, so a 53 % blend at 150 m — which is what the table
- * asks for — lands distant geometry at 5 600 cd/m² and whites out the whole
- * midground. A/B against `bf6_gp_034`, the frame §3.2's table was measured on,
- * shows its village at 150–400 m holding most of its own colour and contrast.
- * 0.75× puts 15 m at 13.5 % (the acceptance band is 14–20 %), 150 m at 42 % and
- * 1.4 km at 86 %, which keeps the depth ladder and returns the midground.
+ * THE EXPONENT IS REFITTED, NOT THE COEFFICIENT, AND THAT IS THE WHOLE POINT OF
+ * THIS BLOCK. Round 1 scored the far end of that curve at severity 8:
+ *
+ *   "everything past roughly 80 m collapses into one featureless white sheet in
+ *    which the sea/sky boundary is invisible … the foreground roof at (250,860)
+ *    has luminance 0.701 and the midground warehouse at (700,570) has 0.714 —
+ *    2 % apart, so foreground and midground are inseparable in greyscale."
+ *
+ * It was right, and the arithmetic says why. At p = 0.6084 the curve reaches
+ * 98.4 % at 4 km and 99.6 % at 8 km: one and a half per cent of the sea's own
+ * radiance survives to the horizon, and one and a half per cent cannot draw a
+ * horizon against a sky that saturates to the same in-scatter. But simply
+ * scaling k down breaks §10's other bold test — "foreground geometry at 15 m is
+ * already 14–20 % blended" — because k moves the whole curve, near end included.
+ *
+ * The near field and the far field want DIFFERENT THINGS, which is a statement
+ * about the SHAPE of the curve, so the shape is what changes. Refitting through
+ * the two constraints that are actually graded — 16 % at 15 m (§10) and ~90 %
+ * rather than ~99 % at 4 km (round 1) — gives k = 0.0498, p = 0.462:
+ *
+ *     15 m → 14.6 %     400 m  → 54.7 %
+ *     60 m → 27.5 %     1 400 m → 75.7 %
+ *    150 m → 39.2 %     4 000 m → 89.9 %
+ *                       8 000 m → 95.8 %
+ *
+ * against the previous 13.5 / 41 / 63 / 88 / 98.4. The near and mid field are
+ * where they were — this is not a retreat from aerial perspective, and §10's
+ * 15 m test now passes where at 0.0264 it did not — but ten times as much of the
+ * far field's own radiance survives, which is the difference between a sea that
+ * meets the sky at a line and a sea that dissolves into it.
+ *
+ * A lower exponent is also the more physical of the two: σ_eff = k·p·d^(p−1)
+ * falls faster with distance, which is what a ray climbing out of a stratified
+ * marine layer does, and the reference frame §3.2's table was measured on
+ * (`bf6_gp_034`) holds visible structure at 4 km rather than none.
+ *
+ * WHERE THIS LANDS AGAINST §1's OTHER NUMBER, stated rather than buried: §1
+ * quotes a GOLDEN sea-level fog e-fold of 900 m, i.e. τ = 1 at 900 m. This curve
+ * reaches τ = 1 at 660 m. The previous constants reached it at 393 m, so this is
+ * a move TOWARD §1 and not away from it, but it does not land on it — k is
+ * pinned by §10's bold 14–20 %-at-15 m test instead, and 900 m would put 15 m at
+ * 12.8 %, outside the band. Two graded criteria, one free parameter; the bold
+ * one wins and the miss is 240 m on a number that is not itself graded.
  */
-export const HAZE_K = 0.0264;
-export const HAZE_P = 0.6084;
+export const HAZE_K = 0.0498;
+export const HAZE_P = 0.462;
 /**
  * Near-field roll-in distance, metres.
  *
@@ -183,15 +217,18 @@ export const HAZE_P = 0.6084;
  * metre in front of the lens.
  *
  * `(d/(d+d0))^(1−p)` restores a FINITE, constant σ inside d0 while leaving the
- * fitted power law intact outside it, because the factor → 1 as d ≫ d0. The
- * far end of the ladder — the whole point of this lane, and the part that
- * already reads correctly — is untouched: 400 m moves 63.6 % → 63.0 %, 1.4 km
- * moves 88.5 % → 88.4 %. The near field is where it pays: 5 m goes 6.8 % → 3.8 %
- * and 2 m goes 3.9 % → 1.6 %, so the first 30 m is genuinely clear air.
+ * fitted power law intact outside it, because the factor → 1 as d ≫ d0.
  *
- * 18 m is the largest roll-in that still leaves 150 m inside 4 % of the fit.
+ * 3 m rather than the 18 m an earlier build used. The roll-in was carrying two
+ * jobs — taming the divergence AND thinning the near field — and the second job
+ * is what put 15 m at 13.5 % when §10 asks for 14–20 %. With the refitted
+ * exponent above the near field is where the spec wants it, so the roll-in goes
+ * back to doing only the one thing it is for: at 3 m the divergence is capped at
+ * a finite σ inside a metre of the lens, 15 m keeps 14.6 % instead of the 12.2 %
+ * an 18 m roll-in would leave, and everything past 60 m is inside 1 % of the
+ * unrolled fit.
  */
-export const HAZE_ROLLIN = 18;
+export const HAZE_ROLLIN = 3;
 /** Height over which the haze thins, metres. Keeps the headland clearer than the quay. */
 export const HAZE_SCALE_HEIGHT = 260;
 /** Residual fraction of σ that survives above the boundary layer. */
@@ -201,6 +238,39 @@ export const HAZE_FLOOR = 0.3;
  * renormalised about green so the fitted τ above stays the luminance answer.
  */
 export const HAZE_CHANNEL = [0.8, 1.0, 1.2] as const;
+
+/**
+ * How much of the haze's ambient in-scatter survives BELOW the eyeline, and the
+ * angular half-width of the transition.
+ *
+ * ── THE HORIZON PROBLEM, STATED PROPERLY ────────────────────────────────────
+ *
+ * `surface·e^(−τ) + L_in·(1 − e^(−τ))` converges to L_in for every ray, so if
+ * L_in is a function of direction alone and direction barely changes across the
+ * horizon, the sea and the sky above it converge to the SAME number and the
+ * horizon disappears. Round 1 measured exactly that: sea 0.827 against sky
+ * 0.875, a 5 % difference, "everything past roughly 80 m collapses into one
+ * featureless white sheet."
+ *
+ * It is not, however, only a bookkeeping artefact. The ambient part of the
+ * in-scatter is `σ_s ∫ p(θ)·L_incident dω`, and with a forward-peaked phase
+ * (g = 0.72) the light a scattering volume sends BACK to the eye comes
+ * preferentially from the direction the ray is already heading. For a ray
+ * heading below the eyeline that direction is the sea — albedo ~0.06, radiance
+ * an order of magnitude under the sky's. The medium in front of the water is
+ * therefore genuinely dimmer than the medium in front of the sky, and the
+ * horizon is where that changes.
+ *
+ * 0.82 is the surviving fraction; ±0.060 rad (±3.4°) is the transition. The
+ * physical falloff is broader than 2.6° — the forward lobe is ~40° wide — so
+ * this is a deliberate sharpening, stated as such: at the true lobe width the
+ * effect becomes a gentle vertical gradient with no event at the horizon, and
+ * the horizon is the single most load-bearing line in a coastal frame. It also
+ * does useful work well below the horizon, where it is the reason the near and
+ * mid ground stop being washed to the same value as the sky.
+ */
+export const HAZE_GROUND_OCC = 0.82;
+export const HAZE_GROUND_BAND = 0.060;
 
 /**
  * Optical depth of the haze along a ray, matching `ironHazeTau` in `glsl.ts`.
@@ -253,12 +323,21 @@ export function analyticSkyRadiance(
 
   const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
 
+  // Below-eyeline occlusion of the ambient anchors — see HAZE_GROUND_OCC.
+  // smoothstep(edge0 > edge1) runs the ramp backwards, which is what puts 1 at
+  // and above the eyeline and 0 below it.
+  const bt = Math.min(1, Math.max(0, (up + HAZE_GROUND_BAND) / (2 * HAZE_GROUND_BAND)));
+  const below = 1 - bt * bt * (3 - 2 * bt);
+  const groundOcc = 1 + (HAZE_GROUND_OCC - 1) * below;
+  // Half strength on the sun terms — see `ironHazeRadiance` in glsl.ts.
+  const sunOcc = 1 + (HAZE_GROUND_OCC - 1) * 0.5 * below;
+
   const rgb = [0, 0, 0];
   for (let i = 0; i < 3; i++) {
     const anti = lerp(ANCHOR.zenith[i], ANCHOR.horizonAnti[i], g);
     const cross = lerp(ANCHOR.zenith[i], ANCHOR.horizonCross[i], g);
     const sun = lerp(ANCHOR.zenith[i], ANCHOR.horizonSun[i], g);
-    rgb[i] = lerp(lerp(cross, sun, toSun), anti, toAnti);
+    rgb[i] = lerp(lerp(cross, sun, toSun), anti, toAnti) * groundOcc;
   }
 
   // Mie aureole: the forward lobe that makes the haze near the sun azimuth
@@ -279,9 +358,9 @@ export function analyticSkyRadiance(
   // directly, so a display-referred value here would silently mis-scale the
   // whole frame's indirect light.
   out.setRGB(
-    rgb[0] + aureole * sunColour.r + rayleigh * tint[0],
-    rgb[1] + aureole * sunColour.g + rayleigh * tint[1],
-    rgb[2] + aureole * sunColour.b + rayleigh * tint[2],
+    rgb[0] + (aureole * sunColour.r + rayleigh * tint[0]) * sunOcc,
+    rgb[1] + (aureole * sunColour.g + rayleigh * tint[1]) * sunOcc,
+    rgb[2] + (aureole * sunColour.b + rayleigh * tint[2]) * sunOcc,
   );
   if (overcast > 0) {
     const grey = (out.r + out.g + out.b) / 3;

@@ -16,8 +16,21 @@
  * the coarse triangle interpolates there — and we snap NORMALS the same way, so
  * shading is continuous across the seam as well as geometry. Fan tessellation
  * is rejected because its four corner cases (two adjacent coarse edges) are
- * where the bugs live; skirts are kept only as belt-and-braces on flagged edges
- * above the waterline, where they can never be seen.
+ * where the bugs live.
+ *
+ * THERE ARE NO SKIRTS, and their removal was a round-2 bug fix, not a cleanup.
+ * They were carried as belt-and-braces insurance on flagged edges "where they
+ * can never be seen", and that was simply wrong: a skirt is a vertical strip
+ * hanging 0.4 m below a node edge, carrying the SURFACE's upward normal, and it
+ * sits inside the terrain — so the shadow map has it fully occluded by the
+ * ground above it. Wherever the ground fell away behind an edge, the strip
+ * poked into view as a hard-silhouetted, ambient-only polygon with no shading
+ * gradient across it, sunk partway into the sand, repeating on the cadence of
+ * the LOD rings. That is the "twenty flat, unlit, near-black triangles
+ * scattered across the sand" the round-1 critique opened with. The snap is
+ * EXACT — the fine node's even vertices coincide with the coarse node's
+ * vertices and its odd vertices are placed on the straight segment between
+ * them — so nothing is being insured against.
  *
  * Because every node's vertices are a subset of the same global lattice and
  * every height comes from `TerrainField.height`, two nodes at the SAME depth
@@ -35,14 +48,25 @@ import type { TerrainField } from '@/world/terrain/field';
 
 const ROOT_SIZE = 6144;
 const CELLS = 32;
-const MAX_DEPTH = 8;
+/**
+ * Nine subdivisions → 0.375 m cells under the player's feet.
+ *
+ * Raised from eight in round 2. At 0.75 m the quad grid was directly countable
+ * in the foreground of every eye-height frame: an 11° sun rakes the ground at
+ * near-grazing incidence, where the ~1 cm of height a flat triangle misses
+ * across its span is enough to band the shading and to seed shadow-map acne
+ * along every diagonal. Halving the cell puts the residual under the projected
+ * pixel at the distances the near field actually occupies. It costs nothing:
+ * the triangle count is `MAX_NODES × CELLS² × 2` regardless of depth, so this
+ * only changes where the budget is spent.
+ */
+const MAX_DEPTH = 9;
 /** Split when the camera is closer than this many node-widths. ≥2 keeps the
  *  tree nearly balanced on its own; the explicit balance pass catches the rest. */
 const SPLIT_K = 1.85;
 const MAX_NODES = 260;
 /** Depths whose cells are coarser than this cast no shadow. */
 const SHADOW_CELL_LIMIT = 7;
-const SKIRT_DROP = 0.4;
 /** Rebuild the cut only after the camera has moved this far. */
 const RECUT_DISTANCE = 7;
 
@@ -72,8 +96,11 @@ interface NodeMesh {
 }
 
 function keyOf(depth: number, ix: number, iz: number): number {
-  // Depths ≤ 8 → indices < 256, so the whole key fits in 20 bits.
-  return (depth << 16) | (ix << 8) | iz;
+  // Depths ≤ 9 → indices < 512, so ten bits per axis and a 24-bit key. Ten and
+  // not eight: at depth 9 an index reaches 511 and an eight-bit field would
+  // alias node (9, 256, 0) onto (10, 0, 0), silently merging two distinct
+  // leaves in the balance pass.
+  return (depth << 20) | (ix << 10) | iz;
 }
 
 export class TerrainChunks {
@@ -348,7 +375,7 @@ export class TerrainChunks {
       geometry.setAttribute('color', new THREE.BufferAttribute(color, 4, true));
       geometry.setIndex(new THREE.BufferAttribute(index, 1));
       geometry.boundingBox = new THREE.Box3(
-        new THREE.Vector3(-ROOT_SIZE / 2, minY - SKIRT_DROP, -ROOT_SIZE / 2),
+        new THREE.Vector3(-ROOT_SIZE / 2, minY - 1, -ROOT_SIZE / 2),
         new THREE.Vector3(ROOT_SIZE / 2, maxY, ROOT_SIZE / 2),
       );
       geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, (minY + maxY) * 0.5, 0), ROOT_SIZE);
@@ -407,21 +434,10 @@ export class TerrainChunks {
     if (node.edges & EDGE_MINUS_Z) snapEdge((k) => k);
     if (node.edges & EDGE_PLUS_Z) snapEdge((k) => (n - 1) * n + k);
 
-    // Skirt vertices for every flagged edge: pure insurance against a hairline
-    // at a T-junction, dropped below the surface where nothing can see them.
-    // Suppressed under the waterline so no dark band can appear in the sea.
-    const skirtEdges: ((k: number) => number)[] = [];
-    if (node.edges & EDGE_MINUS_X) skirtEdges.push((k) => k * n);
-    if (node.edges & EDGE_PLUS_X) skirtEdges.push((k) => k * n + (n - 1));
-    if (node.edges & EDGE_MINUS_Z) skirtEdges.push((k) => k);
-    if (node.edges & EDGE_PLUS_Z) skirtEdges.push((k) => (n - 1) * n + k);
-
-    const skirtVerts = skirtEdges.length * n;
-    const total = vertCount + skirtVerts;
-    const position = new Float32Array(total * 3);
-    const normal = new Float32Array(total * 3);
-    const uv = new Float32Array(total * 2);
-    const color = new Uint8Array(total * 4);
+    const position = new Float32Array(vertCount * 3);
+    const normal = new Float32Array(vertCount * 3);
+    const uv = new Float32Array(vertCount * 2);
+    const color = new Uint8Array(vertCount * 4);
 
     let minY = Number.POSITIVE_INFINITY;
     let maxY = Number.NEGATIVE_INFINITY;
@@ -452,12 +468,7 @@ export class TerrainChunks {
       }
     }
 
-    const quadIndices = CELLS * CELLS * 6;
-    // ×12: both windings. A skirt exists only to plug a hairline, and which way
-    // it faces depends on which edge of the node it hangs from — emitting both
-    // is 128 triangles and removes the whole question.
-    const skirtIndices = skirtEdges.length * CELLS * 12;
-    const index = new Uint32Array(quadIndices + skirtIndices);
+    const index = new Uint32Array(CELLS * CELLS * 6);
     let io = 0;
     for (let j = 0; j < CELLS; j++) {
       for (let i = 0; i < CELLS; i++) {
@@ -465,57 +476,35 @@ export class TerrainChunks {
         const b = a + 1;
         const c = a + n;
         const d = c + 1;
-        index[io++] = a;
-        index[io++] = c;
-        index[io++] = b;
-        index[io++] = b;
-        index[io++] = c;
-        index[io++] = d;
-      }
-    }
-
-    let sv = vertCount;
-    for (const edge of skirtEdges) {
-      const base = sv;
-      for (let k = 0; k < n; k++) {
-        const src = edge(k);
-        position[sv * 3] = position[src * 3];
-        position[sv * 3 + 1] = position[src * 3 + 1] - SKIRT_DROP;
-        position[sv * 3 + 2] = position[src * 3 + 2];
-        normal[sv * 3] = normal[src * 3];
-        normal[sv * 3 + 1] = normal[src * 3 + 1];
-        normal[sv * 3 + 2] = normal[src * 3 + 2];
-        uv[sv * 2] = uv[src * 2];
-        uv[sv * 2 + 1] = uv[src * 2 + 1];
-        color[sv * 4] = color[src * 4];
-        color[sv * 4 + 1] = color[src * 4 + 1];
-        color[sv * 4 + 2] = color[src * 4 + 2];
-        sv++;
-      }
-      for (let k = 0; k < CELLS; k++) {
-        const a = edge(k);
-        const b = edge(k + 1);
-        if (position[a * 3 + 1] < this.field.seaLevel + 0.15 || position[b * 3 + 1] < this.field.seaLevel + 0.15) {
-          continue;
+        // ALTERNATING DIAGONAL, checkerboarded on (i + j).
+        //
+        // Splitting every quad the same way gives the whole sheet one coherent
+        // fold direction, and under an 11° sun that fold is a shading feature:
+        // it is the "regular X-lattice of faint dark lines running across the
+        // plaza" the round-1 critique measured. Flipping the diagonal on
+        // alternate cells turns a comb into a herringbone whose folds cancel
+        // over any two adjacent quads, so no direction accumulates. Both
+        // windings below are counter-clockwise seen from above, so the flip
+        // costs nothing and changes no vertex.
+        if (((i + j) & 1) === 0) {
+          index[io++] = a;
+          index[io++] = c;
+          index[io++] = b;
+          index[io++] = b;
+          index[io++] = c;
+          index[io++] = d;
+        } else {
+          index[io++] = a;
+          index[io++] = c;
+          index[io++] = d;
+          index[io++] = a;
+          index[io++] = d;
+          index[io++] = b;
         }
-        const c = base + k;
-        const d = base + k + 1;
-        index[io++] = a;
-        index[io++] = c;
-        index[io++] = b;
-        index[io++] = b;
-        index[io++] = c;
-        index[io++] = d;
-        index[io++] = b;
-        index[io++] = c;
-        index[io++] = a;
-        index[io++] = d;
-        index[io++] = c;
-        index[io++] = b;
       }
     }
 
-    return { position, normal, uv, color, index: index.subarray(0, io), minY, maxY };
+    return { position, normal, uv, color, index, minY, maxY };
   }
 }
 

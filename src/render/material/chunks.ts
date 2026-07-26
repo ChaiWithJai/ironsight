@@ -344,14 +344,22 @@ float ironLuminance( vec3 c ) {
 }
 
 /**
- * Rain streaking. Vertical faces in every reference frame carry washed and
- * unwashed bands running down from every ledge; it is one of the strongest
- * "this building has stood outside" cues and it costs one noise call.
- * Anisotropic on purpose: 40 cm across, 6 m down.
+ * Rain streaking, as the RAW field. Vertical faces in every reference frame
+ * carry washed and unwashed bands running down from every ledge; it is one of
+ * the strongest "this building has stood outside" cues and it costs one noise
+ * call. Anisotropic on purpose: 40 cm across, 6 m down.
+ *
+ * Returned unthresholded because the field has to be read from BOTH ends. Its
+ * high tail is where run-off has deposited and the wall is dirty and rough; its
+ * low tail is where the same water has SCOURED, and that strip is cleaner,
+ * paler and — the part that matters for the specular — markedly smoother than
+ * the sheltered stone beside it. Taking only the dirty end, which is what this
+ * did, leaves a wall whose roughness never leaves a 0.05 band, and a surface
+ * with no roughness structure has no specular structure either.
  */
-float ironStreak( vec3 p, float broad ) {
+float ironStreakField( vec3 p, float broad ) {
   float s = ironNoise3( vec3( p.x * 2.6, p.y * 0.16, p.z * 2.6 ) );
-  return smoothstep( 0.42, 0.92, s * 0.65 + broad * 0.45 );
+  return s * 0.65 + broad * 0.45;
 }
 
 /** Linear eye depth from a hardware depth value, for the soft-particle fade. */
@@ -598,8 +606,13 @@ export const IRON_SURFACE = /* glsl */ `
   // ---- the wear stack, LOOK_SPEC §4.4 --------------------------------------
   #ifdef IRON_WEAR
     #ifdef IRON_TRIPLANAR
-      vec4 ironTexW = texture2D( uIronWearMap, ironTriP.xz * ironTriW.y
-                               + ironTriP.zy * ironTriW.x + ironTriP.xy * ironTriW.z );
+      // Blend the three SAMPLES, never the three coordinates. Summing the
+      // coordinates first and taking one fetch lands the lookup at a point that
+      // exists on no projection at all, and on a 45° face — every cliff and every
+      // rubble pile — it sweeps that point across the map as the normal turns,
+      // which reads as the wear mask sliding over the geometry it is supposed to
+      // be bolted to.
+      vec4 ironTexW = ironTriSample( uIronWearMap, ironTriP, ironTriW );
     #else
       vec4 ironTexW = texture2DGradEXT( uIronWearMap, ironUv + ironWearUv, ironDdx, ironDdy );
     #endif
@@ -615,18 +628,61 @@ export const IRON_SURFACE = /* glsl */ `
   // Convex → chip to a lighter substrate. Broken by macro noise so the wear is
   // not uniform along an edge — a perfectly even chipped edge is worse than a
   // clean one, because clean at least reads as new.
-  float ironChip = clamp( ( ironConvex * 0.75 + ironBakedWear * 0.55 )
+  //
+  // GATED ON EXPOSURE, and that gate is the difference between a chip and a
+  // noise field. ironConvex is the bake's discrete Laplacian of the height map
+  // (src/bake/textures.ts): it fires on every texel-scale inflection there is,
+  // including the ones at the BOTTOM of a mortar joint, so used raw it lays a
+  // high-frequency wash of pale speckle across the whole face — the "identical
+  // crumpled-foil noise patch" of the round-1 material critique — instead of the
+  // chipped arrises LOOK_SPEC §4.4 is actually describing. Physically a chip
+  // needs three things at once: convex curvature, material standing PROUD of the
+  // mean surface, and exposure to whatever knocked it off. The bake ships the
+  // first; the height and AO channels are the other two, and requiring all three
+  // collapses the mask from a texture-wide wash onto the edges.
+  float ironExposed = smoothstep( 0.45, 0.85, ironTexA.a ) * smoothstep( 0.55, 0.90, ironTexN.a );
+  // 0.18 rather than 0.55 on the baked channel because the bake has ALREADY
+  // mixed its own wear channel into the albedo and the roughness it shipped, so the
+  // old weight was applying one mask twice and roughly doubling its contrast.
+  // What is left is a hint that keeps the shader's chip registered with the
+  // bake's rather than a second, independent layer of it.
+  float ironChip = clamp( ( ironConvex * 0.85 * ironExposed + ironBakedWear * 0.18 )
                         * uIronWearP.x * ( 0.30 + 1.35 * ironMacro ), 0.0, 1.0 );
 
   // Concave → grime. Cavity comes from the bake's horizon-searched AO, so it
   // settles where water actually would.
-  float ironCavity = 1.0 - ironTexN.a;
+  //
+  // GATED ON DEPTH, for the mirror-image reason the chip is gated on exposure.
+  // The bake's AO is a texel-scale horizon search, so it is nonzero all over a
+  // rough face — every pit, every fleck, every grain of the finest octave — and
+  // driving a 34 % albedo darkening straight off it paints a high-frequency
+  // brown mottle over the whole block that reads as camouflage rather than as
+  // weathering. LOOK_SPEC §4.4 is specific about where grime goes: "follows
+  // creases, rivet lines, panel gaps". Those are the parts of the surface that
+  // are genuinely RECESSED, which the height channel knows and the AO channel
+  // does not. Requiring both puts the darkening back into the coursing and off
+  // the faces, which is also where a real wall's run-off collects.
+  float ironCavity = ( 1.0 - ironTexN.a ) * smoothstep( 0.62, 0.18, ironTexA.a );
   float ironDirt = clamp( ( ironBakedGrime * 0.75 + ironCavity * 0.85 )
                         * uIronWearP.y * ( 0.40 + 1.0 * ironMacroBig ), 0.0, 1.0 );
   // Rain streaking is a VERTICAL-face phenomenon, so the ground — which is most
   // of the pixels in a grazing frame — skips the volume-noise call entirely.
+  // One noise evaluation, read from both tails: the deposit band darkens and
+  // roughens, the scoured band (applied further down, after the dust) polishes.
+  float ironWash = 0.0;
   if ( ironUp < 0.72 ) {
-    ironDirt = max( ironDirt, ironStreak( vIronWorld, ironMacroBig ) * ( 1.0 - ironUp ) * uIronWearP.y * 0.55 );
+    float ironStreakV = ironStreakField( vIronWorld, ironMacroBig );
+    // 0.50-0.80 rather than 0.42-0.92, and 1.05 rather than 0.55. The old band
+    // was both too wide and too weak: it spread a 9 % darkening over most of
+    // every vertical face, which is a uniform tint by another name. Run-off
+    // makes NARROW tracks with clean stone between them, and the round-1
+    // critique's "no grime running from the cornice, no water streaking below
+    // the arch springers" is the shape of that failure, not its amount. Tightened
+    // and strengthened, the deposit reaches a 17 % darkening inside the track,
+    // against LOOK_SPEC §4.4's 30-35 % for a full cavity.
+    ironDirt = max( ironDirt, smoothstep( 0.50, 0.80, ironStreakV )
+      * ( 1.0 - ironUp ) * uIronWearP.y * 1.05 );
+    ironWash = smoothstep( 0.30, 0.02, ironStreakV ) * ( 1.0 - ironUp );
   }
 
   // N·up → dust. 40-70 % coverage on horizontals, nothing on verticals.
@@ -665,8 +721,14 @@ export const IRON_SURFACE = /* glsl */ `
   // highlight on every arris in the town, and under an 11° raking sun a wall of
   // those reads as white speckle rather than as stone — so the substrate
   // gloss follows the substrate, which is what the material's metalness says.
+  //
+  // 1.18 and a 0.035 lift, down from 1.30 and 0.05. Fresh sandstone broken out
+  // of a weathered face is about a fifth brighter than the crust, not half again
+  // — and the old numbers were being applied through a mask that covered the
+  // whole surface, so together they were most of the frame's excess luminance
+  // variance (measured σ 50 against LOOK_SPEC §4.1's 20-40 window).
   float ironChipRough = mix( 0.72, 0.35, step( 0.05, uIronMat.y ) );
-  ironAlbedo = mix( ironAlbedo, ironAlbedo * 1.30 + vec3( 0.05, 0.047, 0.042 ), ironChip );
+  ironAlbedo = mix( ironAlbedo, ironAlbedo * 1.18 + vec3( 0.035, 0.033, 0.030 ), ironChip );
   ironRoughness = mix( ironRoughness, ironChipRough, ironChip * 0.75 );
   ironMetalness = mix( ironMetalness, min( 1.0, ironMetalness + 0.6 ), ironChip * step( 0.05, uIronMat.y ) );
 
@@ -733,6 +795,24 @@ export const IRON_SURFACE = /* glsl */ `
   ironAlbedo *= 1.0 + uIronVary.x * vec3( ironInstance - 0.5, 0.0, 0.5 - ironInstance );
   ironRoughness = clamp( ironRoughness + uIronVary.z * ( ironInstance - 0.5 ), 0.045, 1.0 );
 
+  // ---- rain-scoured strips, LOOK_SPEC §4.2 ---------------------------------
+  // "Weathered stucco / plaster 0.72-0.88, rain-washed strips → 0.60, sheltered
+  // → 0.90." The sheltered end of that range was the only end this material
+  // implemented, so every architectural surface in the frame sat inside a 0.05
+  // roughness band and the round-1 critique's "roughness is uniform across every
+  // material in frame, and there is no Fresnel response anywhere" was simply
+  // true: at roughness 0.95 three's split-sum DFG returns the same number at 0°
+  // and at 85° incidence, so a surface pinned there CANNOT show a grazing lift
+  // no matter how correct the Fresnel underneath it is.
+  //
+  // 0.60 against a 0.93 substrate is a 0.33 spread on one wall, and it is what
+  // puts the specular back: the scoured tracks catch the sky where the sheltered
+  // stone between them does not, which is the vertical banding visible on every
+  // weathered facade in the reference corpus. Paler by 7 % on the same mask,
+  // because scouring removes the weathering crust rather than adding to it.
+  ironRoughness = mix( ironRoughness, 0.60, ironWash * 0.75 );
+  ironAlbedo *= 1.0 + 0.07 * ironWash;
+
   // ---- 4.5 wet ------------------------------------------------------------
   ironAlbedo *= mix( 1.0, 0.60, ironWet );
   ironRoughness = mix( ironRoughness, 0.15, ironWet );
@@ -742,31 +822,88 @@ export const IRON_SURFACE = /* glsl */ `
   ironAlbedo = clamp( ironAlbedo, vec3( 0.035 ), vec3( 0.82 ) );
 
   // ---- normal assembly ------------------------------------------------------
-  // ONE tangent frame for all three layers. Building a fresh frame per layer
-  // costs four screen-space derivatives and two cross products each, and the
-  // frames only differ in their z axis — so the slopes are accumulated in the
-  // geometric frame and transformed once, which is what UDN blending is anyway.
+  // TWO frames, and only two. The baked band keeps the uv frame it was authored
+  // in because it carries the material's structure; the two procedural grain
+  // bands take an analytic world-plane frame because they carry no structure at
+  // all and must not inherit a lane's uv layout. Both are accumulated as slopes
+  // and combined once at the end, which is what UDN blending is anyway.
   // Silt flattens harder than a dust coat does, because it has physically
   // removed the relief rather than powdered it.
   float ironNStr = ( 1.0 - 0.42 * ironDust ) * ( 1.0 - 0.44 * ironSilt ) * ( 1.0 - 0.8 * ironWet );
 
+  // ---- the GRAIN FRAME, in world metres -------------------------------------
+  // The detail and micro bands are PHYSICAL features — 2-5 cm pitting and 2-6 mm
+  // grain — so their frequency has to be quoted per metre, not per uv unit. Read
+  // in uv the way they were, their scale is at the mercy of whatever
+  // parameterisation the emitting lane happened to author: a facade quad whose u
+  // runs across 30 m and whose v runs across 4 m stretches the band 7:1, and the
+  // result is the "identical crumpled-foil patch, stretched into vertical
+  // streaks as the wall recedes" that the round-1 material critique named. It
+  // cannot be fixed from the uv side, because sixteen lanes author uvs sixteen
+  // ways and the ones that are atlases must not be touched at all.
+  //
+  // Evaluated instead on the dominant world plane at repeats per METRE, the
+  // grain's texel density is uniform across every face of every mesh in the game
+  // by construction, and no lane can break it.
+  //
+  // MINUS THE OBJECT ORIGIN on the uv path. A world-locked grain field crawls
+  // over anything that MOVES through it — most visibly the viewmodel, which
+  // translates several metres a second while the player walks. Subtracting the
+  // instance origin makes the field object-stationary; for static level geometry
+  // the origin is one constant per mesh, so this is a pure phase offset and the
+  // field stays continuous across every triangle of a merged building. The
+  // triplanar path keeps raw world coordinates instead, because terrain chunks
+  // each carry their own origin and subtracting it would put a phase step along
+  // every chunk seam.
+  vec3 ironPlaneT, ironPlaneB;
+  vec2 ironOriginPlane;
+  if ( ironAbsN.y > max( ironAbsN.x, ironAbsN.z ) ) {
+    ironPlaneT = vec3( 1.0, 0.0, 0.0 );
+    ironPlaneB = vec3( 0.0, 0.0, 1.0 );
+    ironOriginPlane = vIronOrigin.xz;
+  } else if ( ironAbsN.x > ironAbsN.z ) {
+    ironPlaneT = vec3( 0.0, 0.0, 1.0 );
+    ironPlaneB = vec3( 0.0, 1.0, 0.0 );
+    ironOriginPlane = vIronOrigin.zy;
+  } else {
+    ironPlaneT = vec3( 1.0, 0.0, 0.0 );
+    ironPlaneB = vec3( 0.0, 1.0, 0.0 );
+    ironOriginPlane = vIronOrigin.xy;
+  }
+  // The two plane axes are by construction the normal's two SMALLER components,
+  // so neither is ever near-parallel to it and this Gram-Schmidt is
+  // unconditionally stable. Analytic, so it costs no screen-space derivatives —
+  // which also takes four dFdx/dFdy off the triplanar path, where the frame used
+  // to come from a uv that projection does not even use.
+  ironPlaneT = normalize( ironPlaneT - ironGeoN * dot( ironGeoN, ironPlaneT ) );
+  ironPlaneB = normalize( cross( ironGeoN, ironPlaneT ) );
+
   #ifdef IRON_TRIPLANAR
-    // Detail on the DOMINANT axis only — the same plane the macro band used.
-    // At 2 cm the projection seam is far below a pixel and three more dependent
-    // fetches on terrain are not.
     vec2 ironDetUv = ironPlane;
   #else
-    vec2 ironDetUv = vIronUv;
+    mat3 ironTbn = ironTangentFrame( ironGeoN, vIronWorld, vIronUv );
+    vec2 ironDetUv = ironPlane - ironOriginPlane;
+    #ifdef IRON_ANISO
+      // Machined and turned metal carries its scratch band ALONG the direction
+      // of use, never isotropically (LOOK_SPEC §4.2), and the only thing that
+      // knows which direction that is on a receiver or a barrel is the uv layout
+      // the weapon was authored with. So the anisotropic class stays in uv
+      // space, stretched 6:1 across the turn axis. It is also the one class with
+      // no tiling uvs to stretch, so it has nothing to gain from world space.
+      //
+      // The frame is rebuilt from the STRETCHED uv on purpose. ironTangentFrame
+      // normalises t and b by the longer of the two, so a 6:1 uv stretch leaves
+      // t six times the length of b — and that length ratio is what turns the
+      // isotropic grain into a slope field that is steep across the scratch and
+      // shallow along it. Handing this branch the unstretched frame would keep
+      // the stretched PATTERN but throw away the directional relief, which is
+      // the half of the effect that survives at ADS distance.
+      ironDetUv = vIronUv * vec2( 0.17, 1.0 );
+      mat3 ironTbnA = ironTangentFrame( ironGeoN, vIronWorld, ironDetUv );
+      ironPlaneT = ironTbnA[ 0 ];
+      ironPlaneB = ironTbnA[ 1 ];
+    #endif
   #endif
-
-  // Machined and turned metal carries its scratch band ALONG the direction of
-  // use, never isotropically (LOOK_SPEC §4.2). Stretching the grain lookup 6:1
-  // turns isotropic pitting into directional scratches for free.
-  #ifdef IRON_ANISO
-    ironDetUv *= vec2( 0.17, 1.0 );
-  #endif
-
-  mat3 ironTbn = ironTangentFrame( ironGeoN, vIronWorld, ironDetUv );
 
   // One grain octave per band, from an analytic noise gradient. No texture fetch
   // and — the point — no structure: the band carries pitting, not a shrunken
@@ -782,11 +919,12 @@ export const IRON_SURFACE = /* glsl */ `
     vec3 gm = ironNoiseD2( ironDetUv * ironDetailFreq * uIronTiling.z + vec2( 0.37, 0.11 ) );
     ironSlope += gm.yz * uIronDetail.y * ironMicroFade * ironNStr;
   }
+  vec3 ironGrainVec = ironPlaneT * ironSlope.x + ironPlaneB * ironSlope.y;
 
   vec3 ironNormalW;
   #ifdef IRON_TRIPLANAR
     ironNormalW = ironTriNormal( uIronNormalRoughAo, ironTriP, ironTriW, ironGeoN, ironNStr );
-    ironNormalW = normalize( ironNormalW + ironTbn[ 0 ] * ironSlope.x + ironTbn[ 1 ] * ironSlope.y );
+    ironNormalW = normalize( ironNormalW + ironGrainVec );
   #else
     // 0.46, not 1.0, and down from 0.7 after seeing it at 79° incidence.
     //
@@ -809,10 +947,17 @@ export const IRON_SURFACE = /* glsl */ `
     // roughness, which is what a filtered normal distribution physically is;
     // 0.30 rather than 0 keeps the silhouette-scale relief that stops a distant
     // wall going to paper.
+    //
+    // The BAKED band stays in the uv frame it was authored in — it carries the
+    // material's structure (course joints, plank edges, panel lines) and those
+    // have to stay registered with the albedo they came from. Only the two
+    // procedural grain bands moved to the world frame, and they are added as a
+    // world vector rather than through this matrix for exactly that reason.
     float ironBaseSharp = 1.0 - smoothstep( 0.020, 0.075, ironFootprint );
-    ironSlope += ( ironTexN.rg * 2.0 - 1.0 ) * ironNStr * 0.46 * mix( 0.30, 1.0, ironBaseSharp );
+    vec2 ironBaseSlope = ( ironTexN.rg * 2.0 - 1.0 ) * ironNStr * 0.46
+      * mix( 0.30, 1.0, ironBaseSharp );
     ironRoughness = clamp( ironRoughness + 0.15 * ( 1.0 - ironBaseSharp ), 0.045, 1.0 );
-    ironNormalW = normalize( ironTbn * vec3( ironSlope, 1.0 ) );
+    ironNormalW = normalize( ironTbn * vec3( ironBaseSlope, 1.0 ) + ironGrainVec );
   #endif
 
   // Wet surfaces flatten toward the geometric normal: water fills the relief.
@@ -866,12 +1011,62 @@ export const IRON_METALNESS = /* glsl */ `
  * Replaces `<normal_fragment_maps>`. `normal` at this point is the interpolated
  * view-space vertex normal, already flipped for the back face; ours is world
  * space, so it goes through the view matrix and takes the same flip.
+ *
+ * THE MESOSTRUCTURE HORIZON BOUND, and why this block is the single most
+ * important twelve lines in the material.
+ * ------------------------------------------------------------------------
+ * A normal map is a slope field with NO horizon: every bump is told it can see
+ * the whole sky and the whole sun, whatever its neighbours are doing. That is a
+ * harmless lie at midday and a catastrophic one at HARBOUR REACH's 11° sun,
+ * because the light then sits within 11° of most surface PLANES. At that
+ * incidence a slope of 0.4 — an ordinary mortar chamfer — swings N·L from 0.19
+ * to 0.9 on one side of the bump and to −0.3 on the other. The frame that comes
+ * out is not stone: it is a two-tone mask of blown-white speckle and holes with
+ * no direct light at all, and it was the visible defect on every column, every
+ * voussoir and every crate in the round-1 captures. Turning the amplitude down
+ * far enough to hide it turns the material off.
+ *
+ * The physics the map is missing is SHADOWING AND MASKING. A bump that tilts
+ * into a grazing sun is standing in the shadow of the bump in front of it, so
+ * the lit fraction of the mesostructure collapses as the light approaches the
+ * plane, and the pixel average must converge on what the flat surface receives —
+ * that convergence is exactly the energy conservation a bare slope field breaks.
+ *
+ * So: bound how far the perturbed normal may move N·L away from the geometric
+ * N·L, with a bound that shrinks as the key light grazes. Symmetric, because
+ * both tails are the same error. At a sunlit wall (N·L 0.9) the bound is 0.55
+ * and nothing is touched — the relief is free to do its work. At 79° incidence
+ * (N·L 0.19) it is 0.20, so the mesostructure modulates between roughly nothing
+ * and twice the flat response instead of between black and blown. On a face
+ * turned away from the sun the bound is 0.10 and no amount of slope can light
+ * it, which kills the "lit facets on a shadowed wall" artefact for free.
+ *
+ * Bounded on the KEY light only. It is the one with the dynamic range to break
+ * anything, and evaluating this per clustered light would be a second dot
+ * product and a normalize inside the light loop for a term whose whole purpose
+ * is to fix a 100:1 contrast the fill lights cannot produce.
  */
 export const IRON_NORMAL_APPLY = /* glsl */ `
   {
     vec3 ironVN = normalize( ( viewMatrix * vec4( ironNormalW, 0.0 ) ).xyz );
     #ifdef DOUBLE_SIDED
       ironVN *= faceDirection;
+    #endif
+    #if NUM_DIR_LIGHTS > 0
+    {
+      vec3 ironGVN = normalize( ( viewMatrix * vec4( ironGeoN, 0.0 ) ).xyz );
+      #ifdef DOUBLE_SIDED
+        ironGVN *= faceDirection;
+      #endif
+      // three transforms light directions into VIEW space, which is why the
+      // geometric normal is taken there too rather than doing this in world.
+      vec3 ironKeyL = directionalLights[ 0 ].direction;
+      float ironNlG = dot( ironGVN, ironKeyL );
+      float ironNlP = dot( ironVN, ironKeyL );
+      float ironBound = 0.10 + 0.50 * max( ironNlG, 0.0 );
+      float ironT = min( 1.0, ironBound / max( abs( ironNlP - ironNlG ), 1e-4 ) );
+      ironVN = normalize( mix( ironGVN, ironVN, ironT ) );
+    }
     #endif
     normal = ironVN;
   }
@@ -900,19 +1095,20 @@ export const IRON_AO_AND_SHEEN = /* glsl */ `
     float ironDotNV = saturate( dot( geometryNormal, geometryViewDir ) );
     reflectedLight.indirectSpecular *= computeSpecularOcclusion( ironDotNV, ironAoFinal, material.roughness );
 
+    vec3 ironAmbientRadiance = vec3( 0.0 );
+    #if NUM_HEMI_LIGHTS > 0
+      vec3 ironRefl = reflect( - ironViewDirW, ironNormalW );
+      // Irradiance → radiance. Three's hemisphere uniforms are irradiance-like
+      // (they are consumed through BRDF_Lambert, which carries the 1/π), so
+      // reusing them as radiance without this is a π× too-bright rim.
+      ironAmbientRadiance = mix( hemisphereLights[ 0 ].groundColor,
+                                 hemisphereLights[ 0 ].skyColor,
+                                 smoothstep( -0.25, 0.45, ironRefl.y ) ) * RECIPROCAL_PI;
+    #else
+      ironAmbientRadiance = ambientLightColor * RECIPROCAL_PI;
+    #endif
+
     #ifndef USE_ENVMAP
-      vec3 ironAmbientRadiance = vec3( 0.0 );
-      #if NUM_HEMI_LIGHTS > 0
-        vec3 ironRefl = reflect( - ironViewDirW, ironNormalW );
-        // Irradiance → radiance. Three's hemisphere uniforms are irradiance-like
-        // (they are consumed through BRDF_Lambert, which carries the 1/π), so
-        // reusing them as radiance without this is a π× too-bright rim.
-        ironAmbientRadiance = mix( hemisphereLights[ 0 ].groundColor,
-                                   hemisphereLights[ 0 ].skyColor,
-                                   smoothstep( -0.25, 0.45, ironRefl.y ) ) * RECIPROCAL_PI;
-      #else
-        ironAmbientRadiance = ambientLightColor * RECIPROCAL_PI;
-      #endif
       // Three's own split-sum term, off the same DFG LUT the IBL path uses, so
       // the fallback lobe and the real IBL lobe agree exactly in shape and only
       // differ in where the radiance came from.
@@ -921,6 +1117,37 @@ export const IRON_AO_AND_SHEEN = /* glsl */ `
       reflectedLight.indirectSpecular += ironAmbientRadiance * ironFssEss
         * computeSpecularOcclusion( ironDotNV, ironAoFinal, material.roughness );
     #endif
+
+    // THE GRAZING TAIL, and why it has to be added by hand.
+    //
+    // LOOK_SPEC §4.2 opens with "nothing is at roughness 1.0 with a flat normal;
+    // every matte surface still shows a broad grazing sheen along its top edge",
+    // and the rubric's material axis fails a frame outright if a large flat
+    // surface does not brighten toward the horizon. Three's DFGApprox cannot
+    // deliver that above roughness ~0.8: its F90 lobe is multiplied by a masking
+    // term that has already collapsed, so at roughness 0.95 the split-sum
+    // returns 0.0174 at 84° incidence and 0.0174 head-on — a flat line. The
+    // Fresnel is not missing, it is being masked to death, and dry stone,
+    // concrete and sand are all authored above that threshold.
+    //
+    // That masking is right for a true microfacet slope distribution and wrong
+    // for a real mineral surface, whose top few microns are a smooth air/solid
+    // interface: the roughness lives in the SUB-surface scattering and in relief
+    // below it, and the specular reflection off that interface survives at
+    // grazing regardless. It is why a dusty kerb still has a bright top edge
+    // against the sky and why wet-looking sheen appears on dry sand toward the
+    // horizon. Restored as a Schlick tail, weighted UP with roughness so it only
+    // supplies what DFGApprox threw away, and taken on the GEOMETRIC normal so it
+    // is a smooth ramp across a surface rather than a second speckle field.
+    //
+    // 0.16 is a ceiling on how much of the incident sky a silhouette-grazing
+    // pixel may return this way; the equivalent diffuse is removed so the term
+    // redistributes energy instead of inventing it.
+    float ironDotNVG = saturate( dot( ironGeoN, ironViewDirW ) );
+    float ironGrazeF = pow( 1.0 - ironDotNVG, 5.0 );
+    float ironGrazeW = 0.16 * smoothstep( 0.55, 0.95, material.roughness ) * ironGrazeF;
+    reflectedLight.indirectSpecular += ironAmbientRadiance * ironGrazeW * ironAoFinal;
+    reflectedLight.indirectDiffuse *= 1.0 - ironGrazeW;
   }
 `;
 

@@ -31,6 +31,7 @@ import {
   type RenderGraph,
   type RenderPass,
 } from '@/engine/types';
+import { EXPOSURE_PRESET_EV, GLSL_COLOR_COMMON, exposureScaleFromEv } from '@/render/color';
 import { ut, uf, uv2 } from '@/render/fullscreen';
 import { BLOOM_MIP_WEIGHTS, bloomLevels, bloomMipId, bloomUpId } from '@/render/targets';
 import type { PostChainState } from '@/render/passes/chain';
@@ -86,16 +87,23 @@ const DOWNSAMPLE_BODY = /* glsl */ `
 `;
 
 const PREFILTER_GLSL = /* glsl */ `
+${GLSL_COLOR_COMMON}
 uniform sampler2D uSrc;
 uniform sampler2D uExposure;
 uniform vec2 uTexel;
 uniform float uThreshold;
 uniform float uKnee;
 uniform float uClamp;
+uniform float uExposureFallback;
 
 vec3 ironBloomPrefilter(vec2 uv) {
   float exposureScale = texelFetch(uExposure, ivec2(0, 0), 0).r;
-  vec3 c = max(texture(uSrc, uv).rgb, vec3(0.0)) * exposureScale;
+  if (!(exposureScale > 0.0) || !(exposureScale < 1.0e12)) exposureScale = uExposureFallback;
+  // NOT max(x, 0.0): that passes a NaN straight through, and min(NaN, uClamp)
+  // four lines below returns uClamp on the drivers we ship against — i.e. a
+  // single bad texel enters the pyramid at the FIREFLY_CLAMP ceiling and veils
+  // the whole frame. ironSanitize is the NaN-safe form; see color.ts.
+  vec3 c = ironSanitize(texture(uSrc, uv).rgb) * exposureScale;
   float brightness = max(c.r, max(c.g, c.b));
   // Soft knee: quadratic between T-K and T+K, linear above.
   float soft = clamp(brightness - uThreshold + uKnee, 0.0, 2.0 * uKnee);
@@ -134,6 +142,7 @@ export class BloomPass implements RenderPass {
         uThreshold: uf(THRESHOLD),
         uKnee: uf(KNEE),
         uClamp: uf(FIREFLY_CLAMP),
+        uExposureFallback: uf(exposureScaleFromEv(EXPOSURE_PRESET_EV)),
       },
       graph.target(bloomMipId(0)),
       { prelude: PREFILTER_GLSL },

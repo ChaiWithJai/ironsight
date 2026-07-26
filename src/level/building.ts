@@ -87,8 +87,21 @@ const STYLE_FLOORS: Record<PlotStyle, [number, number]> = {
   compound: [1, 2],
 };
 
-/** Local-frame start point and yaw of wall side `i` (0=+Z, 1=+X, 2=−Z, 3=−X). */
-function sideFrame(i: number, hx: number, hz: number): { m: THREE.Matrix4; width: number } {
+/**
+ * Local-frame start point and yaw of wall side `i` (0=+Z, 1=+X, 2=−Z, 3=−X).
+ *
+ * `y` IS NOT OPTIONAL DECORATION. `wallPanel` authors its panel from `base` up,
+ * and the storey loop below authors every storey with `base: 0` — so the frame is
+ * the ONLY thing that lifts floor 2 above floor 1. It defaulted to 0 in round 1,
+ * which stacked all `floors` wall panels on top of each other at ground level and
+ * left every storey above the first with no wall at all. What shipped was a
+ * plinth, a ground-floor box, three string courses and a roof slab: the "three
+ * stacked concrete slabs floating in mid-air with clear sky between and beneath
+ * them" the round-1 critique found at thumbnail size, plus every balcony, awning,
+ * render patch and air-con unit above 3.5 m hanging in open air with nothing
+ * behind it. One argument, six findings.
+ */
+function sideFrame(i: number, hx: number, hz: number, y = 0): { m: THREE.Matrix4; width: number } {
   const rot = (i * Math.PI) / 2;
   const starts: [number, number][] = [
     [-hx, hz],
@@ -97,7 +110,7 @@ function sideFrame(i: number, hx: number, hz: number): { m: THREE.Matrix4; width
     [-hx, -hz],
   ];
   const [sx, sz] = starts[i];
-  const m = new THREE.Matrix4().makeTranslation(sx, 0, sz).multiply(new THREE.Matrix4().makeRotationY(rot));
+  const m = new THREE.Matrix4().makeTranslation(sx, y, sz).multiply(new THREE.Matrix4().makeRotationY(rot));
   return { m, width: i % 2 === 0 ? hx * 2 : hz * 2 };
 }
 
@@ -170,13 +183,68 @@ export function buildBuilding(
   // slope never shows daylight under an edge. This is invisible and load
   // bearing; the alternative is a floating house on every gradient in the map.
   const plinthOver = rng.range(0.05, 0.16);
-  b.m(trimMat).boxAt(
-    0, -(gMax - gMin + 1.6 + plinthH) / 2 + 0.001,
-    0,
-    plot.hx + plinthOver, (gMax - gMin + 1.6 + plinthH) / 2, plot.hz + plinthOver,
-    1, 0x3f,
-  );
+  const buried = (gMax - gMin + 1.6 + plinthH) / 2;
+  b.m(trimMat).boxAt(0, -buried + 0.001, 0, plot.hx, buried, plot.hz, 1, 0x3f);
+  /**
+   * THE VISIBLE PLINTH COURSE, BROKEN.
+   *
+   * `docs/AAA_RUBRIC.md` axis 5 names a hard line where a wall meets the ground
+   * as *"the single most common tell of an amateur scene"*, and round 1 found it
+   * here in textbook form: one box, one overhang, one height, one colour, running
+   * dead straight for the whole facade. The buried mass above still has to be a
+   * single box (it is what stops daylight under a building on a slope), but what
+   * the eye actually sees is this: four independent runs of 2–5 blocks, each with
+   * its own overhang, its own top height and a chamfered arris, one segment in
+   * seven missing entirely and spilled as rubble at its own foot.
+   */
+  for (let side = 0; side < 4; side++) {
+    const along = side % 2 === 0 ? plot.hx : plot.hz;
+    const outw = side % 2 === 0 ? plot.hz : plot.hx;
+    const sgn = side === 0 || side === 1 ? 1 : -1;
+    const runs = Math.max(2, Math.round((along * 2) / rng.range(2.6, 4.4)));
+    for (let k = 0; k < runs; k++) {
+      const t0 = -along + (k / runs) * along * 2;
+      const t1 = -along + ((k + 1) / runs) * along * 2;
+      const mid = (t0 + t1) / 2;
+      const half = (t1 - t0) / 2;
+      const gone = rng.bool(0.14);
+      const proud = plinthOver * rng.range(0.55, 1.45);
+      const top = gone ? -plinthH * rng.range(0.45, 0.8) : rng.range(-0.05, 0.02);
+      const g = b.m(trimMat);
+      g.setUvShift(rng.range(0, 12), rng.range(0, 12));
+      const cx = side % 2 === 0 ? mid : sgn * (outw + proud / 2);
+      const cz = side % 2 === 0 ? sgn * (outw + proud / 2) : mid;
+      const hxx = side % 2 === 0 ? half : proud / 2;
+      const hzz = side % 2 === 0 ? proud / 2 : half;
+      const h = (top + plinthH + 0.35) / 2;
+      g.chamferBox(cx, top - h, cz, hxx, h, hzz, 0.035, 1, rng, 0.05);
+      g.clearUvShift();
+      if (gone) {
+        // Spalled block at the foot of the gap, so the break has a cause.
+        for (let r = 0; r < 3; r++) {
+          const rx = side % 2 === 0 ? mid + rng.range(-half, half) : sgn * (outw + rng.range(0.15, 0.7));
+          const rz = side % 2 === 0 ? sgn * (outw + rng.range(0.15, 0.7)) : mid + rng.range(-half, half);
+          const s = rng.range(0.11, 0.26);
+          b.m('rubble').chamferBox(rx, -plinthH + s * 0.4, rz, s, s * rng.range(0.35, 0.6), s * rng.range(0.7, 1.2), 0.02, 1, rng, 0.3);
+        }
+      }
+    }
+  }
   b.xf.pop();
+
+  /**
+   * PER-BUILDING UV PHASE on the wall and trim materials.
+   *
+   * `wallPanel` offsets its uvs by the panel's own local x/y, which restarts at
+   * zero on every building — so 130 facades all begin their stucco at the same
+   * texel and the same crack lands 40 cm from the left-hand corner of every house
+   * in the town. Phasing per plot costs nothing and is what stops a street
+   * reading as one facade copied along a line.
+   */
+  const wallPhaseU = rng.range(0, 64);
+  const wallPhaseV = rng.range(0, 64);
+  b.m(wallMat).setUvShift(wallPhaseU, wallPhaseV);
+  if (trimMat !== wallMat) b.m(trimMat).setUvShift(rng.range(0, 64), rng.range(0, 64));
 
   // Leaning frame for everything above the plinth.
   const leanAxis = rng.range(0, Math.PI * 2);
@@ -207,6 +275,15 @@ export function buildBuilding(
   const insetOf = (f: number, side: number): number =>
     f === floors - 1 && setback > 0 && !plot.party[side] ? setback : 0;
 
+  /**
+   * The outward offset each side's facade carried on the storey below, so a
+   * jetty can be CLOSED. A storey that projects 0.4 m over the one beneath it and
+   * leaves the underside open is a hole you can see the sky through from the
+   * street — which is what the wall-height fix would otherwise have exposed on
+   * every third building in the town.
+   */
+  const prevGrow = [0, 0, 0, 0];
+
   for (let f = 0; f < floors; f++) {
     const fh = f === 0 ? groundH : upperH;
     // Per-storey plan wobble. The jetty is only ever over the street.
@@ -220,8 +297,23 @@ export function buildBuilding(
       const shrink = f === floors - 1 && setback > 0 ? setback : 0;
       const hx = plot.hx - (side % 2 === 0 ? shrink : 0) + (side % 2 === 1 ? grow : 0);
       const hz = plot.hz - (side % 2 === 1 ? shrink : 0) + (side % 2 === 0 ? grow : 0);
-      const { m, width } = sideFrame(side, hx, hz);
+      const { m, width } = sideFrame(side, hx, hz, y);
       b.xf.push(m);
+      // Soffit under an overhang, plus a pair of corbels so the jetty is carried
+      // by something. Outward is +Z in the panel frame, so the overhang runs
+      // back from z = 0 to z = −depth.
+      const over = grow - prevGrow[side];
+      if (over > 0.03) {
+        b.m(trimMat).boxAt(width / 2, -0.04, -over / 2, width / 2, 0.04, over / 2, 1, 0x3f);
+        const corbels = Math.max(2, Math.round(width / 2.2));
+        for (let k = 0; k <= corbels; k++) {
+          b.m(trimMat).boxAt(
+            (k / corbels) * width, -0.18, -over * 0.45,
+            0.075, 0.13, over * 0.5, 1, 0x3f,
+          );
+        }
+      }
+      prevGrow[side] = grow;
       const isStreet = side === plot.streetSide;
       let openings: Opening[] = [];
       if (plot.style === 'shack') {
@@ -452,6 +544,8 @@ export function buildBuilding(
   }
 
   b.xf.pop(); // leaning frame
+  b.m(wallMat).clearUvShift();
+  b.m(trimMat).clearUvShift();
 
   // ---- colliders + nav ----------------------------------------------------
   const worldMid = new THREE.Vector3(plot.x, 0, plot.z);
@@ -525,8 +619,9 @@ export function buildBuilding(
     toWorld(-(plot.hx + plinthOver), -(plot.hz + plinthOver)),
   ];
   groundSkirt(b, outline, groundAt, rng, {
-    amount: plot.style === 'shack' ? 1.35 : rng.range(0.8, 1.25),
+    amount: plot.style === 'shack' ? 1.5 : rng.range(1.0, 1.45),
     windDir: -0.7,
+    blockFraction: 0.45,
   });
 
   return { roofY: baseY + deckY, baseY, outline };

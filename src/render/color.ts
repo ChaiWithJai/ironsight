@@ -120,18 +120,33 @@ export const GRADE_BLACK_LIFT = 0.040;
  *    the small channel by much more than the large one and MANUFACTURES chroma in
  *    the toe — measured, it doubled shadow saturation to 0.62 against §5.3's
  *    0.40–0.55 ceiling. Saturation is §5.3's business and it is set there.
+ *
+ * **0.055, down from 0.15.** At k = 0.15 the knee reached far enough up the
+ * curve to cost the §5.1 ramp thirteen codes at scene-linear 0.020 (25 → 12) and
+ * eleven at 0.050 — i.e. it was not a black point any more, it was a second
+ * contrast curve living in the bottom third of the range, and it is what put the
+ * darkest 5 % of `post_chain` at code 21 against a §5.1 prediction of 36. At
+ * 0.055 the whole rolloff is inside the bottom fifteen codes, which is where
+ * §5.2's p0.1 = 3–20 target actually lives.
  */
-export const GRADE_BLACK_POINT = 0.15;
+export const GRADE_BLACK_POINT = 0.055;
 
 /**
  * §5.2 contrast: a small symmetric S about a pivot, in code space.
  *
- * Deliberately SMALL (1.06). The heavy lifting of "wide range" is done by the
- * black point above and the shoulder below, which act on the two ends where the
- * measured defect was; a large S would also drag p25 and the median down with it
- * and §5.2 is explicit that the image "is **not** high-contrast — it is
- * wide-range with a dense, low-placed midtone. A frame pushed to a crushed punchy
- * curve reads as a filter, not a renderer."
+ * Deliberately SMALL (1.14). §5.2 is explicit that the image "is **not**
+ * high-contrast — it is wide-range with a dense, low-placed midtone. A frame
+ * pushed to a crushed punchy curve reads as a filter, not a renderer." A large S
+ * would drag p25 and the median down with it and walk straight out of §5.2's
+ * bands.
+ *
+ * 1.14 is the largest value that keeps the composed curve — AgX, the §5.1 ramp
+ * gamma, the black point, and this — within 9 code values of §5.1's ten measured
+ * stops (worst error +9 at scene-linear 1.44; exact at 0.180 by construction,
+ * exact at 16.3 because the S is endpoint-preserving). It was 1.06, which was
+ * doing so little that it was indistinguishable from the identity; the reason it
+ * was that small is that the removed shoulder was already expanding the top of
+ * the range by 20 %, off-spec.
  *
  * Endpoint-preserving and monotone by construction, with the pivot a fixed point:
  *
@@ -140,27 +155,47 @@ export const GRADE_BLACK_POINT = 0.15;
  *     d = v^(1/g)                                → 0.5 maps back to pivot
  */
 export const GRADE_CONTRAST_PIVOT = 0.44;
-export const GRADE_CONTRAST = 1.06;
+export const GRADE_CONTRAST = 1.14;
 
 /** `ln(0.5)/ln(pivot)` — the warp that puts the pivot on the sigmoid's centre. */
 const GRADE_S_WARP = Math.log(0.5) / Math.log(GRADE_CONTRAST_PIVOT);
 
-/**
- * THE SHOULDER — the other half of "wide range", and the half that fixes p99.
+/*
+ * THE SHOULDER IS AgX'S, AND THERE IS NO SECOND ONE. Read this before adding a
+ * gain wheel back.
  *
- * Measured before this pass: p99 sat at 175–182 against §5.2's 195–248. The top
- * of the frame was as unoccupied as the bottom. This is the gain wheel, ramped in
- * over luminance so it is a shoulder rather than an exposure change: nothing
- * below display 77 moves at all, the lift reaches its full 20 % by display 235,
- * and the whole thing runs through a C¹ soft clip at 0.80 so a bright sky is
- * compressed into the last fifth of the range instead of being pushed to 255.
- * The measured above-display-250 fraction stays at 0.000 % against §5.2's 0.30 %
- * ceiling, which is the test that "bright diffuse surfaces never clip".
+ * A previous revision of this file carried a luminance-ramped +20 % gain
+ * followed by a C¹ soft clip at 0.80, added to fix a p99 that sat at 175–182
+ * against §5.2's 195–248. Measured end to end on a synthetic ramp, that pair did
+ * this to the §5.1 transfer function:
+ *
+ * | scene-linear | §5.1 | with the gain+clip | now |
+ * |---|---|---|---|
+ * | 0.020 |  25 |  12 |  21 |
+ * | 0.180 | 110 | 111 | 110 |
+ * | 0.720 | 178 | 207 | 186 |
+ * | 1.440 | 205 | 234 | 215 |
+ * | 5.800 | 243 | 246 | 246 |
+ * | 16.30 | 255 | 248 | 255 |
+ *
+ * Two defects, both of them exactly what the round-1 critics measured. The
+ * curve's CEILING WAS 251, so no scene value however large could produce a white
+ * pixel and the frame could not clip — "zero pure-white pixels in the entire
+ * image", on a shot with the sun in it. And four and a half stops of scene range
+ * (0.72 → 16.3) were crushed into 41 code values, which is the compressed,
+ * upper-midtone-heavy histogram the same critics described as "the whole frame
+ * floats in a bright, compressed midtone".
+ *
+ * The p99 the gain existed to fix was never a curve problem: `post_chain`'s
+ * scene-linear p99 was 0.67, and 0.67 IS code 175 on the §5.1 ramp. The frame
+ * had no highlights because the camera was pointed 180° away from the sun (see
+ * `src/shots/render.ts`), and a tone curve cannot invent range the scene does
+ * not have. Lifting the top of the curve to hide that traded a correct
+ * tonemapper for a filter.
+ *
+ * AgX's own shoulder is the shoulder: it puts scene 16.3 on display 255 and
+ * desaturates toward white on the way, which is §5.1's requirement verbatim.
  */
-export const GRADE_SHOULDER = 0.20;
-const GRADE_SHOULDER_LO = 0.30;
-const GRADE_SHOULDER_HI = 0.92;
-const GRADE_SHOULDER_CLIP = 0.80;
 
 /**
  * §5.3 saturation. Three deliberate deviations from the section's code snippet,
@@ -187,9 +222,24 @@ const GRADE_SHOULDER_CLIP = 0.80;
  *    already over the ceiling): measured across three shots it pulls the spread
  *    of the peak bucket from 0.37–0.61 down to 0.40–0.56.
  */
-export const GRADE_SAT_BOOST = 2.2;
+export const GRADE_SAT_BOOST = 3.0;
 const GRADE_SAT_LO = 0.12;
-const GRADE_SAT_HI = 0.70;
+/**
+ * 0.86, up from 0.70 — i.e. the boost now reaches into the 144–192 and 192–216
+ * buckets instead of dying at 178.
+ *
+ * §5.3's target table is a per-bucket floor as well as a ceiling, and measured on
+ * `post_chain` every bucket from 48 to 216 sat UNDER it: 0.284 / 0.207 / 0.086 /
+ * 0.065 against 0.40–0.55 / 0.25–0.50 / 0.15–0.34 / 0.08–0.24. Ending the ramp at
+ * 0.70 meant the two upper-midtone buckets — 58 % of that frame — got a boost of
+ * 1.02 and were effectively ungraded.
+ *
+ * It still dies well before §5.3's collapse: at display 217 the descending ramp
+ * is down to 0.004, so the 216–240 and 240+ buckets (measured 0.077 and 0.051,
+ * both already inside the 0.05–0.16 and 0.02–0.09 bands) are untouched and the
+ * desaturation term owns them alone.
+ */
+const GRADE_SAT_HI = 0.86;
 const GRADE_VIBRANCE_LO = 0.15;
 const GRADE_VIBRANCE_HI = 0.60;
 
@@ -200,6 +250,35 @@ const GRADE_VIBRANCE_HI = 0.60;
  */
 export const GLSL_COLOR_COMMON = /* glsl */ `
 float ironLuma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+/**
+ * Replace a non-finite or absurd radiance with black.
+ *
+ * WHY THIS IS NOT PARANOIA. A single NaN texel anywhere in SceneColor is a
+ * WHOLE-FRAME failure, not a local one, because the auto-exposure meters a
+ * global log-average: the NaN propagates through the reduction to greyLuminance
+ * to ev to exposureScale, every pixel is then multiplied by NaN, and AgX's
+ * terminal clamp(x, 0.0, 1.0) returns 1.0 for a NaN operand on the drivers we
+ * ship against. The frame comes back UNIFORM WHITE with a vignette on it — no
+ * geometry, no clue where the NaN was, and identical for every camera in the
+ * roster, which is exactly how it presented when a parallel lane briefly landed
+ * one. The taa.resolve pass already carries the same guard on its history for
+ * the same reason; this is the other half of it.
+ *
+ * Written as a NEGATED comparison on purpose: every comparison against NaN is
+ * false, so !(x < BIG) is the portable NaN test and isnan() (GLSL ES 3.00, and
+ * optional in practice) is not needed.
+ *
+ * The 1e12 ceiling is nine orders of magnitude above the brightest thing the
+ * scene legitimately contains — LOOK_SPEC §2.2's sun disc at 1.6e7 cd/m² — so it
+ * cannot fire on real content.
+ */
+vec3 ironSanitize(vec3 c) {
+  bvec3 ok = bvec3(!(c.r < -1.0 || !(c.r < 1.0e12)),
+                   !(c.g < -1.0 || !(c.g < 1.0e12)),
+                   !(c.b < -1.0 || !(c.b < 1.0e12)));
+  return mix(vec3(0.0), max(c, vec3(0.0)), vec3(ok));
+}
 
 vec3 ironSrgbEncode(vec3 c) {
   c = max(c, vec3(0.0));
@@ -292,25 +371,23 @@ vec3 ironAgx(vec3 color) {
  *                          fixes the milky frame: the darkest scene content is
  *                          mapped ONTO the output black point instead of
  *                          floating fifty codes above it.
- *   §5.2 contrast        — a small S about a fixed pivot
- *   §5.2 shoulder        — the gain wheel, ramped in over luminance, so the top
- *                          of the histogram is occupied too, then soft-clipped
+ *   §5.2 contrast        — a small S about a fixed pivot. There is NO second
+ *                          shoulder after it; see GRADE_SHOULDER's obituary
+ *                          above for the measurements that removed one.
  *   §5.2 black level     — a toe lift that dies out by code 46 so it cannot
  *                          touch the ramp fit, and which sets where black sits
  *   §5.3 saturation      — the defining curve's SHAPE verbatim, at an amplitude
  *                          fitted to §5.3's target table, weighted by the pixel's
  *                          own chroma (vibrance) and applied as a chroma scale
  *                          about luma so it cannot move the histogram
- *   §5.4 split tone      — a 3-way corrector inside the spec's ±0.03–0.06.
- *                          The chroma offsets are deliberately SMALL: the
- *                          frame's warmth is supposed to come from golden-hour
- *                          lighting on sandstone, and a LUT that manufactures it
- *                          instead turns every shadow blue including the
- *                          bounce-warmed ones, which §5.4 calls a defect. The
- *                          midtone gamma runs at 0.7× the spec's numbers for
- *                          exactly that reason — the §5.3 boost above already
- *                          expands the scene's own warm/cool separation, and the
- *                          two stacking overshoots §5.4's B−R row.
+ *   §5.4 split tone      — a 3-way corrector inside the spec's ±0.03–0.06, with
+ *                          weight shapes fitted to §5.4's B−R-by-bucket row
+ *                          rather than to the wheel names. The offsets stay
+ *                          small on the SHADOW side on purpose: the frame's
+ *                          warmth is supposed to come from golden-hour lighting
+ *                          on sandstone, and a LUT that manufactures it instead
+ *                          turns every shadow blue including the bounce-warmed
+ *                          ones, which §5.4 calls a defect.
  */
 export const GLSL_GRADE = /* glsl */ `
 // Endpoint-preserving, monotone filmic S with a fixed pivot. See
@@ -320,14 +397,6 @@ vec3 ironContrastS(vec3 d) {
   vec3 a = pow(u, vec3(${GRADE_CONTRAST}));
   vec3 b = pow(max(1.0 - u, 1e-5), vec3(${GRADE_CONTRAST}));
   return pow(max(a / (a + b), 1e-5), vec3(${1 / GRADE_S_WARP}));
-}
-
-// C1 soft clip: identity below T, exponential approach to 1.0 above it. The
-// shoulder can therefore push hard without ever putting a diffuse surface on 255.
-vec3 ironSoftClip(vec3 x) {
-  const float T = ${GRADE_SHOULDER_CLIP};
-  vec3 over = max(x - T, vec3(0.0));
-  return min(x, vec3(T)) + (1.0 - T) * (1.0 - exp(-over / (1.0 - T)));
 }
 
 vec3 ironGrade(vec3 displayLinear) {
@@ -346,11 +415,6 @@ vec3 ironGrade(vec3 displayLinear) {
 
   d = ironContrastS(d);
 
-  // --- §5.2 shoulder ----------------------------------------------------
-  d *= 1.0 + ${GRADE_SHOULDER}
-    * smoothstep(${GRADE_SHOULDER_LO}, ${GRADE_SHOULDER_HI}, ironLuma(d));
-  d = ironSoftClip(d);
-
   // Toe: +0.040 at black, +0.002 by code 46, nothing above. The corpus never
   // reaches code 0 on a real surface and pure black is reserved for letterbox.
   d += ${GRADE_BLACK_LIFT} * exp2(-d * 16.6);
@@ -365,7 +429,13 @@ vec3 ironGrade(vec3 displayLinear) {
   float vib = 1.0 - smoothstep(${GRADE_VIBRANCE_LO}, ${GRADE_VIBRANCE_HI}, chroma);
   // The spec writes smoothstep(0.45, 0.10, L): a DESCENDING ramp, which GLSL
   // does not define, so it is spelled out as 1 - smoothstep(lo, hi, L).
-  float boost = 1.0 + ${GRADE_SAT_BOOST} * vib
+  // .toFixed(3), and it is not cosmetic. GRADE_SAT_BOOST is 3.0, and JS
+  // interpolates that as the string "3" — so this line emitted \`1.0 + 3 * vib\`,
+  // an int-times-float in GLSL ES 3.0, which is a hard compile error. The grade
+  // program then failed to link and EVERY shot in the repo came back pure white.
+  // Any constant in this file that happens to land on a whole number has the same
+  // trap waiting for it; formatting at the interpolation site is what closes it.
+  float boost = 1.0 + ${GRADE_SAT_BOOST.toFixed(3)} * vib
     * (1.0 - smoothstep(${GRADE_SAT_LO}, ${GRADE_SAT_HI}, L))
     * smoothstep(0.02, 0.12, L);
   // Chroma scale about luma — boosting and desaturating are the same operation
@@ -373,13 +443,30 @@ vec3 ironGrade(vec3 displayLinear) {
   d = vec3(L) + (d - vec3(L)) * (boost * (1.0 - w * 0.88));
 
   // --- §5.4 split tone --------------------------------------------------
+  // The weight SHAPES matter as much as the offsets, because §5.4's target is a
+  // B−R-by-luma-bucket curve that PEAKS at display 96–144 and eases back to
+  // near-neutral at both ends: −4…+6 at 0–24, −48…−24 at 96–144, −22…−8 at
+  // 216–240, −10…0 above 240. A monotone smoothstep(0.70, 1.0) highlight weight
+  // — which is what used to be here — puts its maximum on the one bucket the
+  // spec wants neutral, i.e. it tints the sun disc and leaves the 192–216 band,
+  // where the warmth actually belongs, untouched. Hence the roll-off term.
   float shadowW = 1.0 - smoothstep(0.0, 0.25, L);
-  float highW = smoothstep(0.70, 1.0, L);
+  float highW = smoothstep(0.58, 0.86, L) * (1.0 - 0.55 * smoothstep(0.90, 1.0, L));
   float midW = (1.0 - shadowW) * (1.0 - highW);
   d += vec3(-0.010, -0.004, 0.014) * shadowW;
-  vec3 gamma = vec3(0.021, 0.004, -0.028) * midW;
+  // Midtone gamma at §5.4's stated value, no longer scaled to 0.7×: the 0.7 was
+  // there to stop it stacking with the removed shoulder's own warm push.
+  vec3 gamma = vec3(0.030, 0.006, -0.040) * midW;
   d = pow(max(d, vec3(0.0)), 1.0 / (1.0 + gamma));
-  d *= 1.0 + vec3(0.014, 0.006, -0.010) * highW;
+  // Highlight gain at the top of §5.4's stated ±0.03–0.06 envelope rather than
+  // its bottom. Measured on round-1 frames the highlights ran COOL — level_alpha
+  // read B−R +11.7 at 144–192 and +4.6 at 192–216 against targets of −42…−20 and
+  // −30…−14 — because the bright end of a hazy frame is sky, and sky is blue. A
+  // ±0.014 corrector moves that by five codes and is invisible; this moves it by
+  // fifteen, which is the whole width of the miss that a LUT is entitled to fix.
+  // The rest has to come from the aerial-perspective in-scatter carrying the sun
+  // chroma, which is not this file's to set.
+  d *= 1.0 + vec3(0.038, 0.010, -0.034) * highW;
 
   return ironSrgbDecode(clamp(d, 0.0, 1.0));
 }

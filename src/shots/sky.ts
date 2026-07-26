@@ -9,32 +9,60 @@
  * eye height and hold the horizon inside ±6 % of the centreline (LOOK_SPEC §7.2)
  * so they can be blind-A/B'd against real gameplay frames rather than reading as
  * drone shots.
+ *
+ * ROUND 2: `sky_golden` was re-staged. It had no foreground, no subject and no
+ * defocus — a flat slab of building filling the left third with a hard vertical
+ * edge, the horizon dead on the centreline, and the only shape with any interest
+ * (a crane) hazed to within a few percent of sky luminance. It is now shot from
+ * the quay apron with a gantry LEG at 4.2 m carrying the near-field bokeh and
+ * the sun disc sitting inside a second crane's lattice at 38 m. See the pose.
  */
 import { registerShot } from '@/engine/harness';
 
 registerShot({
   name: 'sky_golden',
   description:
-    'GOLDEN, 17.4 h, sun at 11°: the physical Rayleigh/Mie dome over the harbour ' +
-    'with the CHARLIE headland at ~1.4 km dissolving into the aerial-perspective ' +
-    'ladder. Proves hue-locked sky, a bright horizon that warms toward the sun ' +
-    'azimuth, and distance that desaturates into the same colour as the sky above it.',
+    'GOLDEN, 17.4 h, sun at 11°: the physical Rayleigh/Mie dome read THROUGH a ' +
+    'gantry lattice, with a crane leg at 4.2 m carrying the near-field bokeh, ' +
+    'the sun disc inside the second crane at 38 m, and the CHARLIE headland ' +
+    'dissolving into the aerial-perspective ladder behind it. Proves hue-locked ' +
+    'sky, a bright horizon that warms toward the sun azimuth, and distance that ' +
+    'desaturates into the same colour as the sky above it.',
   frames: 24,
   setup(ctx) {
     ctx.seed(0x5c1);
     ctx.setTimeOfDay(17.4);
     ctx.setWeather(0.06, { wind: 4.5, fog: 0.0032 });
     ctx.setOverlays({ viewmodel: false, hud: false });
-    // On the ALPHA terrace looking WNW down the coast: the fort headland sits on
-    // the left at ~1.4 km, the breakwater at ~400 m, the quay at ~150 m. Three
-    // depth bands in one frame, which is what §7.2 asks every composed shot for.
-    // Sightline azimuth 225°, sun azimuth 261°: 36° apart, so the sun sits near
-    // the edge of an 88°-wide frame rather than on the sightline, and every
-    // vertical face in shot shows a lit side and a sky-lit side (LOOK_SPEC
-    // §2.3). The CHARLIE headland bears 255° from here, so it stays in frame at
-    // ~1.3 km — the aerial-perspective ladder this shot exists to prove.
-    // Pitch −0.9° holds the horizon 3.4 % above the centreline, inside §7.2's ±6 %.
-    ctx.poseCamera([96, 14.0, 34], [-187, 7.5, -249], 55);
+    // Standing on the quay apron 5.7 m inland of the coping, at the foot of the
+    // eastern crane. Deck 3.55 + 1.62 standing eye = 5.17.
+    //
+    // THE NEAR FIELD IS THE POINT OF THE RE-STAGE. That crane's seaward leg —
+    // `buildCrane` splays a 3 m lattice column off a sill beam at local
+    // (−9, −4), which for this machine's yaw lands at (12.55, −43.35) — stands
+    // 4.2 m from the lens and 32° right of the sightline, so it fills the right
+    // third from the top of the frame to the deck. A shot file cannot ADD
+    // geometry, so the only way to obey §7.2's 20–35 % near-field rule is to
+    // stand next to something, and this is the tallest thing on the map that a
+    // player can stand next to.
+    //
+    // THE APERTURE comes from the lens. `src/render/passes/dof.ts` switches from
+    // gameplay restraint (CoC ≤ 3 px) to a real 7-blade aperture at
+    // `fovDeg <= 40`; §7.1 puts the cinematic lens at 38° and the player's own
+    // slider bottoms out at 60, so this cannot leak into gameplay. Auto-focus
+    // reads the CENTRE pixel's depth clamped to [1.5, 60] m — the sightline is
+    // pitched 2.2° down so the ray reaches apron level 42 m out and lands on
+    // solid quay rather than on sky or on open water, either of which drops the
+    // focus to its 4 m fallback and melts the frame. At that focus the near leg
+    // carries the full 32 px of CoC and everything past 30 m is sharp.
+    //
+    // Sightline 268°. The sun is 7° right at 11° elevation and the MIDDLE crane
+    // is 4° right at 38 m, whose portal spans ±13.5° from here — so the disc
+    // sits inside the lattice and the beams are cut by real geometry rather than
+    // being a radial blur off a sprite. The far crane adds a second lattice at
+    // 65 m, the headland closes the centre at 228 m, and the coast beyond it is
+    // the aerial ladder. Horizon 5.5 % above the centreline, inside §7.2's ±6 %.
+    ctx.poseCamera([16.0, 5.17, -41.0], [-83.94, 1.33, -44.49], 40);
   },
 });
 

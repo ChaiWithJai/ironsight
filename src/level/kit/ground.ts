@@ -53,6 +53,10 @@ export function rock(
   sides = 5,
 ): void {
   const m = b.m(mat);
+  // Per-chunk UV phase: every `triangle()` starts its uv at 0, so without this
+  // 900 rubble chunks all sample the same texel and the scatter reads as one
+  // shape repeated, which is the exact failure the scatter exists to prevent.
+  m.setUvShift(rng.range(0, 16), rng.range(0, 16));
   const yaw = rng.range(0, Math.PI * 2);
   const eq: THREE.Vector3[] = [];
   for (let i = 0; i < sides; i++) {
@@ -69,6 +73,41 @@ export function rock(
     m.triangle(eq[i], eq[j], _t2.copy(top), 1);
     m.triangle(eq[j], eq[i], _t2.copy(bot), 1);
   }
+  m.clearUvShift();
+}
+
+/**
+ * A spalled slab of render / broken block lying flat on the ground, tipped a few
+ * degrees and turned to an arbitrary yaw.
+ *
+ * The counterpart to `rock()`: `rock` is a lump, this is a PLATE, and a wall foot
+ * needs both. Every edge is chamfered so the raking sun puts a bright line along
+ * the arris, which is what makes a 20 cm chip legible at 25 m against sand of a
+ * similar albedo. The UV phase is randomised per chip, so no two carry the same
+ * stain.
+ */
+export function blockChip(
+  b: LevelBuild,
+  mat: MatKey,
+  x: number, groundY: number, z: number,
+  size: number,
+  rng: Rng,
+): void {
+  const thick = size * rng.range(0.16, 0.38);
+  const m = new THREE.Matrix4()
+    .makeTranslation(x, groundY + thick * 0.55, z)
+    .multiply(new THREE.Matrix4().makeRotationY(rng.range(0, Math.PI * 2)))
+    .multiply(new THREE.Matrix4().makeRotationX(rng.range(-0.22, 0.22)))
+    .multiply(new THREE.Matrix4().makeRotationZ(rng.range(-0.22, 0.22)));
+  // RELATIVE push, like `rock()` above: both are called from inside a landmark's
+  // own frame as often as from world space, and a chip that ignores the frame it
+  // was authored in lands on the far side of the map.
+  b.xf.push(m);
+  const g = b.m(mat);
+  g.setUvShift(rng.range(0, 16), rng.range(0, 16));
+  g.chamferBox(0, 0, 0, size * rng.range(0.7, 1.1), thick, size * rng.range(0.55, 1.0), thick * 0.35, 1, rng, 0.25);
+  g.clearUvShift();
+  b.xf.pop();
 }
 
 export interface SkirtOpts {
@@ -80,6 +119,19 @@ export interface SkirtOpts {
   readonly sandMat?: MatKey;
   /** Skip the outward scatter (interiors, tight alleys). */
   readonly noScatter?: boolean;
+  /**
+   * Metres to raise the whole transition above `groundAt`.
+   *
+   * A landmark that stands on a PAVED surface — the market hall on the ALPHA
+   * terrace slab, a shed on the quay apron — does not meet the terrain, it meets
+   * the paving, and a drift laid on the terrain is a drift buried under 12 cm of
+   * flagstone. Round 1's weapon_ads frame shows exactly that: the hall's plinth
+   * runs 570 px as a single unbroken strip with the rubble that was supposed to
+   * break it sitting invisibly beneath the square.
+   */
+  readonly lift?: number;
+  /** Fraction of the foot chunks emitted as spalled rectangular block. 0..1. */
+  readonly blockFraction?: number;
 }
 
 /**
@@ -91,7 +143,7 @@ export interface SkirtOpts {
 export function groundSkirt(
   b: LevelBuild,
   outline: readonly Pt2[],
-  groundAt: (x: number, z: number) => number,
+  groundAtRaw: (x: number, z: number) => number,
   rng: Rng,
   opts: SkirtOpts = {},
 ): void {
@@ -99,6 +151,9 @@ export function groundSkirt(
   const amount = opts.amount ?? 1;
   const rubbleMat = opts.rubbleMat ?? 'rubble';
   const sandMat = opts.sandMat ?? 'sand';
+  const lift = opts.lift ?? 0;
+  const blockFraction = opts.blockFraction ?? 0.4;
+  const groundAt = lift === 0 ? groundAtRaw : (x: number, z: number): number => groundAtRaw(x, z) + lift;
   const sand = b.m(sandMat);
   const n = outline.length;
 
@@ -173,27 +228,38 @@ export function groundSkirt(
       prevOutX = outX; prevOutZ = outZ; prevOutY = outY;
     }
 
-    // Rubble along the foot, and scatter beyond it.
-    const chunks = Math.max(1, Math.round(len / 1.35));
+    // Rubble along the foot, and scatter beyond it. Round 1's chunks were all
+    // `rock()` — five-sided cones that at 20 m read as a row of small dark
+    // pyramids rather than as broken masonry. Half of them are now SPALLED
+    // BLOCK: chamfered slabs lying flat with an arbitrary yaw, which is what
+    // actually falls off a rendered wall, and which reads correctly at every
+    // distance because it has a lit top face and a shadowed end.
+    const chunks = Math.max(2, Math.round(len / 0.95));
     for (let i = 0; i < chunks; i++) {
-      const t = (i + rng.range(0.15, 0.85)) / chunks;
-      const px = a.x + ex * t + nx * rng.range(0.05, 0.5);
-      const pz = a.z + ez * t + nz * rng.range(0.05, 0.5);
-      const s = rng.range(0.13, 0.36) * (0.7 + amount * 0.4);
-      rock(b, rng.bool(0.62) ? rubbleMat : sandMat, px, groundAt(px, pz) + s * 0.32, pz, s, s * rng.range(0.4, 0.75), s * rng.range(0.7, 1.3), rng, 5);
+      const t = (i + rng.range(0.1, 0.9)) / chunks;
+      const px = a.x + ex * t + nx * rng.range(0.02, 0.62);
+      const pz = a.z + ez * t + nz * rng.range(0.02, 0.62);
+      const s = rng.range(0.13, 0.44) * (0.7 + amount * 0.4);
+      const mat = rng.bool(0.62) ? rubbleMat : sandMat;
+      if (rng.bool(blockFraction)) {
+        blockChip(b, mat, px, groundAt(px, pz), pz, s, rng);
+      } else {
+        rock(b, mat, px, groundAt(px, pz) + s * 0.32, pz, s, s * rng.range(0.4, 0.75), s * rng.range(0.7, 1.3), rng, 5);
+      }
     }
     if (!opts.noScatter) {
-      const scatter = Math.max(1, Math.round(len / 2.6));
+      const scatter = Math.max(2, Math.round(len / 1.7));
       for (let i = 0; i < scatter; i++) {
         // Distance falloff: r = 1 - sqrt(u) concentrates chunks near the wall,
         // which is where wash and spall actually accumulate.
         const u = rng.next();
-        const dist = 0.6 + (1 - Math.sqrt(u)) * 2.4;
+        const dist = 0.6 + (1 - Math.sqrt(u)) * 2.6;
         const t = rng.next();
         const px = a.x + ex * t + nx * dist + rng.range(-0.4, 0.4);
         const pz = a.z + ez * t + nz * dist + rng.range(-0.4, 0.4);
-        const s = rng.range(0.07, 0.2);
-        rock(b, rng.bool(0.5) ? rubbleMat : sandMat, px, groundAt(px, pz) + s * 0.25, pz, s, s * 0.5, s * 1.1, rng, 5);
+        const s = rng.range(0.07, 0.24);
+        if (rng.bool(blockFraction * 0.7)) blockChip(b, rng.bool(0.5) ? rubbleMat : sandMat, px, groundAt(px, pz), pz, s, rng);
+        else rock(b, rng.bool(0.5) ? rubbleMat : sandMat, px, groundAt(px, pz) + s * 0.25, pz, s, s * 0.5, s * 1.1, rng, 5);
       }
     }
   }

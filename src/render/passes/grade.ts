@@ -31,7 +31,13 @@ import {
   type RenderGraph,
   type RenderPass,
 } from '@/engine/types';
-import { GLSL_AGX, GLSL_COLOR_COMMON, GLSL_GRADE } from '@/render/color';
+import {
+  EXPOSURE_PRESET_EV,
+  GLSL_AGX,
+  GLSL_COLOR_COMMON,
+  GLSL_GRADE,
+  exposureScaleFromEv,
+} from '@/render/color';
 import { GLSL_NOISE, ut, uf } from '@/render/fullscreen';
 import { RT_GRADED } from '@/render/targets';
 import { GLSL_COC, type PostChainState } from '@/render/passes/chain';
@@ -83,19 +89,30 @@ export class TonemapPass implements RenderPass {
     graph.fullscreen(
       `post.tonemap.${dofActive ? 'dof' : 'plain'}`,
       /* glsl */ `
-        vec3 scene = max(texture(uColor, vUv).rgb, vec3(0.0));
+        // Sanitised, not just clamped to zero: a NaN survives max(x, 0.0) on
+        // every driver we ship against, and one that reaches AgX comes out of
+        // its terminal clamp as 1.0 — a white pixel that then blooms. See
+        // ironSanitize in color.ts.
+        vec3 scene = ironSanitize(texture(uColor, vUv).rgb);
 
         #ifdef USE_DOF
           vec2 lens = ironDofFocus(uDepth, uFocus, uCocScale, uAutoFocus);
           float depth = texture(uDepth, vUv).r;
           float coc = ironCoc(depth, lens.x, lens.y, uMaxCoc, uFarGain);
-          vec3 blurred = texture(uDof, vUv).rgb;
+          vec3 blurred = ironSanitize(texture(uDof, vUv).rgb);
           scene = mix(scene, blurred, smoothstep(0.6, 1.8, coc));
         #endif
 
         float exposureScale = texelFetch(uExposure, ivec2(0, 0), 0).r;
+        // The exposure pass guards its own output, but this multiplier reaches
+        // every pixel in the frame, so it is worth the one comparison here too.
+        // The fallback is the GOLDEN ANCHOR, never 1.0: the scene is photometric
+        // (LOOK_SPEC §2.1, mid grey at 957 cd/m2), so a unit exposure is thirteen
+        // stops hot and renders exactly the uniform white this guard exists to
+        // prevent.
+        if (!(exposureScale > 0.0) || !(exposureScale < 1.0e12)) exposureScale = uExposureFallback;
         vec3 exposed = scene * exposureScale;
-        exposed += max(texture(uBloom, vUv).rgb, vec3(0.0)) * uBloomIntensity;
+        exposed += ironSanitize(texture(uBloom, vUv).rgb) * uBloomIntensity;
 
         vec3 display = ironAgx(exposed);
         outColor = vec4(ironGrade(display), 1.0);
@@ -107,6 +124,7 @@ export class TonemapPass implements RenderPass {
         uDepth: ut(graph.texture(RTId.SceneDepth)),
         uDof: ut(graph.texture(RTId.DofResult)),
         uBloomIntensity: uf(BLOOM_INTENSITY),
+        uExposureFallback: uf(exposureScaleFromEv(EXPOSURE_PRESET_EV)),
         uFocus: uf(dof.focus),
         uCocScale: uf(dof.scale),
         uMaxCoc: uf(dof.maxCoc),
@@ -126,6 +144,7 @@ export class TonemapPass implements RenderPass {
           uniform sampler2D uDepth;
           uniform sampler2D uDof;
           uniform float uBloomIntensity;
+          uniform float uExposureFallback;
           uniform float uFocus;
           uniform float uCocScale;
           uniform float uMaxCoc;

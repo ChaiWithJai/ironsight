@@ -118,9 +118,17 @@ uniform sampler2D ironAoTex;
 
 #define IRON_BLOCKER_TAPS ${blockerTaps}
 #define IRON_PCF_TAPS ${filterTaps}
-/** Hard ceilings, in METRES, on how far a bias may walk a sample. See ironCascade. */
-#define IRON_MAX_NORMAL_OFFSET 0.22
-#define IRON_MAX_DEPTH_BIAS 0.13
+/**
+ * Safety ceilings. Both are generous on purpose — the receiver-plane bias in
+ * \`ironCascade\` is what actually removes grazing acne now, so these only have to
+ * stop a degenerate normal from producing an infinity. See ironCascade.
+ */
+#define IRON_MAX_NORMAL_OFFSET 1.0
+#define IRON_MAX_DEPTH_BIAS 0.6
+/** Minimum |N·L_axis|. Below this the receiver is edge-on and its plane is unusable. */
+#define IRON_MIN_NZ 0.05
+/** tan of the steepest receiver slope the plane bias will follow (83°). */
+#define IRON_MAX_PLANE_SLOPE 8.0
 #define IRON_MAX_LOCAL_LIGHTS ${IRON_MAX_LOCAL_LIGHTS}
 #define IRON_LIGHT_BASE ${V_LIGHT_BASE}
 
@@ -159,14 +167,54 @@ float ironAtlas( const in int cascade, const in vec2 local ) {
 }
 
 /**
- * One cascade of contact-hardening PCSS.
+ * Centre of the atlas texel that \`uv\` (cascade-local) lands in. The clamp
+ * mirrors \`ironAtlas\`'s exactly: a tap that walks off the tile reads the edge
+ * texel, so the receiver plane has to be evaluated at that same edge texel or
+ * the two disagree by the whole overshoot and the cascade border shadows itself.
+ */
+vec2 ironTexelCentre( const in vec2 uv, const in float texels ) {
+  return ( floor( clamp( uv, vec2( 0.0 ), vec2( 1.0 ) ) * texels ) + 0.5 ) / texels;
+}
+
+/**
+ * One cascade of contact-hardening PCSS, with a RECEIVER-PLANE DEPTH BIAS.
  *
  * The atlas stores DISTANCE FROM THE LIGHT PLANE IN METRES, not a normalised
  * device depth, which is the whole reason the penumbra can be physical: the
- * blocker search returns an average occluder distance in metres, the gap is a
- * real gap, and the penumbra half-width is that gap times tan(0.265°). A 1 m
- * gap therefore gives ~9 mm of penumbra and a 10 m gap ~90 mm — LOOK_SPEC §2.6
- * — with no fudge factor anywhere between them.
+ * blocker search returns an average occluder gap in metres and the penumbra
+ * half-width is that gap times tan(0.265°). A 1 m gap therefore gives ~9 mm of
+ * penumbra and a 10 m gap ~90 mm — LOOK_SPEC §2.6 — with no fudge factor.
+ *
+ * THE RECEIVER PLANE IS WHY THIS WORKS AT ALL AT GOLDEN HOUR, AND ITS ABSENCE
+ * IS WHAT PREVIOUSLY BLACKENED THE ENTIRE FRAME.
+ * ---------------------------------------------------------------------------
+ * With the sun 11° up, open ground is only 11° off parallel to the light rays,
+ * so the depth stored in the atlas changes by 1/tan(11°) = 5.1 METRES for every
+ * metre the kernel walks sideways. A PCSS kernel in cascade 0 is ~0.17 m wide,
+ * which is 0.85 m of legitimate depth change — six times any constant bias that
+ * would not peter-pan a crate. Every tap therefore read "something closer than
+ * me" and the ground shadowed itself to zero everywhere, in every shot in the
+ * game. What looked like "no shadow pass is running" was in fact a shadow pass
+ * returning FULL occlusion for the whole world, with all the apparent lighting
+ * coming from the sky environment.
+ *
+ * The fix is exact rather than a fudge. coord = M * P is affine, so the three
+ * rows of M give u, v and depth as linear functions of world position. For a
+ * displacement t inside the receiver's own tangent plane (N·t = 0), decomposing
+ * t in the orthonormal light basis eU = 2R·rowU, eV = 2R·rowV, eZ = rowZ gives
+ *
+ *     dz = -4R² · ( (N·rowU)·du + (N·rowV)·dv ) / (N·rowZ)
+ *
+ * i.e. the exact depth of the receiver's own surface at any other point of the
+ * shadow map. Comparing each tap against THAT instead of against one constant
+ * makes a flat receiver compare equal to itself no matter how grazing it is,
+ * while a real occluder — which is not on the plane — still fails the test.
+ *
+ * The tap's plane depth is evaluated at the TEXEL CENTRE, not at the tap uv,
+ * because the atlas is point-sampled and therefore returns the depth the
+ * rasteriser wrote at that texel's centre. Matching the two removes the last
+ * half-texel of gradient error and is what lets the residual constant bias be
+ * centimetres rather than metres.
  *
  * A cleared texel reads 0 and is treated as EMPTY SKY, never as an occluder at
  * the light plane.
@@ -176,34 +224,45 @@ float ironCascade( const in int cascade, const in vec3 worldPos, const in vec3 w
   vec4 bias = ironVec[${V_BIAS}];
   float texelWorld = ironVec[${V_TEXEL_WORLD}][ cascade ];
   float radius = ironVec[${V_CASCADE_RADIUS}][ cascade ];
+  mat4 m = ironMatrix[${M_CASCADE0} + cascade];
+
+  // Rows of the affine part: u, v and depth as linear functions of world pos.
+  // (GLSL indexes mat4 by COLUMN, hence the transpose by hand.)
+  vec3 rowU = vec3( m[0][0], m[1][0], m[2][0] );
+  vec3 rowV = vec3( m[0][1], m[1][1], m[2][1] );
+  vec3 rowZ = vec3( m[0][2], m[1][2], m[2][2] );
 
   // NORMAL-OFFSET BIAS, sized in cascade TEXELS rather than world units — the
-  // distinction LOOK_SPEC §2.6 insists on. At golden hour almost every lit
-  // surface is a raking wall, and a bias big enough to stop acne there in world
-  // units peter-pans the crate sitting on the ground two metres away.
-  //
-  // BOTH TERMS ARE CAPPED IN METRES, AND THAT CAP IS THE POINT. 'slope' is
-  // tan(angle between the surface and the light), and at an 11° sun EVERY
-  // horizontal surface in the game sits at the clamp (tan 79° = 5.1), so the
-  // texel-proportional bias is at its maximum everywhere at once. Uncapped that
-  // is 1.7 m of normal offset and 2.2 m of depth bias in cascade 2 — and both
-  // detach the shadow from its object by very nearly their own length along a
-  // grazing receiver, so a 1 m crate past 38 m lost its entire 5 m shadow. The
-  // caps hold the total detachment under ~0.35 m at every distance, which is
-  // sub-pixel past 30 m; the residual acne that buys is 200 m away, inside the
-  // aerial-perspective veil, and is the correct side of that trade
-  // (LOOK_SPEC §2.6: "distant terrain carries no resolvable shadow detail").
-  float slope = sqrt( max( 1.0 - ndl * ndl, 0.0 ) ) / max( abs( ndl ), 0.12 );
-  float normalOffset = min( texelWorld * bias.y * ( 1.0 + min( slope, 4.0 ) ), IRON_MAX_NORMAL_OFFSET );
+  // distinction LOOK_SPEC §2.6 insists on. It is scaled by sin(θ) so it vanishes
+  // on a surface facing the sun (where it would only peter-pan) and is at full
+  // strength on a raking one. It is not doing the anti-acne work any more — the
+  // receiver plane is — so 1.5 texels is enough to cover interpolated vertex
+  // normals disagreeing with the rasterised triangle.
+  float sinTheta = sqrt( max( 1.0 - ndl * ndl, 0.0 ) );
+  float normalOffset = min( texelWorld * bias.y * sinTheta, IRON_MAX_NORMAL_OFFSET );
   vec3 offsetPos = worldPos + worldNormal * normalOffset;
 
-  vec3 coord = ( ironMatrix[${M_CASCADE0} + cascade] * vec4( offsetPos, 1.0 ) ).xyz;
+  vec3 coord = ( m * vec4( offsetPos, 1.0 ) ).xyz;
   if ( coord.x < 0.0 || coord.x > 1.0 || coord.y < 0.0 || coord.y > 1.0 ) return -1.0;
 
-  // Slope-scaled depth bias, also in texels of THIS cascade. The normal offset
-  // above already walks the sample a texel off a raking surface, so this only
-  // has to cover the residual, and it is capped hard for the same reason.
-  float receiver = coord.z - min( texelWorld * bias.x * ( 1.0 + min( slope, 4.0 ) ), IRON_MAX_DEPTH_BIAS );
+  // ---- receiver plane -----------------------------------------------------
+  float nz = dot( worldNormal, rowZ );
+  float nzSafe = nz < 0.0 ? min( nz, -IRON_MIN_NZ ) : max( nz, IRON_MIN_NZ );
+  vec2 grad = ( -4.0 * radius * radius / nzSafe )
+            * vec2( dot( worldNormal, rowU ), dot( worldNormal, rowV ) );
+  // |grad| is exactly 2R·tan(angle between the receiver and the light axis), so
+  // clamping tan caps how far the plane may be extrapolated before a near
+  // edge-on surface starts inventing depth.
+  float gradMax = IRON_MAX_PLANE_SLOPE * 2.0 * radius;
+  float gradLen = length( grad );
+  if ( gradLen > gradMax ) grad *= gradMax / gradLen;
+
+  float tileTexels = 2.0 * radius / max( texelWorld, 1e-5 );
+  // The residual: sub-texel non-planarity (terrain, brick relief) and fp error.
+  // Proportional to how much depth one texel spans on THIS receiver, which is
+  // texelWorld·tan(θ), and small because the plane carries the systematic part.
+  float tanSlope = min( sinTheta / max( abs( ndl ), 0.02 ), IRON_MAX_PLANE_SLOPE );
+  float depthBias = min( 0.015 + bias.x * texelWorld * tanSlope, IRON_MAX_DEPTH_BIAS );
 
   float phi = ironDitherAngle();
   float uvPerMetre = 1.0 / ( 2.0 * radius );
@@ -216,31 +275,32 @@ float ironCascade( const in int cascade, const in vec3 worldPos, const in vec3 w
   // that cannot physically shade this pixel, inflating the gap and giving the
   // crate that touches the paving the same soft edge as the roofline behind it.
   // Sizing it in cascade texels ties the search to the resolution that cascade
-  // can actually resolve: ~0.15 m in cascade 0, ~1 m in cascade 3.
-  float searchUv = clamp( texelWorld * bias.z, 0.05, 1.0 ) * uvPerMetre;
-  float blockerSum = 0.0;
+  // can actually resolve: ~0.17 m in cascade 0, ~5 m in cascade 3.
+  float searchUv = clamp( texelWorld * bias.z, 0.05, 2.5 ) * uvPerMetre;
+  float gapSum = 0.0;
   float blockerCount = 0.0;
   for ( int i = 0; i < IRON_BLOCKER_TAPS; i ++ ) {
-    vec2 o = ironVogel( i, IRON_BLOCKER_TAPS, phi ) * searchUv;
-    float d = ironAtlas( cascade, coord.xy + o );
-    if ( d > 1e-4 && d < receiver ) {
-      blockerSum += d;
+    vec2 tap = coord.xy + ironVogel( i, IRON_BLOCKER_TAPS, phi ) * searchUv;
+    float reference = coord.z + dot( grad, ironTexelCentre( tap, tileTexels ) - coord.xy ) - depthBias;
+    float d = ironAtlas( cascade, tap );
+    if ( d > 1e-4 && d < reference ) {
+      gapSum += reference - d;
       blockerCount += 1.0;
     }
   }
   if ( blockerCount < 0.5 ) return 1.0;
 
-  float gap = max( receiver - blockerSum / blockerCount, 0.0 );
-
   // Contact hardening: penumbra half-width = gap * tan(sun angular radius).
+  float gap = gapSum / blockerCount;
   float penumbraUv = max( gap * atlas.z * uvPerMetre, atlas.w * texelWorld * uvPerMetre );
 
   // ---- filter ------------------------------------------------------------
   float lit = 0.0;
   for ( int i = 0; i < IRON_PCF_TAPS; i ++ ) {
-    vec2 o = ironVogel( i, IRON_PCF_TAPS, phi + 1.13 ) * penumbraUv;
-    float d = ironAtlas( cascade, coord.xy + o );
-    lit += ( d <= 1e-4 || d >= receiver ) ? 1.0 : 0.0;
+    vec2 tap = coord.xy + ironVogel( i, IRON_PCF_TAPS, phi + 1.13 ) * penumbraUv;
+    float reference = coord.z + dot( grad, ironTexelCentre( tap, tileTexels ) - coord.xy ) - depthBias;
+    float d = ironAtlas( cascade, tap );
+    lit += ( d <= 1e-4 || d >= reference ) ? 1.0 : 0.0;
   }
   return lit / float( IRON_PCF_TAPS );
 }

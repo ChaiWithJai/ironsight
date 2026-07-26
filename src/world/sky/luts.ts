@@ -371,7 +371,12 @@ export function declareSkyBakes(assets: AssetRegistry, quality: Readonly<Quality
     version: 1,
     cost: 6,
     run: (ctx) => {
-      const size = Math.max(128, Math.min(512, ctx.grantedTexelSize(256)));
+      // 512 requested rather than 256. The weather channel is read over an
+      // 8.7 km tile, so 256² is 34 m per texel — 6–10 screen pixels at the
+      // distance the deck is actually drawn at, which is magnification, not
+      // minification. `ironCloudFetch` removes the reconstruction artefact that
+      // causes; halving the texel size removes half of what it has to fix.
+      const size = Math.max(256, Math.min(512, ctx.grantedTexelSize(512)));
       return ctx.gpu.render({
         name: 'sky.noise.cloud',
         width: size,
