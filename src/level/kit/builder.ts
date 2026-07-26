@@ -1,0 +1,393 @@
+/**
+ * The geometry substrate every piece of HARBOUR REACH is built on.
+ *
+ * OWNER: LEVEL.
+ *
+ * Why a hand-rolled builder rather than composing `THREE.BoxGeometry`s: a town
+ * is ~1200 discrete pieces and one `Mesh` per piece is 1200 draw calls, which is
+ * three times the Ultra ceiling on its own. Everything is appended into ONE
+ * vertex stream per material and uploaded as a single `BufferGeometry`, so the
+ * whole level is ~15 draws no matter how much detail we add. That is what makes
+ * "detail density is final quality" affordable.
+ *
+ * Two conventions worth knowing before you read a caller:
+ *
+ *  - `Xform` is a shared transform stack. Emitters read it at push time; there
+ *    is exactly one stack per build so a building can be authored in convenient
+ *    local coordinates (origin at the base centre, +Z front) and then leaned,
+ *    yawed and planted with one matrix.
+ *  - UVs are METRES, not 0..1. Every surface in the game is textured by a
+ *    tiling material, so a UV that tracks world scale means a 3 m wall and a
+ *    30 m warehouse get the same stucco grain. `uvScale` on an emitter is a
+ *    multiplier on that, for the rare surface that wants a different density.
+ */
+import * as THREE from 'three';
+
+const _a = new THREE.Vector3();
+const _b = new THREE.Vector3();
+const _c = new THREE.Vector3();
+const _n = new THREE.Vector3();
+const _e1 = new THREE.Vector3();
+const _e2 = new THREE.Vector3();
+
+/** Shared transform stack. One per build; every `MeshBuilder` reads it. */
+export class Xform {
+  readonly matrix = new THREE.Matrix4();
+  readonly normalMatrix = new THREE.Matrix3();
+  private readonly stack: THREE.Matrix4[] = [];
+
+  push(m: THREE.Matrix4): void {
+    this.stack.push(this.matrix.clone());
+    this.matrix.multiply(m);
+    this.normalMatrix.getNormalMatrix(this.matrix);
+  }
+
+  /** Push an absolute matrix, discarding the current one. Used at the top of a landmark. */
+  pushAbsolute(m: THREE.Matrix4): void {
+    this.stack.push(this.matrix.clone());
+    this.matrix.copy(m);
+    this.normalMatrix.getNormalMatrix(this.matrix);
+  }
+
+  pop(): void {
+    const m = this.stack.pop();
+    if (m) this.matrix.copy(m);
+    else this.matrix.identity();
+    this.normalMatrix.getNormalMatrix(this.matrix);
+  }
+
+  identity(): void {
+    this.stack.length = 0;
+    this.matrix.identity();
+    this.normalMatrix.identity();
+  }
+}
+
+/**
+ * One interleaved-by-attribute vertex stream. Plain JS arrays during the build
+ * (append is what they are good at) and typed arrays exactly once, at `finish`.
+ */
+export class MeshBuilder {
+  readonly position: number[] = [];
+  readonly normal: number[] = [];
+  readonly uv: number[] = [];
+  readonly index: number[] = [];
+
+  constructor(private readonly xf: Xform) {}
+
+  get vertexCount(): number {
+    return this.position.length / 3;
+  }
+
+  get triangleCount(): number {
+    return this.index.length / 3;
+  }
+
+  /** Append one vertex through the current transform. Returns its index. */
+  vertex(px: number, py: number, pz: number, nx: number, ny: number, nz: number, u: number, v: number): number {
+    _a.set(px, py, pz).applyMatrix4(this.xf.matrix);
+    _n.set(nx, ny, nz).applyMatrix3(this.xf.normalMatrix).normalize();
+    this.position.push(_a.x, _a.y, _a.z);
+    this.normal.push(_n.x, _n.y, _n.z);
+    this.uv.push(u, v);
+    return this.position.length / 3 - 1;
+  }
+
+  tri(i0: number, i1: number, i2: number): void {
+    this.index.push(i0, i1, i2);
+  }
+
+  /**
+   * A planar quad, wound a→b→c→d (counter-clockwise seen from the front). The
+   * normal is the face normal; UVs run along the a→b and a→d edges in metres, so
+   * a rectangle never stretches no matter how it is proportioned.
+   */
+  quad(
+    a: THREE.Vector3,
+    b: THREE.Vector3,
+    c: THREE.Vector3,
+    d: THREE.Vector3,
+    uvScale = 1,
+    uOffset = 0,
+    vOffset = 0,
+  ): void {
+    _e1.subVectors(b, a);
+    _e2.subVectors(d, a);
+    _n.crossVectors(_e1, _e2).normalize();
+    const uLen = _e1.length() * uvScale;
+    const vLen = _e2.length() * uvScale;
+    // The c corner is not necessarily at (uLen, vLen) if the quad is a
+    // trapezoid, so project it rather than assuming a parallelogram.
+    _c.subVectors(c, a);
+    const uc = _e1.lengthSq() > 1e-9 ? (_c.dot(_e1) / _e1.length()) * uvScale : uLen;
+    const vc = _e2.lengthSq() > 1e-9 ? (_c.dot(_e2) / _e2.length()) * uvScale : vLen;
+    const i0 = this.vertex(a.x, a.y, a.z, _n.x, _n.y, _n.z, uOffset, vOffset);
+    const i1 = this.vertex(b.x, b.y, b.z, _n.x, _n.y, _n.z, uOffset + uLen, vOffset);
+    const i2 = this.vertex(c.x, c.y, c.z, _n.x, _n.y, _n.z, uOffset + uc, vOffset + vc);
+    const i3 = this.vertex(d.x, d.y, d.z, _n.x, _n.y, _n.z, uOffset, vOffset + vLen);
+    this.index.push(i0, i1, i2, i0, i2, i3);
+  }
+
+  /** Triangle with a flat normal. */
+  triangle(a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3, uvScale = 1): void {
+    _e1.subVectors(b, a);
+    _e2.subVectors(c, a);
+    _n.crossVectors(_e1, _e2).normalize();
+    const i0 = this.vertex(a.x, a.y, a.z, _n.x, _n.y, _n.z, 0, 0);
+    const i1 = this.vertex(b.x, b.y, b.z, _n.x, _n.y, _n.z, _e1.length() * uvScale, 0);
+    const i2 = this.vertex(c.x, c.y, c.z, _n.x, _n.y, _n.z, _e1.dot(_e2) / Math.max(_e1.length(), 1e-6) * uvScale, _e2.length() * uvScale);
+    this.index.push(i0, i1, i2);
+  }
+
+  /**
+   * Axis-aligned box in the CURRENT local frame, from `min` to `max`.
+   * `faces` is a 6-bit mask (+X −X +Y −Y +Z −Z); omitting a hidden face is the
+   * cheapest triangle saving there is and a party wall between two terraced
+   * houses is the common case.
+   */
+  box(min: THREE.Vector3, max: THREE.Vector3, uvScale = 1, faces = 0x3f): void {
+    const { x: x0, y: y0, z: z0 } = min;
+    const { x: x1, y: y1, z: z1 } = max;
+    const p = (x: number, y: number, z: number, out: THREE.Vector3): THREE.Vector3 => out.set(x, y, z);
+    const q = (
+      ax: number, ay: number, az: number,
+      bx: number, by: number, bz: number,
+      cx: number, cy: number, cz: number,
+      dx: number, dy: number, dz: number,
+    ): void => {
+      const va = p(ax, ay, az, _tmpQ[0]);
+      const vb = p(bx, by, bz, _tmpQ[1]);
+      const vc = p(cx, cy, cz, _tmpQ[2]);
+      const vd = p(dx, dy, dz, _tmpQ[3]);
+      this.quad(va, vb, vc, vd, uvScale);
+    };
+    if (faces & 0x01) q(x1, y0, z1, x1, y0, z0, x1, y1, z0, x1, y1, z1); // +X
+    if (faces & 0x02) q(x0, y0, z0, x0, y0, z1, x0, y1, z1, x0, y1, z0); // -X
+    if (faces & 0x04) q(x0, y1, z1, x1, y1, z1, x1, y1, z0, x0, y1, z0); // +Y
+    if (faces & 0x08) q(x0, y0, z0, x1, y0, z0, x1, y0, z1, x0, y0, z1); // -Y
+    if (faces & 0x10) q(x0, y0, z1, x1, y0, z1, x1, y1, z1, x0, y1, z1); // +Z
+    if (faces & 0x20) q(x1, y0, z0, x0, y0, z0, x0, y1, z0, x1, y1, z0); // -Z
+  }
+
+  /** Convenience: box from a centre and half-extents. */
+  boxAt(cx: number, cy: number, cz: number, hx: number, hy: number, hz: number, uvScale = 1, faces = 0x3f): void {
+    this.box(_boxMin.set(cx - hx, cy - hy, cz - hz), _boxMax.set(cx + hx, cy + hy, cz + hz), uvScale, faces);
+  }
+
+  /**
+   * Vertical prism over a closed 2D polygon (XZ plane), from `y0` to `y1`.
+   * The polygon must be counter-clockwise in XZ; caps are triangle-fanned, which
+   * is correct for the convex outlines this level uses and acceptably wrong for
+   * nothing it uses.
+   */
+  prism(poly: readonly number[], y0: number, y1: number, uvScale = 1, cap = true, floor = false): void {
+    const n = poly.length / 2;
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      const ax = poly[i * 2];
+      const az = poly[i * 2 + 1];
+      const bx = poly[j * 2];
+      const bz = poly[j * 2 + 1];
+      this.quad(
+        _tmpQ[0].set(ax, y0, az),
+        _tmpQ[1].set(bx, y0, bz),
+        _tmpQ[2].set(bx, y1, bz),
+        _tmpQ[3].set(ax, y1, az),
+        uvScale,
+      );
+    }
+    if (cap) {
+      const base = this.vertexCount;
+      for (let i = 0; i < n; i++) {
+        this.vertex(poly[i * 2], y1, poly[i * 2 + 1], 0, 1, 0, poly[i * 2] * uvScale, poly[i * 2 + 1] * uvScale);
+      }
+      for (let i = 1; i < n - 1; i++) this.tri(base, base + i, base + i + 1);
+    }
+    if (floor) {
+      const base = this.vertexCount;
+      for (let i = 0; i < n; i++) {
+        this.vertex(poly[i * 2], y0, poly[i * 2 + 1], 0, -1, 0, poly[i * 2] * uvScale, poly[i * 2 + 1] * uvScale);
+      }
+      for (let i = 1; i < n - 1; i++) this.tri(base, base + i + 1, base + i);
+    }
+  }
+
+  /**
+   * Cylinder about +Y, smooth-shaded around the barrel. `segments` below 8 reads
+   * as a prism, which is sometimes what you want (a stone bollard) — pass
+   * `flat` for that.
+   */
+  cylinder(
+    cx: number,
+    cy: number,
+    cz: number,
+    radiusBottom: number,
+    radiusTop: number,
+    height: number,
+    segments: number,
+    uvScale = 1,
+    caps = true,
+    flat = false,
+  ): void {
+    const y0 = cy;
+    const y1 = cy + height;
+    const slope = (radiusBottom - radiusTop) / Math.max(height, 1e-4);
+    if (flat) {
+      for (let i = 0; i < segments; i++) {
+        const a0 = (i / segments) * Math.PI * 2;
+        const a1 = ((i + 1) / segments) * Math.PI * 2;
+        this.quad(
+          _tmpQ[0].set(cx + Math.cos(a0) * radiusBottom, y0, cz + Math.sin(a0) * radiusBottom),
+          _tmpQ[1].set(cx + Math.cos(a1) * radiusBottom, y0, cz + Math.sin(a1) * radiusBottom),
+          _tmpQ[2].set(cx + Math.cos(a1) * radiusTop, y1, cz + Math.sin(a1) * radiusTop),
+          _tmpQ[3].set(cx + Math.cos(a0) * radiusTop, y1, cz + Math.sin(a0) * radiusTop),
+          uvScale,
+        );
+      }
+    } else {
+      const base = this.vertexCount;
+      const circ = Math.PI * 2 * Math.max(radiusBottom, radiusTop) * uvScale;
+      for (let i = 0; i <= segments; i++) {
+        const a = (i / segments) * Math.PI * 2;
+        const ca = Math.cos(a);
+        const sa = Math.sin(a);
+        // Normal of a truncated cone: radial component 1, axial component = slope.
+        const nl = Math.hypot(1, slope);
+        const u = (i / segments) * circ;
+        this.vertex(cx + ca * radiusBottom, y0, cz + sa * radiusBottom, ca / nl, slope / nl, sa / nl, u, 0);
+        this.vertex(cx + ca * radiusTop, y1, cz + sa * radiusTop, ca / nl, slope / nl, sa / nl, u, height * uvScale);
+      }
+      for (let i = 0; i < segments; i++) {
+        const a = base + i * 2;
+        this.index.push(a, a + 2, a + 3, a, a + 3, a + 1);
+      }
+    }
+    if (caps) {
+      for (const [y, r, dir] of [
+        [y1, radiusTop, 1],
+        [y0, radiusBottom, -1],
+      ] as const) {
+        if (r <= 1e-4) continue;
+        const base = this.vertexCount;
+        this.vertex(cx, y, cz, 0, dir, 0, 0, 0);
+        for (let i = 0; i <= segments; i++) {
+          const a = (i / segments) * Math.PI * 2;
+          this.vertex(cx + Math.cos(a) * r, y, cz + Math.sin(a) * r, 0, dir, 0, Math.cos(a) * r * uvScale, Math.sin(a) * r * uvScale);
+        }
+        for (let i = 0; i < segments; i++) {
+          if (dir > 0) this.index.push(base, base + 1 + i, base + 2 + i);
+          else this.index.push(base, base + 2 + i, base + 1 + i);
+        }
+      }
+    }
+  }
+
+  /**
+   * A swept tube along a polyline — drainpipes, conduit, mooring rope, laundry
+   * line, crane cable. Parallel-transport framing so a slack catenary does not
+   * twist.
+   */
+  tube(points: readonly THREE.Vector3[], radius: number, sides = 5, uvScale = 1): void {
+    if (points.length < 2) return;
+    const up = _tubeUp.set(0, 1, 0);
+    const tangent = _tubeT;
+    const normal = _tubeN;
+    const binormal = _tubeB;
+    // Seed the frame from the first segment.
+    tangent.subVectors(points[1], points[0]).normalize();
+    normal.copy(Math.abs(tangent.y) > 0.9 ? _tubeAlt.set(1, 0, 0) : up).cross(tangent).normalize();
+    binormal.crossVectors(tangent, normal).normalize();
+    const base = this.vertexCount;
+    let run = 0;
+    for (let i = 0; i < points.length; i++) {
+      if (i > 0) {
+        const prev = points[i - 1];
+        const cur = points[i];
+        run += prev.distanceTo(cur);
+        if (i < points.length - 1) tangent.subVectors(points[i + 1], prev).normalize();
+        else tangent.subVectors(cur, prev).normalize();
+        // Re-orthogonalise rather than rebuilding: this is the parallel transport.
+        normal.copy(binormal).cross(tangent).normalize();
+        binormal.crossVectors(tangent, normal).normalize();
+      }
+      for (let s = 0; s <= sides; s++) {
+        const a = (s / sides) * Math.PI * 2;
+        const ca = Math.cos(a);
+        const sa = Math.sin(a);
+        _n.set(
+          normal.x * ca + binormal.x * sa,
+          normal.y * ca + binormal.y * sa,
+          normal.z * ca + binormal.z * sa,
+        ).normalize();
+        this.vertex(
+          points[i].x + _n.x * radius,
+          points[i].y + _n.y * radius,
+          points[i].z + _n.z * radius,
+          _n.x, _n.y, _n.z,
+          (s / sides) * Math.PI * 2 * radius * uvScale,
+          run * uvScale,
+        );
+      }
+    }
+    const ring = sides + 1;
+    for (let i = 0; i < points.length - 1; i++) {
+      for (let s = 0; s < sides; s++) {
+        const a = base + i * ring + s;
+        this.index.push(a, a + ring, a + ring + 1, a, a + ring + 1, a + 1);
+      }
+    }
+  }
+
+  /**
+   * A slack line between two points (laundry, power, mooring), as a catenary
+   * approximated by a parabola — visually identical over these spans and one
+   * transcendental cheaper per sample.
+   */
+  slackLine(from: THREE.Vector3, to: THREE.Vector3, sag: number, radius: number, segments = 7): void {
+    const pts: THREE.Vector3[] = [];
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments;
+      const p = new THREE.Vector3().lerpVectors(from, to, t);
+      p.y -= sag * 4 * t * (1 - t);
+      pts.push(p);
+    }
+    this.tube(pts, radius, 4, 1);
+  }
+
+  /**
+   * Build the geometry. Called once at the end of the level build; the JS arrays
+   * are dropped afterwards so the ~30 MB of transient number arrays does not sit
+   * in the heap for the rest of the session.
+   */
+  finish(): THREE.BufferGeometry | null {
+    if (this.index.length === 0) return null;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(this.position), 3));
+    g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(this.normal), 3));
+    g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(this.uv), 2));
+    const idx =
+      this.position.length / 3 > 65535
+        ? new THREE.BufferAttribute(new Uint32Array(this.index), 1)
+        : new THREE.BufferAttribute(new Uint16Array(this.index), 1);
+    g.setIndex(idx);
+    g.computeBoundingBox();
+    g.computeBoundingSphere();
+    this.position.length = 0;
+    this.normal.length = 0;
+    this.uv.length = 0;
+    this.index.length = 0;
+    return g;
+  }
+}
+
+const _tmpQ = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+const _boxMin = new THREE.Vector3();
+const _boxMax = new THREE.Vector3();
+const _tubeUp = new THREE.Vector3();
+const _tubeAlt = new THREE.Vector3();
+const _tubeT = new THREE.Vector3();
+const _tubeN = new THREE.Vector3();
+const _tubeB = new THREE.Vector3();
+
+/** Unused-import guard for the shared scratch vectors above. */
+void _b;

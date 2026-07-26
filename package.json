@@ -1,0 +1,27 @@
+{
+  "name": "ironsight",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "IRONSIGHT — a AAA-grade browser FPS built on Three.js",
+  "scripts": {
+    "dev": "bash tools/with-node.sh vite",
+    "build": "bash tools/with-node.sh vite build",
+    "preview": "bash tools/with-node.sh vite preview --port 4173 --strictPort",
+    "typecheck": "tsc --noEmit",
+    "boundaries": "bash tools/with-node.sh node tools/check-boundaries.mjs",
+    "shots": "bash tools/shoot.sh",
+    "verify": "npm run typecheck && npm run boundaries && npm run build"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.19.3",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@types/three": "^0.185.1",
+    "playwright": "^1.62.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.9"
+  }
+}

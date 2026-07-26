@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+
+# Captured frames from tools/shoot.sh — regenerated on demand, never committed.
+tools/shots/
+
+# ---------------------------------------------------------------------------
+# Third-party reference imagery. LOCAL ONLY — NEVER COMMITTED, NEVER SHIPPED.
+#
+# Publicly-published press/store screenshots from released titles, pulled down
+# purely as a calibration target for the visual critic loop. They are consumed
+# as a quality yardstick for light transport, material response and atmosphere;
+# no pixel, texture, model or level layout from them enters the build. Nothing
+# under reference/ is imported by src/, referenced by the bundle, or tracked.
+# ---------------------------------------------------------------------------
+reference/
+dist-*/
+tmp-*/
