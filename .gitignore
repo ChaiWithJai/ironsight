@@ -26,5 +26,12 @@ tools/probe*/
 # under reference/ is imported by src/, referenced by the bundle, or tracked.
 # ---------------------------------------------------------------------------
 reference/
+
+# Blind A/B sheets from tools/compare.sh. These COMPOSITE a reference frame
+# beside ours, so they carry third-party imagery and fall under exactly the same
+# rule as reference/ itself. The .keys/ subdirectory additionally holds the
+# answer keys that critics must not read before recording a verdict.
+tools/compare/
+
 dist-*/
 tmp-*/
