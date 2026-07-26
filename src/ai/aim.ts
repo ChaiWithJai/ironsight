@@ -107,7 +107,9 @@ export function solveAim(bot: Bot, world: AiWorld, self: ActorView, engaged: boo
   bot.settle = Math.max(0, 1 - Math.min(1, error / (3.5 * DEG)) * 0.7 - swing * 0.5);
 
   // ---- deliberate inaccuracy ---------------------------------------------
-  const t = world.time;
+  // Spawn-relative, never absolute: see `Bot.spawnTime`. Two captures of the
+  // same shot must put the same wobble on the same soldier.
+  const t = world.time - bot.spawnTime;
   const wobble =
     (Math.sin(t * bot.errFreqA + bot.errPhaseA) + 0.62 * Math.sin(t * bot.errFreqB + bot.errPhaseB)) / 1.62;
   const wobble2 =

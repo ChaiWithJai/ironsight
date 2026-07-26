@@ -288,19 +288,47 @@ export function wallPanel(b: LevelBuild, o: WallOpts, rng: Rng): void {
         w / 2 + 0.07, 0.055, 0.05, 1, 0x3f,
       );
     } else {
-      // Voussoir band: a ring of short radial blocks following the arc.
+      /**
+       * VOUSSOIR BAND: a ring of short radial blocks following the extrados.
+       *
+       * The count MUST scale with the arc, and this is not a nicety. A fixed
+       * seven blocks around a 1 m arch is a tight course of quoins; the same
+       * seven around the market hall's 2.2 m arcade or the fort's gate leaves
+       * 0.8 m of bare wall between each pair and the arch reads as a row of
+       * loose tabs stuck on the facade — which is exactly what it looked like
+       * the first time this was rendered. Sizing each block to the pitch keeps
+       * the course continuous at every span in the level, from a 0.9 m window
+       * head to a 3.4 m gate.
+       */
       const r = w / 2;
       const xc = (op.x0 + op.x1) / 2;
       const ys = op.y1 - r;
-      for (let i = 0; i < 7; i++) {
-        const a = ((i + 0.5) / 7) * Math.PI;
-        const px = xc - Math.cos(a) * (r + 0.07);
-        const py = ys + Math.sin(a) * (r + 0.07);
+      const ring = r + 0.075;
+      const n = Math.max(7, Math.round((Math.PI * ring) / 0.4));
+      // Chord half-length of one block's share of the arc, plus a hair of
+      // overlap so adjacent blocks meet at the extrados instead of at the
+      // intrados where the radial taper opens a wedge of daylight.
+      const half = (Math.PI * ring) / n / 2 * 1.12;
+      for (let i = 0; i < n; i++) {
+        const a = ((i + 0.5) / n) * Math.PI;
+        const px = xc - Math.cos(a) * ring;
+        const py = ys + Math.sin(a) * ring;
         const bm = b.m(trim);
-        const q = new THREE.Matrix4().makeTranslation(px, py, 0.02);
-        q.multiply(new THREE.Matrix4().makeRotationZ(a - Math.PI / 2));
+        const q = new THREE.Matrix4().makeTranslation(px, py, 0.018);
+        /**
+         * SIGN MATTERS. The ring is parametrised (−cos a, sin a), so its
+         * TANGENT is (sin a, cos a) and the block's long (`half`) axis must lie
+         * along it: rotZ(θ) sends +X to (cos θ, sin θ), so θ = π/2 − a.
+         *
+         * With the negated angle the frame is off by 2a − π: correct at the
+         * crown, ninety degrees out at the haunches. Every block from about 30°
+         * to 60° either side then stands on end with its long axis pointing
+         * radially OUT of the arch, and the course renders as a ring of spikes
+         * — which is what shipped in the first integrated capture of ALPHA.
+         */
+        q.multiply(new THREE.Matrix4().makeRotationZ(Math.PI / 2 - a));
         b.xf.push(q);
-        bm.boxAt(0, 0, 0, 0.075, 0.09, 0.045, 1, 0x3f);
+        bm.boxAt(0, 0, 0, half, 0.105, 0.04, 1, 0x3f);
         b.xf.pop();
       }
     }
@@ -418,9 +446,14 @@ export function facadeOpenings(
   floorIndex: number,
   floorCount: number,
   rng: Rng,
-  opts: { street?: boolean; doorAt?: number; arch?: boolean } = {},
+  opts: { street?: boolean; doorAt?: number; arch?: boolean; detail?: number } = {},
 ): Opening[] {
   const out: Opening[] = [];
+  // The detail budget scales the FURNITURE, never the openings themselves: a
+  // facade with fewer windows reads as a different building, a facade with
+  // fewer shutters reads as the same building further away. Only the second is
+  // an acceptable LOD.
+  const detail = opts.detail ?? 1;
   const margin = 0.55;
   const usable = width - margin * 2;
   if (usable < 1.0) return out;
@@ -455,8 +488,8 @@ export function facadeOpenings(
         y1: floorBase + Math.min(2.5, floorHeight - 0.42),
         kind: 'window',
         glass: true,
-        shutter: rng.bool(0.35) ? 1 : 0,
-        awning: rng.bool(0.55),
+        shutter: rng.bool(0.35 * detail) ? 1 : 0,
+        awning: rng.bool(0.55 * detail),
       });
       continue;
     }
@@ -481,8 +514,8 @@ export function facadeOpenings(
       y1: sill + wh,
       kind: 'window',
       glass: true,
-      shutter: rng.bool(0.62) ? (rng.bool(0.55) ? 1 : rng.bool(0.85) ? 2 : 3) : 0,
-      balcony: !ground && opts.street === true && rng.bool(0.34),
+      shutter: rng.bool(0.62 * detail) ? (rng.bool(0.55) ? 1 : rng.bool(0.85) ? 2 : 3) : 0,
+      balcony: !ground && opts.street === true && rng.bool(0.34 * detail),
     });
   }
   return out;

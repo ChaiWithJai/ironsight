@@ -19,6 +19,7 @@
 import * as THREE from 'three';
 import {
   RenderStage,
+  Stance,
   SurfaceId,
   type AcousticEnvironment,
   type AssetRegistry,
@@ -49,7 +50,15 @@ import {
   type EnvName,
 } from './library';
 import { OcclusionProbe } from './occlusion';
-import { audible, buildListener, emptyListener, solve, type ListenerState, type SolveInput } from './spatial';
+import {
+  audible,
+  buildListener,
+  emptyListener,
+  solve,
+  SPEED_OF_SOUND,
+  type ListenerState,
+  type SolveInput,
+} from './spatial';
 import { STEAL_FADE, Voice, VoicePool } from './voices';
 import { clamp, dbToGain, gainToDb } from './dsp/core';
 import { emptySnapshot, type AudioSnapshot, type BusRow, type IrRow, type VoiceRow } from './snapshot';
@@ -72,6 +81,15 @@ export const AUDIO_DEBUG_SEED = 0x41554449;
 /** Bus meter ballistics: 300 ms integration, 20 dB/s peak decay. */
 const METER_TAU = 0.3;
 const PEAK_DECAY_DB = 20;
+
+/**
+ * Range past which a gunshot is replaced by the separately-baked distant cue.
+ * 260 m is where ~21 kHz of air absorption has taken the muzzle transient below
+ * the body — i.e. where the near cue stops carrying any information a low-pass
+ * of it would not, and starts merely sounding like a muffled near cue, which is
+ * the artefact this swap exists to avoid.
+ */
+const FAR_METRES = 260;
 
 interface CueSet {
   readonly assets: readonly AudioAsset[];
@@ -124,6 +142,8 @@ class IronAudio implements AudioService {
 
   private lastGunWaveform = new Float32Array(192);
   private lastGunLabel = '—';
+  /** Model time of the last reflected report; see `scheduleReflectedTail`. */
+  private lastTailTime = -1;
 
   private debug: DebugScenario | null = null;
   private overlay: AudioDebugPass | null = null;
@@ -228,6 +248,80 @@ class IronAudio implements AudioService {
   }
 
   play(id: SoundId, desc?: SoundEmitDesc): SoundHandle {
+    const source = LIBRARY[id];
+    if (!source) return 0 as SoundHandle;
+
+    // THE LONG-RANGE GUNSHOT MODEL. A rifle report is not one sound that gets
+    // quieter: past a few hundred metres the transient and the mechanics are
+    // gone entirely and what survives is a low thump with no temporal structure,
+    // followed by the town handing the energy back as a diffuse roar. Filtering
+    // the near cue cannot produce either — so beyond `FAR_METRES` the near cue is
+    // REPLACED by `w.distant` (baked with its transients smeared), and at any
+    // range a reflected `w.tail` is scheduled behind the direct arrival.
+    if (source.gunshot && desc?.position && desc.model !== 'ui') {
+      const d = this.tmpA.subVectors(desc.position, this.listener.position).length();
+      // The swapped cue keeps the `gunshot` MODEL — sub coupling, propagation
+      // delay, the long-range air-absorption curve — even though `w.distant` is
+      // not itself flagged as a weapon cue in the library. The flag says "this
+      // recipe is a muzzle report"; the model says "treat this emission like
+      // one", and at 400 m only the second is still true.
+      const handle = d > FAR_METRES
+        ? this.emit('w.distant', { ...desc, model: 'gunshot' }, 0)
+        : this.emit(id, desc, 0);
+      this.scheduleReflectedTail(d, desc.gainDb ?? 0);
+      return handle;
+    }
+
+    return this.emit(id, desc, 0);
+  }
+
+  /**
+   * The reflected report: the same shot arriving a second time off the town.
+   * Emitted head-locked and diffuse rather than from the muzzle, because that is
+   * physically what it is — energy returning from every façade at once, with no
+   * direction of its own. Its level follows the reverberant field's -3 dB per
+   * doubling, not the direct path's -6.
+   */
+  private scheduleReflectedTail(distance: number, gainDb: number): void {
+    // ONE TAIL PER 110 ms, NOT ONE PER SHOT. A 650 rpm burst fires eleven rounds
+    // a second and each reflected report is 1.35 s long, so per-shot tails would
+    // stack sixteen deep — which is not louder or fuller, it is a wash that
+    // pins the reverb send and starves the voice pool through self-stealing.
+    // Real rooms do sum them; the ear does not resolve them, so one representative
+    // tail per burst window is both cheaper and closer to what is heard.
+    if (this.modelTime - this.lastTailTime < 0.11) return;
+    this.lastTailTime = this.modelTime;
+
+    const env = this.env;
+    // The extra path length before the first façade returns: a stone alley hands
+    // it back in ~50 ms, an open shoreline takes half a second to bounce off the
+    // town behind you. Below the enclosure floor there is nothing to reflect at
+    // all, which is why the open-water case is nearly dry rather than merely
+    // quiet.
+    const bounceSeconds = 0.05 + 0.52 * (1 - env.enclosure);
+    // LEVEL, and it is the one number here that is easy to get badly wrong. The
+    // reflected field is the room's response to the source, so it tracks the
+    // room's own wet level; it arrives from everywhere, so it decays at the
+    // reverberant -3 dB per doubling rather than the direct path's -6. The +6
+    // is the reference offset that puts an unoccluded 16 m rifle's tail about
+    // 18 dB under its direct report — which is where it belongs. Anything
+    // louder and the tail outranks the shot in the voice table, which is both
+    // audibly wrong and the fastest way to starve the pool.
+    const levelDb = gainDb + env.wetDb + 6 - 3 * Math.log2(Math.max(distance, 1));
+    if (levelDb < -34) return;
+    this.emit(
+      'w.tail',
+      { gainDb: clamp(levelDb, -34, 6), model: 'ambience' },
+      distance / SPEED_OF_SOUND + bounceSeconds,
+    );
+  }
+
+  /**
+   * The single path that actually claims a voice. `extraDelay` is scheduling
+   * only — it never changes the solved mix, so a delayed cue still tracks a
+   * moving listener while it is in flight.
+   */
+  private emit(id: SoundId, desc: SoundEmitDesc | undefined, extraDelay: number): SoundHandle {
     const recipe = LIBRARY[id];
     if (!recipe) return 0 as SoundHandle;
 
@@ -253,7 +347,11 @@ class IronAudio implements AudioService {
     voice.occlusionOverride = desc?.occlusion ?? Number.NaN;
     voice.occlusion = Number.isNaN(voice.occlusionOverride) ? 0 : voice.occlusionOverride;
     voice.occlusionCountdown = 0;
+    // A head-locked cue has no emitter position. Leaving the previous tenant's
+    // coordinates in the slot costs nothing at runtime and reads as a bug in the
+    // debug table, which is worse.
     if (position) voice.position.copy(position);
+    else voice.position.set(0, 0, 0);
     if (desc?.velocity) voice.velocity.copy(desc.velocity);
     else voice.velocity.set(0, 0, 0);
 
@@ -264,10 +362,11 @@ class IronAudio implements AudioService {
     // Solve once immediately so the very first frame has correct gains and the
     // propagation delay is known before the buffer is scheduled.
     this.solveVoice(voice);
-    voice.pending = voice.solution.delay;
+    voice.extraDelay = extraDelay;
+    voice.pending = voice.solution.delay + extraDelay;
     voice.age = 0;
 
-    if (recipe.gunshot) this.captureGunWaveform(id, asset);
+    if (recipe.gunshot || model === 'gunshot') this.captureGunWaveform(id, asset);
     this.startChannel(voice, asset);
     return voice.handle;
   }
@@ -318,8 +417,12 @@ class IronAudio implements AudioService {
     this.modelTime += dt;
     this.frameIndex++;
 
+    // The ambience beds run in the debug scenario too. They are five of the
+    // longest-lived voices in the mix and the thing most likely to be wrong
+    // (a bed that never starts, or one that stops tracking the shoreline), so
+    // hiding them from the one view that can show them would be perverse.
     if (this.debug) this.debug.update(this, dt, this.modelTime);
-    else this.updateAmbience(dt);
+    this.updateAmbience(dt);
 
     // Environment crossfade, matched to the graph's 0.7 s convolver ramp.
     if (this.envBlend < 1) {
@@ -370,7 +473,7 @@ class IronAudio implements AudioService {
       // A one-shot retires when its buffer has played out; the propagation
       // delay counts as part of its life so a 200 m report is not culled
       // before it has been heard.
-      if (!v.loop && v.age >= v.solution.delay + v.duration) this.finish(v);
+      if (!v.loop && v.age >= v.solution.delay + v.extraDelay + v.duration) this.finish(v);
     }
 
     const k = 1 - Math.exp(-dt / METER_TAU);
@@ -450,7 +553,7 @@ class IronAudio implements AudioService {
       ch.src.playbackRate.setValueAtTime(sol.doppler, now);
       // The propagation delay is scheduled on the source, not simulated by the
       // model, so a 200 m report arrives sample-accurately late.
-      ch.src.start(now + sol.delay);
+      ch.src.start(now + sol.delay + v.extraDelay);
     } catch {
       v.channel = null;
     }
@@ -634,13 +737,16 @@ class IronAudio implements AudioService {
 
     fx.on('footstep', (e) => {
       const state = this.ctx.services.player.stateOf(e.entity);
-      const stance = state ? (state.stance as 0 | 1 | 2) : 1;
+      const stance = state ? state.stance : Stance.Stand;
+      // Stance rides in on `pitch`; see `pickVariation`. Crouch AND prone both
+      // take the quiet, dull take — a man crawling does not put his weight on a
+      // heel, so the transient the walk take is built around is simply absent.
+      const shape = e.running ? 2 : stance === Stance.Stand ? 1 : 0;
       this.play('p.footstep', {
         position: e.position,
         surface: e.surface,
-        // Stance rides in on `pitch`; see `pickVariation`.
-        pitch: e.running ? 2 : stance === 1 ? 0 : 1,
-        gainDb: e.running ? 3 : 0,
+        pitch: shape,
+        gainDb: e.running ? 3 : stance === Stance.Prone ? -4 : 0,
         follow: e.entity,
       });
     });
@@ -679,6 +785,37 @@ class IronAudio implements AudioService {
 
     fx.on('hitmarker', (e) => {
       this.play('ui.hit', { gainDb: e.headshot ? 2 : e.lethal ? 1 : 0, model: 'ui' });
+    });
+
+    fx.on('debrisBurst', (e) => {
+      // A handful of chips off a wall is an impact; a hundred fragments is a
+      // structure failing, and those are different cues rather than the same cue
+      // at a different level.
+      if (e.count >= 24) {
+        this.play('x.collapse', { position: e.point, gainDb: clamp(6 * Math.log2(e.count / 32), -6, 6) });
+      }
+      this.play('x.debris', {
+        position: e.point,
+        surface: e.surface,
+        gainDb: clamp(6 * Math.log2(Math.max(e.count, 2) / 24), -16, 4),
+      });
+    });
+
+    fx.on('waterSplash', (e) => {
+      this.play('i.water', {
+        position: e.point,
+        surface: SurfaceId.Water,
+        gainDb: clamp(6 * Math.log2(Math.max(e.energyJ, 20) / 900), -14, 8),
+      });
+    });
+
+    fx.on('banner', (e) => {
+      // The objective stingers. `banner` is the only presentation event that
+      // carries "something match-defining just happened", and its tone is
+      // exactly the friendly/hostile split the two stingers were baked for.
+      this.play(e.tone === 'friendly' ? 'ui.capture' : e.tone === 'hostile' ? 'ui.lost' : 'ui.ticket', {
+        model: 'ui',
+      });
     });
   }
 
@@ -782,6 +919,7 @@ class IronAudio implements AudioService {
     }
     this.lastGunWaveform.fill(0);
     this.lastGunLabel = '—';
+    this.lastTailTime = -1;
     this.probe.clearBlockers();
     this.setDebugScene(seed === AUDIO_DEBUG_SEED, seed);
   }
@@ -823,10 +961,12 @@ class IronAudio implements AudioService {
         lowpassHz: v.solution.lowpassHz,
         occlusion: v.occlusion,
         pan: v.solution.pan,
-        delay: v.solution.delay,
+        delay: v.solution.delay + v.extraDelay,
         pending: v.pending,
         loop: v.loop,
-        progress: v.duration > 0 ? clamp((v.age - v.solution.delay) / v.duration, 0, 1) : 0,
+        spatial: v.spatial,
+        progress:
+          v.duration > 0 ? clamp((v.age - v.solution.delay - v.extraDelay) / v.duration, 0, 1) : 0,
         x: v.position.x,
         y: v.position.y,
         z: v.position.z,

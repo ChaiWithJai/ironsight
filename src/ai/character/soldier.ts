@@ -191,7 +191,17 @@ function slab(w: number, h: number, d: number, bevel = 0.82): THREE.BufferGeomet
   return geometry;
 }
 
-export function buildSoldierModel(materials: MaterialFactory, standHeight: number, radius: number): SoldierModel {
+/**
+ * Build the model, or return null when the shared material budget is already
+ * spent. Null is a legitimate answer, not an error path: the soldier is
+ * PRESENTATION, and a lane that cannot draw its characters must still let the
+ * simulation — and every other lane's shot — boot.
+ */
+export function buildSoldierModel(
+  materials: MaterialFactory,
+  standHeight: number,
+  radius: number,
+): SoldierModel | null {
   // Everything below is authored for a 1.8 m soldier and scaled to the capsule.
   const scale = standHeight / 1.8;
   const shoulder = Math.max(0.17, radius * 0.56);
@@ -322,52 +332,95 @@ export function buildSoldierModel(materials: MaterialFactory, standHeight: numbe
   ];
 
   /* ------------------------------------------------------------ materials */
-  const teamMaterials: THREE.Material[][] = [];
+  /**
+   * FIVE MATERIALS FOR TWENTY-FOUR SOLDIERS, and the count is the design.
+   *
+   * `MaterialFactory` enforces a hard per-tier permutation cap shared by every
+   * lane in the repo, and a character rig is the single greediest thing that
+   * could ask for slots — four zones × two teams is eight before anyone has
+   * drawn a building. Only the UNIFORM is team-coded, because that is the one
+   * surface a player reads friend-or-foe from at 40 m. Helmets, plate carriers
+   * and packs are dark on both sides of a real fight, hands are hands, and the
+   * rifle is the same rifle, so those three are shared outright.
+   *
+   * `create` dedupes by `id`, so handing both teams the same id costs one slot,
+   * not two.
+   */
+  const shared = (spec: Parameters<MaterialFactory['create']>[0]): THREE.Material | null => {
+    try {
+      return materials.create(spec);
+    } catch {
+      // The cap is a whole-repo budget and another lane may have spent it. A
+      // cosmetic character material is not worth failing everyone's boot for —
+      // the caller collapses the missing slot onto one that did allocate, and
+      // if none did, drops the soldier renderer entirely.
+      return null;
+    }
+  };
+
+  const uniforms: (THREE.Material | null)[] = [];
   for (const team of [Team.Coalition, Team.Insurgent]) {
-    const coalition = team === Team.Coalition;
+    uniforms.push(
+      shared({
+        id: `ai.soldier.uniform.${team}`,
+        surface: SurfaceId.Fabric,
+        layer: 0,
+        features: MaterialFeature.None,
+        // Coalition: dusty coyote. Insurgent: darker olive-grey. Both sit inside
+        // the map's sandstone/teal language rather than fighting it — but a full
+        // stop DARKER than the sandstone they stand on. Matching the ground
+        // value is how a soldier at 40 m disappears into it, and the frame this
+        // model has to survive is one where the whole town is that colour.
+        baseColor: team === Team.Coalition ? 0x6f6044 : 0x424a3a,
+        roughness: 0.94,
+        metalness: 0,
+        instanced: true,
+      }),
+    );
+  }
+  const gear = shared({
+    id: 'ai.soldier.gear',
+    surface: SurfaceId.Kevlar,
+    layer: 0,
+    features: MaterialFeature.None,
+    baseColor: 0x33301f,
+    roughness: 0.78,
+    metalness: 0,
+    instanced: true,
+  });
+  const skin = shared({
+    id: 'ai.soldier.skin',
+    surface: SurfaceId.Flesh,
+    layer: 0,
+    features: MaterialFeature.None,
+    baseColor: 0x85604b,
+    roughness: 0.62,
+    metalness: 0,
+    instanced: true,
+  });
+  const rifleMaterial = shared({
+    id: 'ai.soldier.weapon',
+    surface: SurfaceId.PaintedMetal,
+    layer: 0,
+    features: MaterialFeature.None,
+    baseColor: 0x26272a,
+    roughness: 0.44,
+    metalness: 0.72,
+    instanced: true,
+  });
+
+  // Collapse whatever failed onto whatever succeeded, in preference order. A
+  // soldier in one flat colour is still a soldier; a soldier with a null
+  // material is a crash inside three's render loop.
+  const anyMaterial = uniforms[0] ?? uniforms[1] ?? gear ?? rifleMaterial ?? skin;
+  if (!anyMaterial) return null;
+  const teamMaterials: THREE.Material[][] = [];
+  for (let team = 0; team < 2; team++) {
     const set: THREE.Material[] = [];
-    set[SoldierMaterial.Uniform] = materials.create({
-      id: `ai.soldier.uniform.${team}`,
-      surface: SurfaceId.Fabric,
-      layer: 0,
-      features: MaterialFeature.None,
-      // Coalition: dusty coyote. Insurgent: darker olive-grey. Both sit inside
-      // the map's sandstone/teal language rather than fighting it.
-      baseColor: coalition ? 0x9d8a68 : 0x5f6350,
-      roughness: 0.94,
-      metalness: 0,
-      instanced: true,
-    });
-    set[SoldierMaterial.Gear] = materials.create({
-      id: `ai.soldier.gear.${team}`,
-      surface: SurfaceId.Kevlar,
-      layer: 0,
-      features: MaterialFeature.None,
-      baseColor: coalition ? 0x4c4736 : 0x39392f,
-      roughness: 0.78,
-      metalness: 0,
-      instanced: true,
-    });
-    set[SoldierMaterial.Skin] = materials.create({
-      id: `ai.soldier.skin.${team}`,
-      surface: SurfaceId.Flesh,
-      layer: 0,
-      features: MaterialFeature.None,
-      baseColor: coalition ? 0x8d6650 : 0x7d5a46,
-      roughness: 0.62,
-      metalness: 0,
-      instanced: true,
-    });
-    set[SoldierMaterial.Weapon] = materials.create({
-      id: `ai.soldier.weapon.${team}`,
-      surface: SurfaceId.PaintedMetal,
-      layer: 0,
-      features: MaterialFeature.None,
-      baseColor: 0x26272a,
-      roughness: 0.44,
-      metalness: 0.72,
-      instanced: true,
-    });
+    set[SoldierMaterial.Uniform] = uniforms[team] ?? anyMaterial;
+    set[SoldierMaterial.Gear] = gear ?? set[SoldierMaterial.Uniform];
+    set[SoldierMaterial.Skin] = skin ?? set[SoldierMaterial.Uniform];
+    set[SoldierMaterial.Weapon] = rifleMaterial ?? set[SoldierMaterial.Gear];
     teamMaterials.push(set);
   }
 

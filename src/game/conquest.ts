@@ -438,6 +438,29 @@ export class IronConquest implements GameMode {
         this.setPoint('BRAVO', Team.Coalition, 1, false, 1, 0);
         this.setPoint('CHARLIE', Team.Insurgent, -1, false, 0, 2);
         break;
+      /**
+       * The `game_capture_contested` shot's opening position, and the reason it
+       * is a SEPARATE case from `alpha_contested` rather than a tweak to it:
+       * that one is an even 1–1 split, which by the mode's own rules bleeds
+       * nothing, and a ticket bar that is not moving proves nothing about ticket
+       * bleed. Here Coalition holds BRAVO *and* CHARLIE and is pushing into
+       * ALPHA, so the margin is 2, the bleed is `bleedByMargin[2]` per second
+       * against the Insurgents, and the ticket gap on screen is already the
+       * consequence of it.
+       *
+       * The occupant counts are seeded and then IMMEDIATELY RECOMPUTED by
+       * `stepCapture` from the bodies GAME's scenario put on the flag — so what
+       * the shot shows is derived, not asserted, and would go back to
+       * uncontested the moment those bodies moved off.
+       */
+      case 'assault':
+        this.matchState.phase = MatchPhase.Live;
+        this.matchState.timeRemaining = 508;
+        this.matchState.tickets = byTeam(318, 193);
+        this.setPoint('ALPHA', Team.Neutral, 0.42, true, 3, 2);
+        this.setPoint('BRAVO', Team.Coalition, 1, false, 1, 0);
+        this.setPoint('CHARLIE', Team.Coalition, 1, false, 0, 0);
+        break;
       case 'endgame':
         this.matchState.phase = MatchPhase.Ended;
         this.matchState.winner = Team.Coalition;

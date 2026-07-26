@@ -93,8 +93,23 @@ export function arService(mesh: AssetKey<MeshAsset>): WeaponDef {
       sensitivityMultiplier: 0.72,
       magnification: 1,
       eyeRelief: 0.235,
-      hip: v3(0.128, -0.132, -0.262),
-      hipRotation: v3(0.028, 0.098, -0.030),
+      // SOLVED, not dialled in, and then checked against a render. Through the
+      // viewmodel camera's fixed 55° vertical FOV at 16:9 this puts the optic at
+      // (66%, 58.5%), the muzzle up and inboard of it at (55%, 59%) and the
+      // support hand at (55%, 69%) — the layout of
+      // `reference/gameplay/bf6_gp_004.jpg`.
+      //
+      // The two numbers that matter are the ones that are NOT obvious. `z` is
+      // what sets apparent SIZE: the optic ends up 32 cm from the eye, and at
+      // 26 cm the weapon is so large it stops reading as a held object. `y` sets
+      // the DOWN-ANGLE onto the rail — 14.6° here. Push it to 22° and the frame
+      // is all receiver top face, which is the least informative surface on the
+      // weapon and the one with no silhouette at all.
+      //
+      // The values before this sat the optic at (87%, 82%) — in the corner of
+      // the screen, which is worse than no viewmodel at all.
+      hip: v3(0.088, -0.090, -0.386),
+      hipRotation: v3(0.100, 0.100, -0.040),
     }),
     ballistics: ballistics({
       muzzleVelocity: 880,

@@ -111,7 +111,15 @@ class IronNav implements NavRuntime {
     const built = buildFromNavmeshData(data, this.agent, Math.max(0.5, data.cellSize || 1));
     copyGraph(built, this.graph);
     this.queue.setGraph(this.graph);
-    if (this.level) this.cover.rebuild(this.level, this.obstacleList, this.graph, this.agent);
+    if (!this.level) return;
+    // Re-gather even though the mesh came from outside. The obstacle boxes are
+    // NOT only a navmesh input — they are also the AI line-of-sight broadphase
+    // and the source the cover book derives slots from when LEVEL has published
+    // none. A handover that skipped this leaves bots able to see through
+    // buildings and with nowhere to take cover, and neither failure says so.
+    this.obstacleList.length = 0;
+    gatherObstacles(this.level, this.obstacleList);
+    this.cover.rebuild(this.level, this.obstacleList, this.graph, this.agent);
   }
 
   sample(position: Vec3, radius: number, out: Vec3): boolean {

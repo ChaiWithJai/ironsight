@@ -87,8 +87,16 @@ export function buildViewmodelMaterials(materials: MaterialFactory): RoleMateria
 
   // The reticle. This is the one thing in the game that genuinely EMITS, which
   // is what makes additive blending correct here and a defect almost anywhere
-  // else. Emissive intensity is well above 1 so it survives the tonemap as a
-  // hot dot instead of a dull red smudge.
+  // else.
+  //
+  // Intensity is above 1 so it survives the tonemap as a hot dot rather than a
+  // dull red smudge — but only just. At 14 the additive contribution saturates
+  // every channel and the reticle renders WHITE, which is the exact opposite of
+  // what a red dot is for: the whole point of the colour is that it separates
+  // from a desaturated sandstone-and-teal scene. 3.5 clips the red channel
+  // while leaving green and blue well under 1, so it reads as a red ring with a
+  // white-hot core, which is what one actually looks like. It will bloom once
+  // RCORE's bloom pass lands, and the threshold will find it at 3.5.
   const reticle = materials.create({
     id: 'weapon.reticle',
     surface: SurfaceId.Glass,
@@ -96,7 +104,7 @@ export function buildViewmodelMaterials(materials: MaterialFactory): RoleMateria
     features: MaterialFeature.Emissive,
     baseColor: 0x120000,
     emissive: 0xff2a12,
-    emissiveIntensity: 14,
+    emissiveIntensity: 3.5,
     roughness: 1,
     metalness: 0,
     blending: 'additive',

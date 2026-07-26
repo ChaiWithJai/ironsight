@@ -39,6 +39,15 @@ export class Voice {
   age = 0;
   /** Seconds of propagation delay still to elapse before the cue is audible. */
   pending = 0;
+  /**
+   * Scheduling offset ON TOP of the solved propagation delay, seconds. The
+   * reflected report of a gunshot is a second, later arrival of the same event:
+   * it leaves the muzzle with the direct sound, bounces off the town and reaches
+   * the listener tens to hundreds of milliseconds after it. That is one cue with
+   * two arrival times, not two events, so it is a property of the voice rather
+   * than something the caller has to time.
+   */
+  extraDelay = 0;
   duration = 0;
   gainDb = 0;
   priority = 0;
@@ -70,6 +79,7 @@ export class Voice {
     this.loop = false;
     this.age = 0;
     this.pending = 0;
+    this.extraDelay = 0;
     this.fadeOut = 0;
     this.fadeRemaining = 0;
     this.occlusion = 0;

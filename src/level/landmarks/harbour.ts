@@ -386,7 +386,14 @@ export function buildWarehouse(
     if (rng.bool(0.55)) crateStack(b, px, g + 0.42, pz, rng);
     else barrel(b, px, g + 0.42, pz, rng);
   }
-  b.blocker(x, z, hx + 0.2, hz + 0.2, yaw, g, g + 0.3);
+  // The long walls block; the gable ends do NOT, because their roller doors are
+  // 4.2 m wide and the shed's whole point is that it is a through-route.
+  for (const sz of [1, -1]) {
+    b.blocker(
+      x + (sz * hz) * Math.sin(yaw), z + (sz * hz) * Math.cos(yaw),
+      hx, 0.35, yaw, g, g + wallH,
+    );
+  }
   b.exclude(x, z, Math.max(hx, hz) + 2);
 
   groundSkirt(

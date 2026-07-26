@@ -1,0 +1,318 @@
+/**
+ * The kinematic character controller. OWNER: PHYS.
+ *
+ * RAPIER IS A COLLIDE-AND-SLIDE SERVICE HERE, NOT A MOTION AUTHORITY. The caller
+ * integrates acceleration, friction, gravity and air control itself, hands us a
+ * desired delta, and applies what comes back. No force is ever applied to a
+ * character body, which is why the player controller and the solver never fight.
+ *
+ * POSITION IS THE FEET. `CharacterController.position` is the point the capsule
+ * stands on, not the capsule centre and not the eye. GAME derives eye height as
+ * `position.y + capsuleHeight - EYE_DROP`, so anything else here puts the camera
+ * inside the floor. The rigid body's origin is therefore at the feet too, and the
+ * capsule collider carries a `+halfHeight + radius` offset — which also makes a
+ * crouch resize trivial: change the collider, keep the body where it is, and the
+ * feet do not move.
+ *
+ * THE FOUR THINGS THAT MAKE STAIRS FEEL RIGHT, AND THE ORDER THEY MATTER IN
+ * ------------------------------------------------------------------------
+ * 1. AUTOSTEP with a minimum landing width. Without the width test the capsule
+ *    steps up onto a 4 cm ledge it cannot stand on and immediately falls off,
+ *    which reads as jitter on every kerb in the map.
+ * 2. SNAP-TO-GROUND on the way down. Walking off the top of a stair without it
+ *    launches you into a ballistic arc down the whole flight; with it you stay
+ *    glued and the camera stays level.
+ * 3. A MAX CLIMB ANGLE and a slightly lower SLIDE angle. Equal angles make a
+ *    capsule on a 50.0° face alternate between climbing and sliding every tick.
+ *    The 6° hysteresis between them is what stops that oscillation.
+ * 4. A NON-ZERO SKIN. rapier's `offset` is the gap kept between the capsule and
+ *    the world; at zero the solver has no room to resolve and the capsule sticks
+ *    in inside corners, at 10 cm the character visibly floats off walls. 2 cm.
+ */
+import * as RAPIER from '@dimforge/rapier3d-compat';
+import * as THREE from 'three';
+import {
+  CollisionGroup,
+  NULL_ENTITY,
+  SurfaceId,
+  type CharacterConfig,
+  type CharacterController,
+  type CharacterMoveResult,
+  type EntityId,
+  type QueryFilter,
+  type RayHit,
+  type Vec3,
+} from '@/engine/types';
+import { ALL_GROUPS, interactionGroups } from '@/physics/layers';
+import type { BodyRecord, BodyTable } from '@/physics/bodies';
+import type { QueryService } from '@/physics/queries';
+import { freshRayHit } from '@/physics/bodies';
+
+/** Below this cosine against up, a contact is a wall rather than a floor. */
+const WALL_COS = 0.6;
+/** Above this downward-facing cosine, a contact is a ceiling. */
+const CEILING_COS = -0.5;
+
+/**
+ * Hysteresis between "climb this slope" and "slide down it", in degrees. Equal
+ * angles make a capsule on a face at exactly the limit flip every tick.
+ */
+const SLIDE_HYSTERESIS_DEG = 6;
+
+/** The one result object, mutable inside the lane and readonly outside it. */
+type MutableMoveResult = { -readonly [K in keyof CharacterMoveResult]: CharacterMoveResult[K] };
+
+export class KinematicCharacter implements CharacterController {
+  readonly config: Readonly<CharacterConfig>;
+  readonly position: Vec3;
+  readonly groundNormal: Vec3 = new THREE.Vector3(0, 1, 0);
+
+  grounded = false;
+  groundSurface: SurfaceId = SurfaceId.Sand;
+
+  private readonly controller: RAPIER.KinematicCharacterController;
+  private readonly record: BodyRecord;
+  private readonly collider: RAPIER.Collider;
+  private readonly filterGroups: number;
+  private readonly result: MutableMoveResult;
+  private readonly collision = new RAPIER.CharacterCollision();
+  private readonly groundHit: RayHit = freshRayHit();
+  private readonly groundFilter: QueryFilter;
+  private readonly probeOrigin = new THREE.Vector3();
+  private readonly probeDown = new THREE.Vector3(0, -1, 0);
+  private readonly nextPos = new THREE.Vector3();
+  private readonly desired = new RAPIER.Vector3(0, 0, 0);
+
+  private height: number;
+  private disposed = false;
+
+  constructor(
+    private readonly world: RAPIER.World,
+    private readonly table: BodyTable,
+    private readonly queries: QueryService,
+    config: CharacterConfig,
+    simSeconds: number,
+  ) {
+    this.config = config;
+    this.position = config.position.clone();
+    this.height = config.standHeight;
+    this.groundFilter = {
+      groups: config.collidesWith & ~CollisionGroup.Character,
+      solid: true,
+      excludeEntity: config.entity,
+    };
+
+    const radius = config.radius;
+    const halfHeight = Math.max(0.02, (config.standHeight - radius * 2) * 0.5);
+    this.record = table.create(
+      {
+        mode: 'character',
+        entity: config.entity,
+        position: this.position,
+        shapes: [
+          {
+            kind: 'capsule',
+            halfHeight,
+            radius,
+            // Body origin at the feet; the capsule sits entirely above it.
+            offset: new THREE.Vector3(0, halfHeight + radius, 0),
+          },
+        ],
+        surface: SurfaceId.Kevlar,
+        group: config.group,
+        collidesWith: config.collidesWith,
+        canSleep: false,
+      },
+      simSeconds,
+    );
+    this.collider = this.record.colliders[0];
+    this.filterGroups = interactionGroups(ALL_GROUPS, config.collidesWith);
+
+    const ctrl = world.createCharacterController(config.skinWidth);
+    ctrl.setUp({ x: 0, y: 1, z: 0 });
+    ctrl.setSlideEnabled(true);
+    ctrl.setMaxSlopeClimbAngle(THREE.MathUtils.degToRad(config.maxSlopeDeg));
+    ctrl.setMinSlopeSlideAngle(THREE.MathUtils.degToRad(Math.max(0, config.maxSlopeDeg - SLIDE_HYSTERESIS_DEG)));
+    // The minimum landing width is the thing that stops stair jitter: a step is
+    // only climbable if there is somewhere to stand at the top of it.
+    ctrl.enableAutostep(config.stepHeight, config.radius * 0.7, true);
+    ctrl.enableSnapToGround(config.snapToGroundDistance);
+    ctrl.setApplyImpulsesToDynamicBodies(true);
+    // 80 kg soldier. Debris the character walks into gets shoved rather than
+    // acting as an immovable wall, which is what sells the two systems as one.
+    ctrl.setCharacterMass(80);
+    ctrl.setNormalNudgeFactor(1e-4);
+    this.controller = ctrl;
+
+    this.result = {
+      translation: new THREE.Vector3(),
+      grounded: false,
+      groundNormal: new THREE.Vector3(0, 1, 0),
+      groundSurface: SurfaceId.Sand,
+      groundEntity: NULL_ENTITY,
+      hitWall: false,
+      wallNormal: new THREE.Vector3(),
+      slideRatio: 1,
+      steppedUp: 0,
+      ceilingHit: false,
+    };
+  }
+
+  get body(): BodyRecord {
+    return this.record;
+  }
+
+  move(desiredDelta: Vec3, _dt: number): CharacterMoveResult {
+    const r = this.result;
+    if (this.disposed) {
+      r.translation.set(0, 0, 0);
+      return r;
+    }
+    this.desired.x = desiredDelta.x;
+    this.desired.y = desiredDelta.y;
+    this.desired.z = desiredDelta.z;
+
+    this.controller.computeColliderMovement(
+      this.collider,
+      this.desired,
+      RAPIER.QueryFilterFlags.EXCLUDE_SENSORS,
+      this.filterGroups,
+    );
+
+    const moved = this.controller.computedMovement();
+    r.translation.set(moved.x, moved.y, moved.z);
+    this.position.add(r.translation);
+    this.nextPos.copy(this.position);
+    // Position-based kinematic: rapier interpolates the body to this target
+    // during the step and pushes dynamics out of the way on the way.
+    this.record.body.setNextKinematicTranslation(this.nextPos);
+
+    r.grounded = this.controller.computedGrounded();
+    r.hitWall = false;
+    r.ceilingHit = false;
+    r.wallNormal.set(0, 0, 0);
+    r.groundNormal.set(0, 1, 0);
+
+    let bestGroundY = WALL_COS;
+    const collisions = this.controller.numComputedCollisions();
+    for (let i = 0; i < collisions; i++) {
+      const c = this.controller.computedCollision(i, this.collision);
+      if (!c) continue;
+      const n = c.normal1;
+      if (n.y > bestGroundY) {
+        bestGroundY = n.y;
+        r.groundNormal.set(n.x, n.y, n.z);
+      } else if (n.y < CEILING_COS) {
+        r.ceilingHit = true;
+      } else if (Math.abs(n.y) < WALL_COS && !r.hitWall) {
+        r.hitWall = true;
+        r.wallNormal.set(n.x, n.y, n.z);
+      }
+    }
+
+    // Horizontal only: a grounded character always loses its vertical component
+    // to the floor, and counting that as "blocked" would report a slide ratio of
+    // zero every tick you spend standing still.
+    const wantH = Math.hypot(desiredDelta.x, desiredDelta.z);
+    const gotH = Math.hypot(r.translation.x, r.translation.z);
+    r.slideRatio = wantH > 1e-5 ? Math.min(1, gotH / wantH) : 1;
+    // Anything rapier gave us above what we asked for on Y came from autostep.
+    r.steppedUp = r.grounded ? Math.max(0, r.translation.y - desiredDelta.y) : 0;
+
+    this.grounded = r.grounded;
+    this.groundNormal.copy(r.groundNormal);
+    this.resolveGround(r);
+    return r;
+  }
+
+  /**
+   * One short ray from just above the feet finds WHAT we are standing on. The
+   * character controller reports a normal but not a material, and the material is
+   * what makes a footstep on gravel sound different from one on a jetty.
+   */
+  private resolveGround(r: MutableMoveResult): void {
+    if (!r.grounded) {
+      r.groundSurface = this.groundSurface;
+      r.groundEntity = NULL_ENTITY;
+      return;
+    }
+    this.probeOrigin.copy(this.position);
+    this.probeOrigin.y += this.config.skinWidth * 4;
+    const reach = this.config.skinWidth * 4 + this.config.snapToGroundDistance + 0.05;
+    if (this.queries.raycast(this.probeOrigin, this.probeDown, reach, this.groundFilter, this.groundHit)) {
+      r.groundSurface = this.groundHit.surface;
+      r.groundEntity = this.groundHit.entity;
+      this.groundSurface = this.groundHit.surface;
+      if (this.groundHit.normal.y > 0.2) {
+        r.groundNormal.copy(this.groundHit.normal);
+        this.groundNormal.copy(this.groundHit.normal);
+      }
+    } else {
+      r.groundSurface = this.groundSurface;
+      r.groundEntity = NULL_ENTITY;
+    }
+  }
+
+  teleport(position: Vec3): void {
+    this.position.copy(position);
+    // Every entry point is disposal-safe. A stale controller reaching into the
+    // wasm heap does not throw a JS error — it traps, kills the frame and takes
+    // the capture with it, with a stack that names rapier rather than the caller.
+    if (this.disposed) return;
+    this.nextPos.copy(position);
+    this.record.body.setTranslation(this.nextPos, true);
+    this.record.body.setNextKinematicTranslation(this.nextPos);
+    this.grounded = false;
+  }
+
+  /**
+   * Crouch / prone / stand resize, feet-anchored.
+   *
+   * GROWING IS A QUESTION, NOT A COMMAND: standing up under a table has to fail,
+   * and it has to fail without having briefly put the capsule inside the table.
+   * So the taller capsule is tested with an overlap query FIRST and the collider
+   * is only touched once the answer is known.
+   */
+  setHeight(height: number): boolean {
+    if (this.disposed) return false;
+    const r = this.config.radius;
+    const target = Math.max(r * 2 + 0.02, Math.min(this.config.standHeight, height));
+    const newHalf = (target - r * 2) * 0.5;
+    if (target > this.height + 1e-4 && !this.fits(newHalf, r)) return false;
+    this.collider.setHalfHeight(newHalf);
+    this.collider.setTranslationWrtParent({ x: 0, y: newHalf + r, z: 0 });
+    this.height = target;
+    return true;
+  }
+
+  /** Is there room for a capsule of this size, standing on our feet? */
+  private fits(halfHeight: number, radius: number): boolean {
+    const shape = new RAPIER.Capsule(halfHeight, radius);
+    const pos = {
+      x: this.position.x,
+      y: this.position.y + halfHeight + radius,
+      z: this.position.z,
+    };
+    const blocker = this.world.intersectionWithShape(
+      pos,
+      { x: 0, y: 0, z: 0, w: 1 },
+      shape,
+      RAPIER.QueryFilterFlags.EXCLUDE_SENSORS,
+      interactionGroups(ALL_GROUPS, this.config.collidesWith & ~CollisionGroup.Character),
+      this.collider,
+      this.record.body,
+    );
+    return blocker === null;
+  }
+
+  get entity(): EntityId {
+    return this.config.entity;
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.world.removeCharacterController(this.controller);
+    this.table.destroy(this.record.handle);
+  }
+}

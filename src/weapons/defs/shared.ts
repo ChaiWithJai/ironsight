@@ -96,8 +96,16 @@ export function viewFeel(o: FeelOptions): ViewFeelDef {
     // Straight back into the shoulder and slightly up-right: the receiver
     // travels rearward far more than it rises, which is what separates recoil
     // from "the gun pivots about the muzzle".
-    weaponKickPos: v3(0.0034 * k, 0.0048 * k, 0.0165 * k),
-    weaponKickRot: v3(0.052 * k, -0.014 * k, 0.020 * k),
+    //
+    // These are PEAK DISPLACEMENTS, and they are bigger than the physical
+    // travel of a real bolt carrier on purpose. The viewmodel sits ~32 cm from
+    // the eye and the weapon rotates about the front of its own receiver, so a
+    // literal 16 mm of rearward travel moves the muzzle about eight pixels —
+    // measurable in a diff, invisible to a player. The numbers below put the
+    // muzzle climb at roughly 4% of frame height per shot, which is where a
+    // burst starts to read as a burst in a single frame.
+    weaponKickPos: v3(0.0050 * k, 0.0070 * k, 0.0245 * k),
+    weaponKickRot: v3(0.082 * k, -0.021 * k, 0.032 * k),
     sway: {
       // Metres and radians of offset per rad/s of look rate. The weapon trails
       // the look, so the gains are NEGATED where they are applied.

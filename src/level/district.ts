@@ -24,9 +24,32 @@ import {
   barrel, bollard, concreteBarrier, crateStack, lowWall, marketStall,
   sandbagWall, tyreStack, utilityPole, wreckedCar,
 } from '@/level/dressing';
-import { BLOCKS, KEEP_CLEAR, STREETS, type BlockDef } from '@/level/layout';
+import { BLOCKS, KEEP_CLEAR, POINTS, STREETS, type BlockDef } from '@/level/layout';
 
 type Ground = (x: number, z: number) => number;
+
+/**
+ * DETAIL BUDGET BY DISTANCE TO THE NEAREST CAPTURE POINT.
+ *
+ * Full detail out to 60 m, falling to 0.3 by 190 m. The numbers come from where
+ * the player's eye is: everything inside 60 m of a point is somewhere a
+ * firefight physically happens and gets read at 3 m; past ~190 m a building is a
+ * roofline on a skyline and its shutters cost triangles nobody sees.
+ *
+ * This is not a quality tier — it does not move with `QualitySettings` — it is a
+ * fixed property of the level, so a shot of the fort looks the same on Low as on
+ * Ultra and the review loop compares like with like.
+ */
+function detailAt(x: number, z: number): number {
+  let best = Infinity;
+  for (const p of [POINTS.alpha, POINTS.bravo, POINTS.charlie]) {
+    const d = Math.hypot(x - p.x, z - p.z);
+    if (d < best) best = d;
+  }
+  if (best <= 60) return 1;
+  if (best >= 190) return 0.3;
+  return 1 - 0.7 * ((best - 60) / 130);
+}
 
 function clearOf(x: number, z: number, margin: number): boolean {
   for (const k of KEEP_CLEAR) {
@@ -138,8 +161,11 @@ function subdivide(block: BlockDef, ground: Ground, rng: Rng): Plot[] {
         streetSide: row.side,
         party,
         // The market-square frontage and the harbour sheds get through-routes.
-        enterable: rng.bool(block.style === 'harbour' ? 0.45 : 0.16),
+        // A building close to a point is far more likely to be enterable: a
+        // through-route 200 m from any objective is a route nobody takes.
+        enterable: rng.bool((block.style === 'harbour' ? 0.45 : 0.16) * (0.35 + detailAt(wx, wz) * 0.9)),
         roofStair: rng.bool(block.style === 'town' ? 0.3 : 0.12),
+        detail: detailAt(wx, wz),
       });
     }
   }
@@ -157,6 +183,47 @@ export function buildTown(b: LevelBuild, plots: readonly Plot[], ground: Ground,
   for (const p of plots) {
     const r = buildBuilding(b, p, ground, rng);
     roofs.push({ x: p.x, z: p.z, y: r.roofY, hx: p.hx, hz: p.hz });
+
+    /**
+     * COMPOUND WALLS. The `compound` plots on the west slope are farmsteads,
+     * and a farmstead is a walled yard with a house in the corner, not a
+     * detached villa. The wall is what turns the headland road from an open
+     * approach into a sequence of enclosures you have to clear — and it is the
+     * only piece of hard cover between the town and CHARLIE.
+     */
+    if (p.style === 'compound') {
+      const yardSide = (p.streetSide + 2) % 4;
+      const out = yardSide === 0 || yardSide === 1 ? 1 : -1;
+      const depth = Math.max(p.hx, p.hz) * 1.5 + 4;
+      const cos = Math.cos(p.yaw);
+      const sin = Math.sin(p.yaw);
+      const w = (lx: number, lz: number): [number, number] => [
+        p.x + lx * cos + lz * sin,
+        p.z - lx * sin + lz * cos,
+      ];
+      const ax = yardSide % 2 === 0 ? p.hx + 1.5 : out * depth;
+      const az = yardSide % 2 === 0 ? out * depth : p.hz + 1.5;
+      const corners: [number, number][] = [
+        w(yardSide % 2 === 0 ? -ax : (out > 0 ? p.hx : -p.hx), yardSide % 2 === 0 ? (out > 0 ? p.hz : -p.hz) : -az),
+        w(yardSide % 2 === 0 ? -ax : ax, yardSide % 2 === 0 ? az : -az),
+        w(ax, az),
+        w(yardSide % 2 === 0 ? ax : (out > 0 ? p.hx : -p.hx), yardSide % 2 === 0 ? (out > 0 ? p.hz : -p.hz) : az),
+      ];
+      for (let i = 0; i < corners.length - 1; i++) {
+        lowWall(b, corners[i][0], corners[i][1], corners[i + 1][0], corners[i + 1][1], ground, rng.range(1.9, 2.4), rng);
+      }
+      // What is in the yard: a fuel drum, a stack of feed crates, a wreck.
+      for (let i = 0; i < 3; i++) {
+        const lx = rng.range(-Math.abs(ax) * 0.6, Math.abs(ax) * 0.6);
+        const lz = rng.range(-Math.abs(az) * 0.6, Math.abs(az) * 0.6);
+        const [px, pz] = w(lx, lz);
+        const g = ground(px, pz);
+        if (g < 1.4) continue;
+        if (rng.bool(0.4)) barrel(b, px, g, pz, rng);
+        else if (rng.bool(0.5)) crateStack(b, px, g, pz, rng);
+        else tyreStack(b, px, g, pz, rng);
+      }
+    }
   }
   // Lines across the alleys: only between facades close enough to string one,
   // which is what makes them land in the alleys and nowhere else.
@@ -304,8 +371,26 @@ export function buildSquare(
   cx: number, cz: number, hx: number, hz: number,
   ground: Ground,
   rng: Rng,
+  /**
+   * The market hall's world footprint. Everything the square scatters is tested
+   * against it, because a stall inside the hall's arcade is a stall wedged
+   * through a stone pier — the one collision this file cannot see for itself,
+   * since the hall is a landmark and landmarks own their own ground.
+   */
+  keepOut?: { x: number; z: number; hx: number; hz: number; yaw: number },
 ): void {
   const y = ground(cx, cz);
+  const inKeepOut = (px: number, pz: number, margin: number): boolean => {
+    if (!keepOut) return false;
+    const dx = px - keepOut.x;
+    const dz = pz - keepOut.z;
+    const c = Math.cos(keepOut.yaw);
+    const s = Math.sin(keepOut.yaw);
+    return (
+      Math.abs(dx * c - dz * s) < keepOut.hx + margin &&
+      Math.abs(dx * s + dz * c) < keepOut.hz + margin
+    );
+  };
   // Paving slab. Sunk 4 cm into the terrace so its edge never shows.
   b.m('sandstone').boxAt(cx, y + 0.02, cz, hx, 0.1, hz, 0.5, 0x3f);
   b.deck(cx, y + 0.12, cz, hx, hz, 0, 0);
@@ -320,8 +405,8 @@ export function buildSquare(
 
   // Stepped fountain / cistern head. The one thing in the square you can stand
   // ON as well as behind, which is what makes the middle worth holding.
-  const fx = cx + hx * 0.42;
-  const fz = cz - hz * 0.38;
+  const fx = cx + hx * 0.62;
+  const fz = cz - hz * 0.44;
   for (let i = 0; i < 3; i++) {
     b.solid('sandstone', fx, y + 0.11 + i * 0.22, fz, 3.1 - i * 0.75, 0.11, 3.1 - i * 0.75, { groundY: y });
   }
@@ -341,13 +426,17 @@ export function buildSquare(
     groundY: y,
   });
 
-  // Stalls in two loose rows, angled off the square's axis.
-  for (let i = 0; i < 11; i++) {
+  // Stalls in loose rows, angled off the square's axis. Golden-angle placement
+  // over a square this size gives roughly one stall per 90 m², which is what a
+  // working market looks like and — more to the point — is enough soft cover
+  // that crossing the open middle is a decision rather than a death sentence.
+  for (let i = 0; i < 16; i++) {
     const a = i * 2.39996323;
-    const r = Math.sqrt((i + 0.5) / 11) * Math.min(hx, hz) * 0.82;
+    const r = Math.sqrt((i + 0.5) / 16) * Math.min(hx, hz) * 0.86;
     const px = cx + Math.cos(a) * r * 1.25;
     const pz = cz + Math.sin(a) * r;
     if (Math.hypot(px - fx, pz - fz) < 5) continue;
+    if (inKeepOut(px, pz, 1.0)) continue;
     marketStall(b, px, ground(px, pz), pz, rng.range(0, Math.PI * 2), rng);
   }
   // Hard cover at the square's edges: barriers, sandbags, a wreck.
@@ -355,6 +444,7 @@ export function buildSquare(
     const a = (i / 9) * Math.PI * 2 + 0.3;
     const px = cx + Math.cos(a) * hx * 0.9;
     const pz = cz + Math.sin(a) * hz * 0.9;
+    if (inKeepOut(px, pz, 2.4)) continue;
     const g = ground(px, pz);
     const face = Math.atan2(cx - px, cz - pz);
     if (i % 3 === 0) sandbagWall(b, px, g, pz, face, rng.range(3, 5), 5, rng, rng.range(-0.6, 0.6));

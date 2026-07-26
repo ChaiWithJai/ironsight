@@ -60,6 +60,16 @@ export interface Plot {
   enterable?: boolean;
   /** External stair to the roof, which also makes the roof a nav deck. */
   roofStair?: boolean;
+  /**
+   * DETAIL BUDGET, 0..1. Scales the count of the per-opening furniture
+   * (shutters, balconies, awnings) and of the roof clutter.
+   *
+   * This is not a quality setting, it is LEVEL DESIGN AS LOD: a plot 200 m from
+   * the nearest capture point is a silhouette, and spending 11 000 triangles on
+   * shutters nobody will ever stand in front of is 11 000 triangles the market
+   * square does not get. Undefined means 1 — full detail.
+   */
+  detail?: number;
 }
 
 export interface BuildingResult {
@@ -182,6 +192,20 @@ export function buildBuilding(
   const doorSide = plot.streetSide;
   const doorBay = Math.round(rng.range(0, 3));
   const enterable = plot.enterable === true;
+  const detail = Math.max(0.15, Math.min(1, plot.detail ?? 1));
+
+  /**
+   * A SET-BACK TOP STOREY on a third of the taller buildings: the last floor
+   * pulls in by 0.6–1.4 m on the two non-party sides and the roof below it
+   * becomes a terrace. This is the single most characteristic massing move in a
+   * Levantine town — everyone builds a room on the roof and leaves the rest of
+   * it as living space — and it is worth more to the silhouette than any amount
+   * of facade detail, because it breaks the "row of identical extruded prisms"
+   * read from every high angle.
+   */
+  const setback = floors >= 3 && rng.bool(0.34) ? rng.range(0.6, 1.4) : 0;
+  const insetOf = (f: number, side: number): number =>
+    f === floors - 1 && setback > 0 && !plot.party[side] ? setback : 0;
 
   for (let f = 0; f < floors; f++) {
     const fh = f === 0 ? groundH : upperH;
@@ -189,9 +213,13 @@ export function buildBuilding(
     const jetty = f > 0 && rng.bool(0.3) ? rng.range(0.16, 0.42) : 0;
     for (let side = 0; side < 4; side++) {
       if (plot.party[side]) continue;
-      const grow = (side === jettySide ? jetty : 0) + rng.range(-0.035, 0.035);
-      const hx = plot.hx + (side % 2 === 1 ? grow : 0);
-      const hz = plot.hz + (side % 2 === 0 ? grow : 0);
+      const inset = insetOf(f, side);
+      const grow = (side === jettySide ? jetty : 0) + rng.range(-0.035, 0.035) - inset;
+      // Shorten the run along the wall too, or the set-back storey's end walls
+      // stick out past the corner of the storey below it.
+      const shrink = f === floors - 1 && setback > 0 ? setback : 0;
+      const hx = plot.hx - (side % 2 === 0 ? shrink : 0) + (side % 2 === 1 ? grow : 0);
+      const hz = plot.hz - (side % 2 === 1 ? shrink : 0) + (side % 2 === 0 ? grow : 0);
       const { m, width } = sideFrame(side, hx, hz);
       b.xf.push(m);
       const isStreet = side === plot.streetSide;
@@ -207,6 +235,7 @@ export function buildBuilding(
           street: isStreet,
           doorAt: f === 0 && side === doorSide ? doorBay : undefined,
           arch: plot.style === 'grand' || (plot.style === 'town' && rng.bool(0.3)),
+          detail,
         });
       }
       wallPanel(
@@ -234,12 +263,54 @@ export function buildBuilding(
       const band = rng.range(0.06, 0.13);
       b.m(trimMat).boxAt(0, y + fh + band / 2, 0, plot.hx + 0.07, band / 2, plot.hz + 0.07, 1, 0x3f);
     }
+    // The terrace left over under a set-back top storey: a slab, a low kerb and
+    // a washing line's worth of parapet.
+    if (setback > 0 && f === floors - 2) {
+      b.m('concrete').boxAt(0, y + fh + 0.28, 0, plot.hx + 0.06, 0.12, plot.hz + 0.06, 0.6, 0x3f);
+      for (let side = 0; side < 4; side++) {
+        if (plot.party[side]) continue;
+        const along = side % 2 === 0 ? plot.hx : plot.hz;
+        const outw = side % 2 === 0 ? plot.hz : plot.hx;
+        const sgn = side === 0 || side === 1 ? 1 : -1;
+        const cx = side % 2 === 0 ? 0 : sgn * (outw - 0.08);
+        const cz = side % 2 === 0 ? sgn * (outw - 0.08) : 0;
+        b.m(wallMat).boxAt(
+          cx, y + fh + 0.72, cz,
+          side % 2 === 0 ? along + 0.06 : 0.09, 0.32,
+          side % 2 === 0 ? 0.09 : along + 0.06, 1, 0x3f,
+        );
+      }
+    }
 
     // Interior floor slab.
     if (enterable) {
       b.m('concrete').boxAt(0, y + fh + 0.09, 0, plot.hx - wallT + 0.02, 0.09, plot.hz - wallT + 0.02, 1, 0x3f);
     }
     y += fh;
+  }
+
+  /**
+   * QUOINS on the sandstone-fronted buildings: alternating long/short blocks up
+   * a corner. Cheap (four boxes per course), and they do the one job a flat
+   * render cannot — they give the corner an EDGE that catches the raking sun on
+   * one face and goes fully into shadow on the other, so the building's own
+   * silhouette is legible against a facade of the same colour behind it.
+   */
+  if ((plot.style === 'grand' || wallMat === 'sandstone') && rng.bool(0.7)) {
+    const courses = Math.max(4, Math.floor(totalH / 0.62));
+    for (let c = 0; c < courses; c++) {
+      const cy = 0.25 + c * (totalH - 0.5) / courses;
+      const long = c % 2 === 0;
+      const a = long ? 0.44 : 0.26;
+      const bq = long ? 0.26 : 0.44;
+      for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) {
+        if (plot.party[sx > 0 ? 1 : 3] && plot.party[sz > 0 ? 0 : 2]) continue;
+        b.m(trimMat).boxAt(
+          sx * (plot.hx - a / 2 + 0.035), cy, sz * (plot.hz - bq / 2 + 0.035),
+          a / 2 + 0.035, 0.28, bq / 2 + 0.035, 1, 0x3f,
+        );
+      }
+    }
   }
 
   // ---- roof --------------------------------------------------------------
@@ -300,7 +371,7 @@ export function buildBuilding(
 
     // ---- roof clutter ------------------------------------------------------
     const area = plot.hx * plot.hz * 4;
-    const items = Math.max(2, Math.min(9, Math.round(area / 16 + rng.range(1, 3))));
+    const items = Math.max(1, Math.min(9, Math.round((area / 16 + rng.range(1, 3)) * detail)));
     for (let i = 0; i < items; i++) {
       const rx = rng.range(-plot.hx + 0.7, plot.hx - 0.7);
       const rz = rng.range(-plot.hz + 0.7, plot.hz - 0.7);

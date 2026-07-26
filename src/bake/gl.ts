@@ -127,6 +127,13 @@ export class BakeGl {
   private readonly fbo: WebGLFramebuffer;
   private readonly vao: WebGLVertexArrayObject;
   private readonly anisoExt: { TEXTURE_MAX_ANISOTROPY_EXT: number } | null;
+  /**
+   * WebGL2 only guarantees FOUR colour attachments; SwiftShader reports exactly
+   * four. Detaching COLOR_ATTACHMENT4..7 unconditionally is an INVALID_ENUM per
+   * draw, which is harmless but floods the console and buries real errors behind
+   * "too many errors, no more errors will be reported".
+   */
+  private readonly maxColorAttachments: number;
   private readonly owned: BakeTexture[] = [];
   private residentBytes = 0;
   private dirty = false;
@@ -141,6 +148,7 @@ export class BakeGl {
     this.floatRenderable = gl.getExtension('EXT_color_buffer_float') !== null;
     this.floatLinear = gl.getExtension('OES_texture_float_linear') !== null;
     this.anisoExt = gl.getExtension('EXT_texture_filter_anisotropic');
+    this.maxColorAttachments = Math.max(4, (gl.getParameter(gl.MAX_COLOR_ATTACHMENTS) as number) | 0);
     this.maxAnisotropy = this.anisoExt
       ? (gl.getParameter(0x84ff) as number)
       : 1;
@@ -318,7 +326,7 @@ export class BakeGl {
     }
     // Detach anything left over from a previous, wider MRT bake, or the driver
     // reports FRAMEBUFFER_INCOMPLETE_DIMENSIONS on the stale attachment.
-    for (let i = targets.length; i < 8; i++) {
+    for (let i = targets.length; i < this.maxColorAttachments; i++) {
       gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, null, 0);
     }
     gl.drawBuffers(buffers);

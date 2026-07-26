@@ -29,34 +29,42 @@ interface Bucket {
 }
 
 export class CoverBook {
+  /** OUR slots, derived from the obstacle boxes. Always built, always indexed. */
   private slots: CoverSlot[] = [];
+  /** Everything a consumer may see: LEVEL's set first, then ours. */
+  private combined: CoverSlot[] = [];
   private buckets = new Map<number, Bucket>();
   private bucketSize = 12;
   private level: LevelService | null = null;
-  /** True while we are serving slots we derived ourselves. */
+  /** True while LEVEL has published nothing and ours are the only slots. */
   derived = false;
 
   get all(): readonly CoverSlot[] {
-    return this.level && this.level.coverSlots.length > 0 ? this.level.coverSlots : this.slots;
+    return this.combined;
   }
 
   get count(): number {
-    return this.all.length;
+    return this.combined.length;
   }
 
   /**
    * Rebuild from whatever is available. Called at boot and again whenever
    * destruction invalidates a region — a wall that fell is cover that lied.
+   *
+   * THE DERIVED SET IS BUILT EVEN WHEN LEVEL HAS PUBLISHED ITS OWN. LEVEL's set
+   * wins every query it can answer, but `findCover` is allowed to return null —
+   * a bot standing where LEVEL authored no slot gets nothing, decides there is
+   * no cover on this map, and stands in the open trading shots, which is the
+   * single loudest tell that a shooter's AI is a decade old. Deriving anyway
+   * costs one pass over boxes we already have and turns that silent hole into a
+   * second-choice answer.
    */
   rebuild(level: LevelService, obstacles: readonly NavObstacle[], graph: NavGraph, agent: NavAgent): void {
     this.level = level;
     this.slots = [];
+    this.combined = [];
     this.buckets.clear();
     this.derived = level.coverSlots.length === 0;
-    if (!this.derived) {
-      this.index(level.coverSlots);
-      return;
-    }
 
     const probe = new THREE.Vector3();
     const landed = new THREE.Vector3();
@@ -111,6 +119,7 @@ export class CoverBook {
       }
     }
     this.index(this.slots);
+    this.combined = [...level.coverSlots, ...this.slots];
   }
 
   private index(slots: readonly CoverSlot[]): void {
@@ -146,14 +155,18 @@ export class CoverBook {
     claimed: (slot: number) => boolean,
     outIndex: { value: number },
   ): CoverSlot | null {
-    const source = this.all;
-    if (source.length === 0) return null;
+    const source = this.slots;
     if (this.level && !this.derived) {
-      // LEVEL owns the query as well as the data once it has published slots.
+      // LEVEL owns the query as well as the data once it has published slots —
+      // but only when it can answer. A null falls through to our own set below
+      // rather than being reported as "no cover exists here".
       const slot = this.level.findCover(position, threat, maxRange);
-      outIndex.value = -1;
-      return slot;
+      if (slot) {
+        outIndex.value = -1;
+        return slot;
+      }
     }
+    if (source.length === 0) return null;
     const tx = threat.x - position.x;
     const tz = threat.z - position.z;
     const tlen = Math.hypot(tx, tz) || 1;

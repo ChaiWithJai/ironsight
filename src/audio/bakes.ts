@@ -177,6 +177,12 @@ const UI_IDS: SoundId[] = ['ui.capture', 'ui.lost', 'ui.ticket', 'ui.hit', 'ui.s
 function variationsFor(id: SoundId, profileName: string): number {
   const recipe = LIBRARY[id];
   if (profileName !== 'compact') return recipe.variations;
+  // A SURFACE-KEYED cue's variation index is an ENCODING — footsteps pack
+  // [group][stance][take] into it — not a bag of interchangeable takes. Halving
+  // the count would drop the last four surface groups off the end and the
+  // runtime's `variation % count` would then silently play sand for stone.
+  // Repetition is a quality loss; a stone floor that sounds like sand is a bug.
+  if (recipe.surfaceKeyed) return recipe.variations;
   const floor = recipe.gunshot ? 3 : 1;
   return Math.max(floor, Math.ceil(recipe.variations / 2));
 }

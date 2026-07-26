@@ -299,10 +299,19 @@ class IronWeapons implements WeaponService, TickSystem {
 
     // Fractional tick interval, ACCUMULATED rather than rounded: rounding
     // 720 rpm to 5 ticks happens to be exact, but 900 rpm would become 900 and
-    // 850 would quietly become 1029. The clamp stops a weapon that has been
-    // idle for a minute from banking sixty rounds of credit.
+    // 850 would quietly become 1029. The clamps stop a weapon that has been
+    // idle from banking credit at either end.
     const interval = (Sim.TICK_HZ * 60) / def.rpm;
+    // STALE schedule → resync to now. `nextFireAt` starts at 0 and is reset to 0
+    // on every equip, so without this the accumulator is a whole match behind
+    // the clock and `nextFireAt + interval` lands in the past: the first two
+    // rounds of every magazine came out ONE TICK apart instead of at the
+    // weapon's cyclic rate, which reads as a stutter on the opening shot of
+    // every engagement. One interval of tolerance keeps the fractional
+    // accumulation intact while the trigger is actually held.
+    if (slot.nextFireAt < ctx.tick - interval) slot.nextFireAt = ctx.tick;
     slot.nextFireAt = Math.max(ctx.tick + 1, slot.nextFireAt + interval);
+    // …and a schedule far in the FUTURE is a weapon that has banked credit.
     if (slot.nextFireAt > ctx.tick + interval + 1) slot.nextFireAt = ctx.tick + interval;
     s.nextFireTick = Math.ceil(slot.nextFireAt);
 

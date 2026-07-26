@@ -77,8 +77,11 @@ export function smgCompact(mesh: AssetKey<MeshAsset>): WeaponDef {
       sensitivityMultiplier: 0.82,
       magnification: 1,
       eyeRelief: 0.215,
-      hip: v3(0.118, -0.120, -0.230),
-      hipRotation: v3(0.022, 0.086, -0.024),
+      // Solved against the same framing contract as `ar-service.ts`: optic at
+      // (67%, 67%), held closer and higher than the rifle because a PDW is
+      // shouldered short and its optic sits 6 mm lower over the bore.
+      hip: v3(0.087, -0.086, -0.344),
+      hipRotation: v3(0.095, 0.095, -0.036),
     }),
     ballistics: ballistics({
       muzzleVelocity: 400,

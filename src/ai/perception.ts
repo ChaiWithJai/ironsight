@@ -16,7 +16,7 @@
  * be pulled — that gap is the difference between a soldier and an aimbot.
  */
 import * as THREE from 'three';
-import { Stance, type EntityId, type NoiseEvent } from '@/engine/types';
+import { Stance, Team, type EntityId, type NoiseEvent } from '@/engine/types';
 import type { Bot, ThreatMemory } from '@/ai/bot';
 import type { ActorView, AiWorld } from '@/ai/world';
 
@@ -51,7 +51,11 @@ export function perceive(bot: Bot, world: AiWorld, elapsed: number): void {
 
   for (const actor of world.actors) {
     if (actor.entity === bot.entity) continue;
-    if (actor.team === bot.team) continue;
+    // Same team, and NEUTRAL, are both non-targets. Neutral is not a third
+    // faction — it is the flag-ownership sentinel — so an actor carrying it is
+    // an unassigned body, and shooting it is a friendly-fire bug wearing a
+    // different hat.
+    if (actor.team === bot.team || actor.team === Team.Neutral || bot.team === Team.Neutral) continue;
     if (!actor.state.alive) {
       const dead = bot.memoryOf(actor.entity);
       if (dead) dead.confidence = 0;

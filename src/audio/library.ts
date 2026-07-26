@@ -110,7 +110,10 @@ export const LIBRARY: Readonly<Record<SoundId, CueRecipe>> = {
     bus: 'weapons',
     refDb: -9,
     maxDistance: 600,
-    maxInstances: 8,
+    // Five, not eight. A reflected report is 1.35 s long, so even the runtime's
+    // one-per-110 ms gate can stack twelve of them across a sustained burst —
+    // and twelve overlapping diffuse roars is one roar plus seven wasted voices.
+    maxInstances: 5,
     cost: 6,
   },
   'w.distant': {

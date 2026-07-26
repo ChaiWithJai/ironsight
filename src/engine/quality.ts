@@ -97,6 +97,26 @@ const SHADOWS: Readonly<Record<QualityTier, ShadowSettings>> = {
  * thread competing with physics, AI and culling. Dynamic resolution does not
  * help a CPU-bound frame at all, which is why the Profiler treats a draw-call
  * violation as build-breaking rather than as a hint.
+ *
+ * `shaderPrograms` is a different animal and its day-0 numbers (24/32/40/40)
+ * were set before any lane existed. It is a SHARED, UNRESERVED budget that
+ * `MaterialFactory.create` enforces with a hard throw, so the lane that happens
+ * to allocate last takes the whole repo down inside another lane's `afterBoot`
+ * — which is exactly what happened at integration. Measured demand with ten of
+ * seventeen lanes landed is 44 distinct programs:
+ *
+ *     level 15 · weapons 6 · ai 6 · physics 4 · game 4 · bake 3
+ *     terrain 3 + sky 1 + water 1 (placeholders, to be REPLACED not added) · audio 1
+ *
+ * Still to land: RCORE's uber material (the `material` shot alone wants one per
+ * SurfaceId, and there are 28), LIGHT, SKY, TERRAIN, WATER, VEG, VFX and HUD.
+ * A realistic whole-repo figure is 100–120. The numbers below carry that plus
+ * headroom on every tier, because most permutations are STRUCTURAL — a wall
+ * needs a wall program on Low too — so a low tier that cannot hold the repo's
+ * structural set does not degrade, it fails to boot.
+ *
+ * The cap still does the job it was written for: a lane minting a material per
+ * object hits four figures and trips this long before it ships.
  */
 const BUDGETS: Readonly<Record<QualityTier, BudgetLimits>> = {
   [QualityTier.Low]: {
@@ -105,7 +125,7 @@ const BUDGETS: Readonly<Record<QualityTier, BudgetLimits>> = {
     shadowTriangles: 900_000,
     textureBytes: 112 * MB,
     renderTargetBytes: 45 * MB,
-    shaderPrograms: 24,
+    shaderPrograms: 96,
     gpuMs: 15.0,
     cpuMs: 9.0,
     physicsMs: 2.0,
@@ -117,7 +137,7 @@ const BUDGETS: Readonly<Record<QualityTier, BudgetLimits>> = {
     shadowTriangles: 1_600_000,
     textureBytes: 192 * MB,
     renderTargetBytes: 95 * MB,
-    shaderPrograms: 32,
+    shaderPrograms: 128,
     gpuMs: 14.5,
     cpuMs: 7.5,
     physicsMs: 1.4,
@@ -129,7 +149,7 @@ const BUDGETS: Readonly<Record<QualityTier, BudgetLimits>> = {
     shadowTriangles: 2_400_000,
     textureBytes: 320 * MB,
     renderTargetBytes: 150 * MB,
-    shaderPrograms: 40,
+    shaderPrograms: 160,
     gpuMs: 14.4,
     cpuMs: 5.5,
     physicsMs: 1.0,
@@ -141,7 +161,7 @@ const BUDGETS: Readonly<Record<QualityTier, BudgetLimits>> = {
     shadowTriangles: 3_200_000,
     textureBytes: 512 * MB,
     renderTargetBytes: 200 * MB,
-    shaderPrograms: 40,
+    shaderPrograms: 192,
     gpuMs: 14.4,
     cpuMs: 4.6,
     physicsMs: 0.8,

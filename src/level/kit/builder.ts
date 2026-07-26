@@ -176,9 +176,16 @@ export class MeshBuilder {
 
   /**
    * Vertical prism over a closed 2D polygon (XZ plane), from `y0` to `y1`.
-   * The polygon must be counter-clockwise in XZ; caps are triangle-fanned, which
-   * is correct for the convex outlines this level uses and acceptably wrong for
-   * nothing it uses.
+   *
+   * THE POLYGON MUST BE CLOCKWISE IN (x, z), which is counter-intuitive and
+   * worth stating precisely because getting it backwards produces a prism whose
+   * every face is inside-out and therefore invisible under back-face culling.
+   * Looking DOWN the −Y axis flips handedness, so a loop that is clockwise when
+   * you plot (x, z) on paper is the one whose side quads take their outward
+   * normal `(−dz, dx)` away from the interior and whose top cap fans to +Y.
+   *
+   * Caps are triangle-fanned, which is exact for the convex outlines this level
+   * uses and acceptably wrong for nothing it uses.
    */
   prism(poly: readonly number[], y0: number, y1: number, uvScale = 1, cap = true, floor = false): void {
     const n = poly.length / 2;

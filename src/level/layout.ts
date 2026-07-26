@@ -73,12 +73,26 @@ export const BREAKWATER = {
   halfWidth: 4.6,
 } as const;
 
-/** Where the freighter went aground, and how hard. */
+/**
+ * Where the freighter went aground, and how hard.
+ *
+ * She sits in the harbour MOUTH, 40 m south-west of the breakwater head and
+ * 32 m clear of the arm's centreline on the sheltered side, over a seabed that
+ * runs −7.5 m under her stern to −11.5 m under her bow. That last number is the
+ * constraint: her keel is at −7 m local, so she is hard aground aft and still
+ * afloat forward, which is what gives her the down-by-the-head trim.
+ *
+ * The obvious-looking spot beyond the tip is WRONG and was the first thing
+ * tried: `MACRO_TERRAIN`'s breakwater bump follows the segment (26,−14)→
+ * (148,−102), which runs 100 m PAST the built arm's tip, so a wreck placed
+ * "outside the harbour" at (118,−74) is sitting on a 5 m submerged ridge with
+ * her hull driven through it.
+ */
 export const FREIGHTER = {
-  x: 118,
-  z: -74,
+  x: 66,
+  z: -94,
   /** Heading, radians, measured like a yaw about +Y. */
-  yaw: -0.72,
+  yaw: 0.46,
   /** Starboard list, radians. She is down by the stern and heeled onto the reef. */
   roll: 0.24,
   pitch: -0.1,
@@ -91,11 +105,26 @@ export const MINARET = { x: 101, z: 66, yaw: 0.1, height: 27 } as const;
 export const FUEL_DEPOT = { x: 36, z: 26, yaw: -0.24 } as const;
 export const MARKET_HALL = { x: 71, z: 97, yaw: 0.02, hx: 13, hz: 9 } as const;
 
-/** Gantry cranes on the quay, west→east. */
+/**
+ * Gantry cranes on the quay, west→east.
+ *
+ * `yaw` is the rotation that puts the crane's LOCAL −X on the seaward normal of
+ * the quay edge beside it. That is the whole geometry of a ship-to-shore crane:
+ * the rails run ALONG the quay (local ±Z), the portal spans ACROSS it (local
+ * ±X), and the jib cantilevers 30 m out over the water on local −X while the
+ * backreach and counterweight balance it inland. A yaw of ~0.16 — which is what
+ * "aligned with the quay" naively looks like — turns the whole machine 90°: the
+ * rails run out to sea, the portal straddles the waterline, and the boom sweeps
+ * along the apron instead of over a ship. It is completely obvious in a frame
+ * and completely invisible in the numbers.
+ *
+ * Each is placed 14 m inland of the edge, so the jib overhangs open water and
+ * the backreach lands on the apron rather than in a warehouse.
+ */
 export const CRANES: readonly { x: number; z: number; yaw: number; height: number }[] = [
-  { x: -48, z: -33, yaw: 0.16, height: 26 },
-  { x: -22, z: -30, yaw: 0.16, height: 30 },
-  { x: 6, z: -26, yaw: 0.16, height: 23 },
+  { x: -48, z: -53, yaw: -1.85, height: 26 },
+  { x: -22, z: -45, yaw: -1.89, height: 30 },
+  { x: 6, z: -36, yaw: -1.88, height: 23 },
 ];
 
 /**

@@ -93,8 +93,12 @@ export function lmgSupport(mesh: AssetKey<MeshAsset>): WeaponDef {
       sensitivityMultiplier: 0.78,
       magnification: 1,
       eyeRelief: 0.245,
-      hip: v3(0.132, -0.150, -0.246),
-      hipRotation: v3(0.030, 0.090, -0.026),
+      // Solved against the same framing contract as `ar-service.ts`: optic at
+      // (67%, 68.5%) — deliberately the LOWEST of the four, because a 7 kg
+      // belt-fed gun is carried below the line of sight and that is most of
+      // what makes it read as heavy before it has even been fired.
+      hip: v3(0.097, -0.104, -0.408),
+      hipRotation: v3(0.095, 0.092, -0.034),
     }),
     ballistics: ballistics({
       muzzleVelocity: 850,

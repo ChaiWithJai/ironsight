@@ -20,6 +20,7 @@ import * as RAPIER from '@dimforge/rapier3d-compat';
 import {
   CollisionGroup,
   HitZone,
+  NULL_ENTITY,
   SurfaceId,
   type BodyDesc,
   type BodyHandle,
@@ -27,6 +28,7 @@ import {
   type ColliderShape,
   type EntityId,
   type Quat,
+  type RayHit,
   type Vec3,
 } from '@/engine/types';
 import { interactionGroups, surfacePhysics } from '@/physics/layers';
@@ -279,3 +281,22 @@ function rigidBodyDescOf(mode: BodyMode): RAPIER.RigidBodyDesc {
 export const SCRATCH_VEC = new THREE.Vector3();
 export const SCRATCH_QUAT = new THREE.Quaternion();
 export const IDENTITY_ROTATION = IDENTITY_ROT;
+
+/**
+ * A pooled `RayHit`, allocated once by whoever owns the query and reused. Every
+ * query entry point writes all ten fields on every call — including on a miss —
+ * so a caller can keep one of these for the lifetime of a subsystem.
+ */
+export function freshRayHit(): RayHit {
+  return {
+    hit: false,
+    distance: 0,
+    point: new THREE.Vector3(),
+    normal: new THREE.Vector3(0, 1, 0),
+    surface: SurfaceId.Sand,
+    body: 0 as BodyHandle,
+    entity: NULL_ENTITY,
+    zone: HitZone.None,
+    backface: false,
+  };
+}

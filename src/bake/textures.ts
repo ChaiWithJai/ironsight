@@ -184,10 +184,16 @@ float ironPatternRelief(vec2 uv, out float cellRand, out float seamDist) {
 }
 `;
 
-const FIELD_FS = /* glsl */ `
-${PATTERN_GLSL}
+/**
+ * `GpuBakeDesc.fragment` is the BODY of `main()`, never a whole shader: GLSL ES
+ * 3.0 forbids nested function definitions, so uniforms, helpers and structs go
+ * in `prelude` and only statements go here. Splitting the two is not cosmetic —
+ * a `void main()` inside the body is a compile error that fails the bake for
+ * every lane at once.
+ */
+const FIELD_PRELUDE = PATTERN_GLSL;
 
-void main() {
+const FIELD_FS = /* glsl */ `
   vec2 uv = vUv;
   int fMacro = uFreq.x;
   int fMeso = uFreq.y;
@@ -243,12 +249,11 @@ void main() {
 
   outColor0 = vec4(col, h);
   outColor1 = vec4(rough, seamDist, cellRand, crack);
-}
 `;
 
 /* -------------------------------------------------------------- pass B GLSL */
 
-const COMPOSE_FS = /* glsl */ `
+const COMPOSE_PRELUDE = /* glsl */ `
 uniform sampler2D uFieldA;
 uniform sampler2D uFieldB;
 uniform vec4 uCompose;     // normalStrength, aoStrength, aoRadius(texels), aoAlbedo
@@ -259,8 +264,9 @@ uniform ivec3 uFreqB;
 uniform uint uSeedB;
 
 float heightAt(vec2 uv) { return texture(uFieldA, uv).a; }
+`;
 
-void main() {
+const COMPOSE_FS = /* glsl */ `
   vec2 uv = vUv;
   vec2 texel = 1.0 / uResolution;
   float h = heightAt(uv);
@@ -326,7 +332,6 @@ void main() {
   outColor0 = vec4(albedo, h);
   outColor1 = vec4(n.xy * 0.5 + 0.5, rough, ao);
   outColor2 = vec4(wear, grime, ao, convex);
-}
 `;
 
 /* ---------------------------------------------------------------- producer */
@@ -357,7 +362,7 @@ export function produceTextureSet(
       width: size,
       height: size,
       fragment: FIELD_FS,
-      prelude: '',
+      prelude: FIELD_PRELUDE,
       targets: 2,
       wrap: 'repeat',
       filter: 'linear',
@@ -386,7 +391,7 @@ export function produceTextureSet(
       width: size,
       height: size,
       fragment: COMPOSE_FS,
-      prelude: '',
+      prelude: COMPOSE_PRELUDE,
       targets: 3,
       wrap: 'repeat',
       filter: 'linear',
@@ -398,7 +403,12 @@ export function produceTextureSet(
           value: [recipe.normalStrength, recipe.ao[0], recipe.ao[1], recipe.surfaceParams[3]],
         },
         uAgingB: {
-          value: [recipe.aging[0], recipe.aging[1], size * 0.9, recipe.surfaceParams[2]],
+          // Curvature scale. The Laplacian of a fixed-scale height field shrinks
+          // as 1/texelsize², so this MUST go as size² or the same recipe wears
+          // and grimes differently at every bake resolution — and the unit
+          // ceiling changes that resolution behind the author's back. The
+          // constant is fixed against the 256² look the recipes were tuned at.
+          value: [recipe.aging[0], recipe.aging[1], size * size * 0.0035, recipe.surfaceParams[2]],
         },
         uWearColor: { value: [...recipe.wearColor] },
         uGrimeColor: { value: [...recipe.grimeColor] },
@@ -456,8 +466,11 @@ export function harbourMaterials(surfaces: typeof SURFACE_IDS): MaterialRecipe[]
       amp: [0.10, 0.05, 0.018, 0.20],
       warp: 0.55,
       patternParams: [4, 8, 0.05, 0.55],
-      surfaceParams: [0.82, 0.10, 0.68, 0.35],
-      aging: [0.85, 0.55, 0.35, 0.10],
+      surfaceParams: [0.82, 0.10, 0.68, 0.32],
+      // Grime down from 0.55. At arm's length the earlier value put a dark
+      // blotch on every second block, and a blotch that survives a close-up is
+      // reading as staining rather than as the thin film of dust it should be.
+      aging: [0.60, 0.32, 0.30, 0.10],
       variation: [0.05, 0.16, 0.25],
       normalStrength: 3.2,
       ao: [1.5, 1.1],
@@ -474,13 +487,13 @@ export function harbourMaterials(surfaces: typeof SURFACE_IDS): MaterialRecipe[]
       grimeColor: srgb(0x50493c),
       fleckColor: srgb(0xf2ece0),
       freq: [3, 18, 72],
-      amp: [0.16, 0.08, 0.03, 0.0],
+      amp: [0.15, 0.062, 0.022, 0.0],
       warp: 0.9,
       patternParams: [1, 1, 0.05, 0.2],
       surfaceParams: [0.88, 0.09, 0.78, 0.4],
       aging: [0.55, 0.75, 0.85, 0.06],
       variation: [0.04, 0.20, 0.18],
-      normalStrength: 2.4,
+      normalStrength: 2.0,
       ao: [1.2, 1.0],
     },
     {
@@ -510,19 +523,23 @@ export function harbourMaterials(surfaces: typeof SURFACE_IDS): MaterialRecipe[]
       tiling: 2.6,
       metalness: 1,
       pattern: PatternKind.Panels,
-      colorA: srgb(0x7d5236),
-      colorB: srgb(0x53575a),
-      wearColor: srgb(0x9a9ea1),
-      grimeColor: srgb(0x2e2a26),
-      fleckColor: srgb(0xa8623a),
+      colorA: srgb(0x8f5f3c),
+      colorB: srgb(0x6a6d70),
+      wearColor: srgb(0xa8acaf),
+      grimeColor: srgb(0x342e28),
+      fleckColor: srgb(0xb06a3c),
       freq: [3, 12, 48],
-      amp: [0.09, 0.05, 0.022, 0.26],
-      warp: 1.15,
+      amp: [0.075, 0.04, 0.018, 0.26],
+      // 0.55, not 1.15. Warp is what stops fBm reading as fBm, but past ~0.7 the
+      // filaments close into cells and rust starts to look like brain coral —
+      // the failure mode is unmistakable once seen and it is a strength problem,
+      // not a frequency one.
+      warp: 0.55,
       patternParams: [2, 3, 0.045, 0.5],
-      surfaceParams: [0.62, 0.22, 0.32, 0.30],
-      aging: [0.75, 0.60, 0.20, 0.18],
-      variation: [0.06, 0.30, 0.35],
-      normalStrength: 3.0,
+      surfaceParams: [0.62, 0.20, 0.34, 0.30],
+      aging: [0.75, 0.60, 0.16, 0.16],
+      variation: [0.05, 0.22, 0.24],
+      normalStrength: 2.4,
       ao: [1.4, 1.0],
     },
     {
@@ -557,15 +574,19 @@ export function harbourMaterials(surfaces: typeof SURFACE_IDS): MaterialRecipe[]
       wearColor: srgb(0xe6d6b4),
       grimeColor: srgb(0x6b5c44),
       fleckColor: srgb(0x6a5b46),
-      freq: [4, 22, 96],
-      amp: [0.12, 0.07, 0.035, 0.0],
-      warp: 1.4,
+      // Sand's whole character is LOW relief at HIGH frequency: dunes and wind
+      // ripples measured in millimetres over a metre of drift. Giving it stucco's
+      // amplitude turns it into porridge, which is what it looked like at 0.035
+      // micro. The three scales stay; only the heights come down.
+      freq: [3, 26, 120],
+      amp: [0.11, 0.040, 0.011, 0.0],
+      warp: 1.5,
       patternParams: [1, 1, 0.05, 0.2],
-      surfaceParams: [0.95, 0.05, 0.92, 0.30],
-      aging: [0.25, 0.30, 0.0, 0.22],
-      variation: [0.03, 0.14, 0.12],
-      normalStrength: 2.0,
-      ao: [1.0, 1.0],
+      surfaceParams: [0.95, 0.04, 0.92, 0.26],
+      aging: [0.20, 0.26, 0.0, 0.26],
+      variation: [0.03, 0.11, 0.10],
+      normalStrength: 1.25,
+      ao: [0.7, 1.0],
     },
   ];
 }
@@ -583,3 +604,38 @@ export const SURFACE_IDS = {
   PaintedWood: 12 as SurfaceId,
   Sand: 6 as SurfaceId,
 };
+
+/**
+ * NEAREST BAKED NEIGHBOUR for the surfaces that have no recipe of their own.
+ *
+ * `SurfaceId` has 28 members and baking 28 two-pass PBR sets is not affordable
+ * inside the capture budget — but a consumer asking for `Concrete` and getting
+ * `undefined` falls back to a FLAT COLOUR, which is the first defect on the
+ * brief's list. Aliasing to the closest baked set gives it real three-scale
+ * detail, a real normal map and real cavity AO; only the tint and the pattern
+ * are borrowed. Tint is exactly what `MaterialSpec.baseColor` and `tintSeed`
+ * exist to override per prop, so the borrowed part is the part the consumer can
+ * already fix.
+ *
+ * Aliases are stated, not guessed: the mapping is by physical character (is it
+ * porous mineral, is it a sheet metal, is it a fibrous organic) rather than by
+ * colour, because the shading response is what the maps carry.
+ */
+export const SURFACE_ALIASES: ReadonlyMap<SurfaceId, SurfaceId> = new Map<SurfaceId, SurfaceId>([
+  [2 as SurfaceId, SURFACE_IDS.Stucco], // Concrete   — porous mineral, cast face
+  [3 as SurfaceId, SURFACE_IDS.Cobble], // Rubble     — broken aggregate
+  [4 as SurfaceId, SURFACE_IDS.Stucco], // Plaster
+  [5 as SurfaceId, SURFACE_IDS.Sandstone], // Tile    — laid units with grout courses
+  [7 as SurfaceId, SURFACE_IDS.Sand], // WetSand      — MaterialFeature.Wetness does the rest
+  [8 as SurfaceId, SURFACE_IDS.Sand], // Dirt
+  [9 as SurfaceId, SURFACE_IDS.Cobble], // Gravel
+  [11 as SurfaceId, SURFACE_IDS.PaintedWood], // Wood
+  [13 as SurfaceId, SURFACE_IDS.RustedMetal], // PaintedMetal
+  [15 as SurfaceId, SURFACE_IDS.RustedMetal], // BareMetal
+  [16 as SurfaceId, SURFACE_IDS.RustedMetal], // Grating
+  [19 as SurfaceId, SURFACE_IDS.Stucco], // Tarp      — matte, softly creased
+  [20 as SurfaceId, SURFACE_IDS.Sand], // Sandbag     — hessian over aggregate
+  [18 as SurfaceId, SURFACE_IDS.Stucco], // Fabric
+  [21 as SurfaceId, SURFACE_IDS.Sand], // Rope
+  [27 as SurfaceId, SURFACE_IDS.PaintedWood], // Kevlar — woven, low-gloss
+]);

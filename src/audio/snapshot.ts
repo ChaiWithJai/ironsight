@@ -27,6 +27,8 @@ export interface VoiceRow {
   readonly delay: number;
   readonly pending: number;
   readonly loop: boolean;
+  /** False for head-locked cues (UI, the diffuse reflected report). */
+  readonly spatial: boolean;
   /** 0..1 through the cue. */
   readonly progress: number;
   readonly x: number;

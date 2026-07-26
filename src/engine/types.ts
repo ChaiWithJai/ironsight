@@ -1277,6 +1277,54 @@ export interface BakedFont {
   readonly distanceRange: number;
 }
 
+/**
+ * The baked PBR material library, keyed by `SurfaceId`.
+ *
+ * A `TextureSet` is a live `WebGLTexture` pair and therefore cannot travel
+ * through a string lookup or an event; the consumer needs the object. RCORE's
+ * `MaterialFactory.textures()` is the read path for world surfaces, and this is
+ * where the sets it hands out come from.
+ *
+ * `get` returns undefined for a surface BAKE has no recipe for — that is the
+ * normal case for the long tail of `SurfaceId` (rope, flesh, glass), and the
+ * caller falls back to its analytic profile rather than showing a black square.
+ */
+export interface MaterialLibrary {
+  /** Surfaces a set was baked for, ascending. */
+  readonly surfaces: readonly SurfaceId[];
+  get(id: SurfaceId): TextureSet | undefined;
+  /** The texel edge actually granted after the unit ceiling degraded the bake. */
+  readonly texelSize: number;
+}
+
+/**
+ * WELL-KNOWN ASSETS, defined by BAKE on every boot.
+ *
+ * `AssetRegistry.define` returns the key, which is fine for a lane that both
+ * declares and consumes an asset — but BAKE's own products (the material
+ * library, the HUD font, the BRDF LUT) are consumed by lanes that cannot import
+ * `src/bake/**` and cannot define them a second time. An `AssetKey` is inert
+ * data (`{ id, kind }`), so publishing the identities here is the whole seam:
+ * BAKE defines them, anyone reads them with `assets.get(BakeAssets.font)`, and
+ * no cross-lane import exists in either direction.
+ *
+ * `AssetRegistry.tryGet` is the safe read — every one of these is skipped on the
+ * lowest tier or when the bake degraded past it.
+ */
+export const BakeAssets = Object.freeze({
+  /** Every baked `TextureSet`, keyed by `SurfaceId`. */
+  materials: { id: 'bake.materials', kind: AssetKind.Material } as AssetKey<MaterialLibrary>,
+  /**
+   * The HUD typeface: an SDF atlas baked from code-defined glyph outlines.
+   * Single channel (`RedFormat`), signed distance, 0.5 on the glyph edge.
+   */
+  font: { id: 'bake.font', kind: AssetKind.Font } as AssetKey<BakedFont>,
+  /** Split-sum GGX environment BRDF. rg = (scale, bias) on F0. */
+  brdfLut: { id: 'bake.lut.brdf', kind: AssetKind.Lut } as AssetKey<THREE.Texture>,
+  /** Spatiotemporal void-and-cluster blue noise, R8, one slice per z. */
+  blueNoise: { id: 'bake.noise.blue', kind: AssetKind.Texture3D } as AssetKey<THREE.Texture>,
+});
+
 /* =============================================================================
  * SECTION 10 — SURFACES + MATERIALS                           amender: RCORE
  * ========================================================================== */

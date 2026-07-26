@@ -21,6 +21,7 @@
 import * as THREE from 'three';
 import {
   PassOrder,
+  RenderLayer,
   type FrameCtx,
   type QualitySettings,
   type RenderGraph,
@@ -31,11 +32,40 @@ import type { AudioSnapshot } from '../snapshot';
 
 export const AUDIO_DEBUG_PASS_ID = 'audio.debug.overlay';
 
-/** Columns x rows of the text grid. Sized so 24 voices fit at 1080p. */
-const COLS = 96;
+/**
+ * Columns x rows of the text grid, and the CELL the 6x7 glyph is drawn inside.
+ *
+ * The cell is deliberately larger than the glyph: 6x7 capitals with no leading
+ * makes every row touch the one below it, which turns a dense table into an
+ * unreadable smear at review-sheet scale. One column of right pad and one row
+ * top and bottom is the minimum that separates them.
+ *
+ * 40 rows x 9 cell-rows = 360, which divides 1080 exactly three times, so at
+ * 1080p a character is 21x27 px and the grid is 1890x1080 — an integer scale
+ * with no resampling, which for a 1-px bitmap font is the difference between
+ * crisp and mush.
+ */
+const COLS = 90;
 const ROWS = 40;
 const GLYPH_W = 6;
 const GLYPH_H = 7;
+const CELL_W = 7;
+const CELL_H = 9;
+
+/**
+ * Bottom of the gunshot envelope chart's dB axis. 54 dB spans a rifle cue from
+ * its pressure front down into its baked room tail.
+ */
+const FLOOR_DB = 54;
+
+const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+/** Text grid colour slots. Must match `paletteOf` in the shader prelude. */
+const DIM = 0;
+const VAL = 1;
+const WARN = 2;
+const ALERT = 3;
+const SPATIAL = 4;
 
 /**
  * 6x7 uppercase bitmap font, one 42-bit pattern per glyph, MSB = top-left.
@@ -99,42 +129,91 @@ const FONT: Record<string, number[]> = {
   _: [0, 0, 0, 0, 0, 0, 0x3f],
 };
 
+/**
+ * Whole GLSL3 shaders, because this pass composites through
+ * `MaterialFactory.createUnlit` + `RenderGraph.drawScene(clear=false)` rather
+ * than through `RenderGraph.fullscreen`.
+ *
+ * WHY NOT `fullscreen`: it renders with the renderer's own `autoClear` still
+ * true, so a fullscreen draw into the DEFAULT framebuffer clears whatever was
+ * already there. That is correct for a post pass writing into a render target
+ * and fatal for an overlay that must composite over the finished frame — the
+ * scene would be wiped every frame and the readout would float over black.
+ * `drawScene` is the primitive that takes `clear` as an argument.
+ */
+const VERTEX = /* glsl */ `
+  // Fraction of the viewport the grid occupies, so the quad can be sized to an
+  // EXACT integer number of screen pixels per font pixel. A 1-px bitmap font
+  // resampled at 3.05x duplicates a column every twentieth character and reads
+  // as a wobble; at exactly 3x it is crisp. The remainder of the frame is left
+  // showing the live scene, which is also the proof the engine was running.
+  uniform vec2 uSpan;
+  out vec2 vUv;
+  void main() {
+    // The quad is authored in clip space; there is no camera transform.
+    vec2 uv01 = position.xy * 0.5 + 0.5;
+    vUv = uv01;
+    gl_Position = vec4(
+      -1.0 + uv01.x * uSpan.x * 2.0,
+       1.0 - (1.0 - uv01.y) * uSpan.y * 2.0,
+      0.0,
+      1.0
+    );
+  }
+`;
+
 const FRAGMENT = /* glsl */ `
-  // One texel per character cell: r = glyph index, g = colour index.
+  precision highp float;
+  in vec2 vUv;
+  // One texel per character cell: r = glyph index + 1, g = colour index.
   uniform sampler2D uText;
   uniform sampler2D uFont;
   uniform vec2 uGrid;
-  uniform vec2 uCell;
-  uniform vec2 uResolution;
   uniform float uGlyphCount;
+  out vec4 outColor;
 
   vec3 paletteOf(float idx){
-    // Terminal-ish palette: dim label, bright value, amber warn, red alert,
-    // cyan for anything spatial. Chosen to stay legible over a bright frame.
-    if (idx < 0.5) return vec3(0.55, 0.62, 0.68);
-    if (idx < 1.5) return vec3(0.92, 0.95, 0.98);
-    if (idx < 2.5) return vec3(0.96, 0.71, 0.32);
-    if (idx < 3.5) return vec3(0.92, 0.36, 0.28);
-    return vec3(0.40, 0.82, 0.90);
+    // Terminal palette: dim label, bright value, amber warn, red alert, cyan for
+    // anything spatial. Chosen to stay legible over a bright golden-hour frame.
+    if (idx < 0.5) return vec3(0.56, 0.63, 0.70);
+    if (idx < 1.5) return vec3(0.94, 0.96, 0.99);
+    if (idx < 2.5) return vec3(0.99, 0.74, 0.29);
+    if (idx < 3.5) return vec3(0.98, 0.36, 0.27);
+    return vec3(0.36, 0.86, 0.96);
   }
 
   void main(){
-    vec2 px = vUv * uResolution;
-    vec2 cellF = px / uCell;
-    if (cellF.x >= uGrid.x || cellF.y >= uGrid.y) { outColor = vec4(0.0); return; }
-
+    // vUv is bottom-up; the text grid is top-down.
+    vec2 cellF = vec2(vUv.x, 1.0 - vUv.y) * uGrid;
     vec2 cell = floor(cellF);
     vec2 inCell = fract(cellF);
-    vec4 t = texture(uText, (cell + 0.5) / uGrid);
-    float glyph = floor(t.r * 255.0 + 0.5);
-    if (glyph < 0.5) { outColor = vec4(0.0, 0.0, 0.0, 0.34); return; }
 
-    // Font atlas is a single row of glyphs, GLYPH_W x GLYPH_H each.
-    vec2 fontUv = vec2((glyph + inCell.x) / uGlyphCount, inCell.y);
+    // Scrim under the whole panel so the readout survives a blown-out sky behind
+    // it; a debug view whose legibility depends on the scene is not a debug view.
+    const vec3 back = vec3(0.012, 0.018, 0.024);
+    const float scrim = 0.80;
+
+    float code = floor(texture(uText, (cell + 0.5) / uGrid).r * 255.0 + 0.5);
+    if (code < 0.5) { outColor = vec4(back, scrim); return; }
+
+    // Glyph coordinates inside the padded cell. CELL is wider and taller than
+    // GLYPH, and everything outside the glyph rectangle is inter-line leading.
+    vec2 g = inCell * vec2(float(CELL_W), float(CELL_H)) - vec2(0.0, 1.0);
+    if (g.x >= float(GLYPH_W) || g.y < 0.0 || g.y >= float(GLYPH_H)) {
+      outColor = vec4(back, scrim);
+      return;
+    }
+
+    // The atlas is a single row of glyphs. Index 0 is reserved as the
+    // empty-cell sentinel above, so the stored code is index + 1.
+    float glyph = code - 1.0;
+    vec2 fontUv = vec2(
+      (glyph + clamp(g.x / float(GLYPH_W), 0.01, 0.99)) / uGlyphCount,
+      clamp(g.y / float(GLYPH_H), 0.01, 0.99)
+    );
     float on = texture(uFont, fontUv).r;
-    vec3 rgb = paletteOf(floor(t.g * 255.0 + 0.5));
-    // Scrim under the text so the overlay survives a blown-out sky behind it.
-    outColor = vec4(rgb * on, max(on, 0.34));
+    vec3 rgb = paletteOf(floor(texture(uText, (cell + 0.5) / uGrid).g * 255.0 + 0.5));
+    outColor = vec4(mix(back, rgb, on), max(on, scrim));
   }
 `;
 
@@ -153,15 +232,23 @@ export class AudioDebugPass implements RenderPass {
   private readonly textTex: THREE.DataTexture;
   private readonly fontTex: THREE.DataTexture;
   private cursor = 0;
-  private viewW = 1920;
-  private viewH = 1080;
+
+  /** Private scene the overlay quad lives in. Built on first execute. */
+  private quadScene: THREE.Scene | null = null;
+  private readonly quadCamera = new THREE.Camera();
+  /** Live uniform cell — see `uSpan` in the vertex shader. */
+  private readonly span = new THREE.Vector2(1, 1);
 
   constructor(
     private readonly services: Services,
     private readonly snapshot: () => AudioSnapshot,
   ) {
     const chars = Object.keys(FONT);
-    chars.forEach((c, i) => this.glyphIndex.set(c, i));
+    // +1: code 0 in the text buffer means "empty cell", so glyph 0 must not be
+    // reachable. `Object.keys` hoists the integer-like keys '0'..'9' to the
+    // front of the array, so without the bias the digit zero — the single most
+    // common character in a numeric readout — would render as blank.
+    chars.forEach((c, i) => this.glyphIndex.set(c, i + 1));
 
     // Font atlas: one row, GLYPH_W px per glyph.
     const fw = chars.length * GLYPH_W;
@@ -181,11 +268,15 @@ export class AudioDebugPass implements RenderPass {
     this.fontTex.needsUpdate = true;
     this.fontTex.minFilter = THREE.NearestFilter;
     this.fontTex.magFilter = THREE.NearestFilter;
+    // One byte per texel and an arbitrary glyph count, so the row stride is not
+    // a multiple of 4. Without this the atlas shears one pixel per row.
+    this.fontTex.unpackAlignment = 1;
 
     this.textData = new Uint8Array(COLS * ROWS * 4);
     this.textTex = new THREE.DataTexture(this.textData, COLS, ROWS, THREE.RGBAFormat);
     this.textTex.minFilter = THREE.NearestFilter;
     this.textTex.magFilter = THREE.NearestFilter;
+    this.textTex.needsUpdate = true;
   }
 
   enabled(_quality: Readonly<QualitySettings>): boolean {
@@ -207,6 +298,8 @@ export class AudioDebugPass implements RenderPass {
     for (let i = 0; i < upper.length; i++) {
       const c = col + i;
       if (c < 0 || c >= COLS) continue;
+      // Unmapped characters fall back to code 0 (blank), which is the right
+      // failure mode for a debug view: a hole, not a wrong glyph.
       const gi = this.glyphIndex.get(upper[i]!) ?? 0;
       const o = (row * COLS + c) * 4;
       this.textData[o] = gi;
@@ -215,130 +308,266 @@ export class AudioDebugPass implements RenderPass {
     }
   }
 
-  private line(text: string, colour = 1): void {
+  private line(text: string, colour = VAL): void {
     this.write(this.cursor++, 1, text, colour);
+  }
+
+  private rule(): void {
+    this.write(this.cursor++, 1, '-'.repeat(COLS - 2), DIM);
+  }
+
+  /** dB → a 0..width bar over a -60…0 dB scale. */
+  private static meter(db: number, width: number): string {
+    const bars = Math.max(0, Math.min(width, Math.round(((db + 60) / 60) * width)));
+    return '*'.repeat(bars) + '.'.repeat(width - bars);
   }
 
   private compose(s: AudioSnapshot): void {
     this.clear();
-    const n = (v: number, d = 1) => (Number.isFinite(v) ? v.toFixed(d) : '--');
-    const pad = (v: string, w: number) => (v.length >= w ? v.slice(0, w) : v + ' '.repeat(w - v.length));
+    const n = (v: number, d = 1): string => (Number.isFinite(v) ? v.toFixed(d) : '--');
+    const pad = (v: string, w: number): string => (v.length >= w ? v.slice(0, w) : v + ' '.repeat(w - v.length));
+    const rpad = (v: string, w: number): string => (v.length >= w ? v.slice(0, w) : ' '.repeat(w - v.length) + v);
 
-    this.line(`IRONSIGHT AUDIO  ${s.contextState} ${s.unlocked ? 'UNLOCKED' : 'LOCKED'} ${n(s.sampleRate / 1000, 1)}KHZ`, 2);
     this.line(
-      `VOICES ${s.voicesLive}/${s.voicesMax}  STEALS ${s.steals}  REJECT ${s.rejections}  ` +
-        `DUCK ${n(s.duckDb)}DB  DEAF ${n(s.deafness, 2)}`,
-      s.rejections > 0 ? 3 : 0,
+      `IRONSIGHT AUDIO MIXER   CTX ${s.contextState} ${s.unlocked ? 'UNLOCKED' : 'LOCKED'}   ` +
+        `${n(s.sampleRate / 1000, 1)}KHZ   T+${n(s.modelTime, 2)}S`,
+      WARN,
+    );
+    this.rule();
+    this.line(
+      `VOICES ${rpad(String(s.voicesLive), 3)}/${s.voicesMax}  STEALS ${rpad(String(s.steals), 4)}  ` +
+        `REJECT ${rpad(String(s.rejections), 4)}  PCM ${n(s.bufferBytes / 1048576, 2)}MB  ` +
+        `CUES ${s.bakedCues} IN ${s.bakedVariations} TAKES`,
+      s.rejections > 0 ? ALERT : VAL,
     );
     this.line(
-      `CUES ${s.bakedCues} (${s.bakedVariations} VAR)  ${n(s.bufferBytes / 1048576, 1)}MB  ` +
-        `T+${n(s.modelTime, 1)}S`,
+      `DUCK ${rpad(n(s.duckDb) + 'DB', 7)}  DEAF ${n(s.deafness, 2)}  ` +
+        `ENV ${pad(s.envName, 10)}ENCLOSE ${n(s.envEnclosure, 2)}  RT ${n(s.envReverbSeconds, 2)}S  ` +
+        `WET ${n(s.envWetDb)}DB  XFADE ${n(s.envBlend, 2)}`,
+      s.duckDb < -0.5 ? WARN : SPATIAL,
     );
     this.line(
-      `ENV ${s.envName}  ENCLOSE ${n(s.envEnclosure, 2)}  RT ${n(s.envReverbSeconds, 2)}S  ` +
-        `WET ${n(s.envWetDb)}DB  BLEND ${n(s.envBlend, 2)}`,
-      4,
-    );
-    this.line(
-      `LISTENER ${n(s.listener.x)} ${n(s.listener.y)} ${n(s.listener.z)}  ` +
-        `YAW ${n(s.listener.yawDeg, 0)}  OCCL VIA ${s.occlusionSource}`,
-      4,
+      `LISTENER ${n(s.listener.x)} ${n(s.listener.y)} ${n(s.listener.z)}  YAW ${n(s.listener.yawDeg, 0)}DEG  ` +
+        `OCCLUSION VIA ${s.occlusionSource}`,
+      SPATIAL,
     );
     this.cursor++;
 
-    this.line(pad('BUS', 12) + pad('LEVEL', 9) + pad('PEAK', 9) + pad('GAIN', 9) + 'VOICES', 0);
+    this.line(
+      pad('BUS', 10) + rpad('LEVEL', 9) + rpad('PEAK', 9) + rpad('GAIN', 8) + rpad('VOX', 5) + '  -60DB' + ' '.repeat(18) + '0',
+      DIM,
+    );
     for (const b of s.buses) {
-      // Meter bar doubles as an instant read on which bus is carrying the frame.
-      const bars = Math.max(0, Math.min(16, Math.round((b.levelDb + 60) / 60 * 16)));
       this.line(
-        pad(b.name, 12) +
-          pad(n(b.levelDb) + 'DB', 9) +
-          pad(n(b.peakDb) + 'DB', 9) +
-          pad(n(b.gainDb) + 'DB', 9) +
-          pad(String(b.voices), 4) +
-          '*'.repeat(bars),
-        b.peakDb > -1 ? 3 : 1,
+        pad(b.name, 10) +
+          rpad(n(b.levelDb) + 'DB', 9) +
+          rpad(n(b.peakDb) + 'DB', 9) +
+          rpad(n(b.gainDb) + 'DB', 8) +
+          rpad(String(b.voices), 5) +
+          '  ' +
+          AudioDebugPass.meter(b.levelDb, 24),
+        // Anything peaking above -1 dBFS on a bus is a mix defect, not a colour
+        // choice: flag it red so a reviewer does not have to read the number.
+        b.peakDb > -1 ? ALERT : b.name === 'master' ? VAL : DIM,
       );
     }
     this.cursor++;
 
     this.line(
-      pad('CUE', 18) + pad('BUS', 9) + pad('DIST', 8) + pad('LVL', 9) + pad('LP', 9) + pad('OCC', 6) + 'PAN',
-      0,
+      // 18, because `w.carbine.fire#0` is exactly 16 and would butt against the
+      // bus column with no separator.
+      pad('CUE', 18) +
+        pad('BUS', 8) +
+        rpad('DIST', 7) +
+        rpad('LVL', 8) +
+        rpad('LPF', 7) +
+        rpad('OCC', 5) +
+        rpad('PAN', 6) +
+        rpad('DELAY', 7) +
+        rpad('PROG', 5) +
+        '   EMITTER XYZ',
+      DIM,
     );
-    for (const v of s.rows.slice(0, 20)) {
+    const VOICE_ROWS = 11;
+    for (const v of s.rows.slice(0, VOICE_ROWS)) {
+      // Cyan = still in flight (the propagation delay has not elapsed), amber =
+      // audibly occluded, white = sounding in the clear. Three states a reviewer
+      // can check by eye before reading a single number.
+      const colour = v.pending > 0.001 ? SPATIAL : v.occlusion > 0.35 ? WARN : VAL;
       this.line(
-        pad(`${v.id}/${v.variation}`, 18) +
-          pad(v.bus, 9) +
-          pad(n(v.distance) + 'M', 8) +
-          pad(n(v.levelDb) + 'DB', 9) +
-          pad(n(v.lowpassHz / 1000, 1) + 'K', 9) +
-          pad(n(v.occlusion, 2), 6) +
-          n(v.pan, 2),
-        v.occlusion > 0.5 ? 2 : 1,
+        pad(`${v.id}#${v.variation}`, 18) +
+          pad(v.bus, 8) +
+          // A head-locked cue has no distance and no emitter; saying so beats
+          // printing 0.0M and letting a reviewer wonder what went wrong.
+          rpad(!v.spatial ? 'DIFF' : v.loop ? 'LOOP' : n(v.distance) + 'M', 7) +
+          rpad(n(v.levelDb) + 'DB', 8) +
+          rpad(n(v.lowpassHz / 1000, 1) + 'K', 7) +
+          rpad(n(v.occlusion, 2), 5) +
+          rpad(n(v.pan, 2), 6) +
+          rpad(n(v.delay * 1000, 0) + 'MS', 7) +
+          rpad(n(v.progress * 100, 0) + '%', 5) +
+          (v.spatial ? `   ${n(v.x, 0)} ${n(v.y, 0)} ${n(v.z, 0)}` : '   HEAD LOCKED'),
+        colour,
       );
     }
-    this.cursor++;
-
-    for (const ir of s.irs) {
-      this.line(`IR ${pad(ir.name, 14)} RT60 ${n(ir.rt60, 2)}S ${ir.active ? '[ACTIVE]' : ''}`, ir.active ? 4 : 0);
-    }
-
-    if (s.lastGunLabel) {
+    if (s.rows.length > VOICE_ROWS) {
+      this.line(`+ ${s.rows.length - VOICE_ROWS} MORE LIVE VOICES BELOW THE FOLD`, DIM);
+    } else if (s.rows.length === 0) {
+      this.line('NO LIVE VOICES', ALERT);
+    } else {
       this.cursor++;
-      this.line(`LAST SHOT: ${s.lastGunLabel}`, 2);
-      // Waveform envelope as an ASCII column chart — enough to see the transient,
-      // the body and the tail, which is the whole point of layering a gunshot.
-      const env = s.lastGunWaveform;
-      const w = Math.min(COLS - 4, env.length);
-      const H = 6;
-      for (let y = 0; y < H; y++) {
-        let row = '';
-        const threshold = 1 - (y + 0.5) / H;
-        for (let x = 0; x < w; x++) {
-          const i = Math.floor((x / w) * env.length);
-          row += (env[i] ?? 0) >= threshold ? '*' : ' ';
-        }
-        this.write(this.cursor + y, 2, row, 2);
-      }
-      this.cursor += H;
     }
+
+    // IRs on the left, acoustic blockers on the right — both answer "why does
+    // this sound like this", so they belong side by side.
+    const panelTop = this.cursor;
+    this.write(panelTop, 1, pad('CONVOLUTION IR', 12) + rpad('RT60', 7) + '  TAIL ENVELOPE', DIM);
+    let r = panelTop + 1;
+    for (const ir of s.irs) {
+      const env = ir.envelope;
+      let spark = '';
+      // 20-column peak sparkline of the tail. A room whose energy dies in the
+      // first two columns is not a room, and that is visible here at a glance.
+      for (let i = 0; i < 20; i++) {
+        const a = env[Math.floor((i / 20) * env.length)] ?? 0;
+        spark += a > 0.5 ? '*' : a > 0.18 ? '+' : a > 0.04 ? '-' : '.';
+      }
+      this.write(
+        r++,
+        1,
+        pad(ir.active ? `>${ir.name}` : ` ${ir.name}`, 12) + rpad(n(ir.rt60, 2) + 'S', 7) + '  ' + spark,
+        ir.active ? SPATIAL : DIM,
+      );
+    }
+
+    // The analytic blockers are only CONSULTED when physics is not ready. Once
+    // PHYS is live the occlusion column comes from real raycasts and these boxes
+    // are inert — say so, because a panel that looks authoritative while being
+    // ignored is worse than no panel.
+    const blockersLive = !s.occlusionSource.startsWith('PHYS');
+    const bx = 44;
+    this.write(
+      panelTop,
+      bx,
+      pad(blockersLive ? 'ACOUSTIC BLOCKER' : 'BLOCKER (INERT)', 20) + rpad('OPACITY', 9) + '  SPAN',
+      DIM,
+    );
+    let br = panelTop + 1;
+    for (const b of s.blockers.slice(0, 7)) {
+      this.write(
+        br++,
+        bx,
+        pad(b.label, 20) +
+          rpad(n(b.opacity, 2), 9) +
+          `  ${n(b.max.x - b.min.x, 0)}X${n(b.max.y - b.min.y, 0)}X${n(b.max.z - b.min.z, 0)}M`,
+        !blockersLive ? DIM : b.opacity > 0.7 ? WARN : VAL,
+      );
+    }
+    if (s.blockers.length === 0) this.write(br++, bx, 'NONE REGISTERED', DIM);
+    this.cursor = Math.max(r, br) + 1;
+
+    this.line(`LAST GUNSHOT CUE  ${s.lastGunLabel}  ENVELOPE 0 TO -${FLOOR_DB}DB`, WARN);
+    // Envelope as a column chart, on a dB axis and NOT a linear one. A layered
+    // gunshot's transient sits ~20 dB above its body, so on a linear scale the
+    // body, the mechanical action and the baked room tail all collapse into the
+    // bottom row and the chart proves only that there is an attack. On a 54 dB
+    // axis the four layers are four distinct features, which is the thing this
+    // panel exists to let a reviewer check.
+    const env = s.lastGunWaveform;
+    const w = Math.min(COLS - 4, env.length);
+    const H = Math.max(3, ROWS - this.cursor);
+    for (let y = 0; y < H; y++) {
+      let row = '';
+      const threshold = 1 - (y + 0.5) / H;
+      for (let x = 0; x < w; x++) {
+        const a = env[Math.floor((x / w) * env.length)] ?? 0;
+        const norm = a <= 0 ? 0 : clamp01(1 + (20 * Math.log10(a)) / FLOOR_DB);
+        row += norm >= threshold ? '*' : ' ';
+      }
+      this.write(this.cursor + y, 2, row, WARN);
+    }
+    this.cursor += H;
   }
 
-  /** The graph is the only thing that knows the backbuffer size; it tells us here. */
-  resize(width: number, height: number): void {
-    this.viewW = width;
-    this.viewH = height;
-  }
-
-  execute(_ctx: FrameCtx, graph: RenderGraph): void {
-    this.compose(this.snapshot());
-    this.textTex.needsUpdate = true;
-
-    const w = this.viewW;
-    const h = this.viewH;
-    // Cell size derived from height so the overlay keeps a constant row count
-    // at any resolution rather than shrinking to illegibility at 4K.
-    const cell = Math.max(2, Math.floor(h / (ROWS * GLYPH_H)));
-
-    graph.fullscreen(
-      'audio.debug',
-      FRAGMENT,
-      {
+  /**
+   * The overlay quad. `MaterialFactory.createUnlit` is the only sanctioned way
+   * to author a raw shader outside `src/render/` — CI fails the build on
+   * `new THREE.ShaderMaterial` in a lane — and it is not available until the
+   * factory exists, so the quad is built on first execute rather than in the
+   * constructor.
+   */
+  private ensureQuad(): THREE.Scene {
+    if (this.quadScene) return this.quadScene;
+    const material = this.services.materials.createUnlit({
+      id: AUDIO_DEBUG_PASS_ID,
+      vertexShader: VERTEX,
+      fragmentShader: FRAGMENT,
+      uniforms: {
         uText: { value: this.textTex },
         uFont: { value: this.fontTex },
         uGrid: { value: new THREE.Vector2(COLS, ROWS) },
-        uCell: { value: new THREE.Vector2(cell * GLYPH_W, cell * GLYPH_H) },
-        uResolution: { value: new THREE.Vector2(w, h) },
         uGlyphCount: { value: this.glyphIndex.size },
+        uSpan: { value: this.span },
       },
-      null,
-      { blend: 'alpha' },
+      defines: { GLYPH_W, GLYPH_H, CELL_W, CELL_H },
+      transparent: true,
+      blending: 'alpha',
+      depthTest: false,
+      depthWrite: false,
+      // Drawn after the tonemap, so it must NOT get three's tonemap/output
+      // transform or the palette stops being the literal values authored here.
+      toneMapped: false,
+    });
+    // A clip-space quad, so the vertex shader needs no camera at all.
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 1000;
+    const scene = new THREE.Scene();
+    scene.add(mesh);
+    this.quadScene = scene;
+    return scene;
+  }
+
+  execute(ctx: FrameCtx, graph: RenderGraph): void {
+    // The graph short-circuits to a straight forward render only while NO pass
+    // is registered, so arming this one would otherwise leave the overlay
+    // floating over an uncleared buffer until RCORE's post chain lands. Draw the
+    // world ourselves in that window: a debug overlay must never be the reason a
+    // frame is blank, and a readout composited over a live frame is also the
+    // proof that the engine was running when the numbers were sampled.
+    if (graph.passes.length <= 1) {
+      const camera = ctx.camera.world;
+      const mask = camera.layers.mask;
+      camera.layers.enableAll();
+      camera.layers.disable(RenderLayer.Viewmodel as number);
+      graph.drawScene(ctx, this.services.scene.root, camera, null, true);
+      camera.layers.mask = mask;
+    }
+
+    this.compose(this.snapshot());
+    this.textTex.needsUpdate = true;
+
+    // Integer screen pixels per font pixel, sized off the NATIVE resolution —
+    // we composite over the default framebuffer, which ignores renderScale. At
+    // 1080p this is exactly 3, giving a 21x27 px character and an 1890x1080
+    // grid; at 4K it becomes 6 and the readout stays the same physical size
+    // rather than shrinking to illegibility.
+    const px = Math.max(1, Math.floor(graph.nativeHeight / (ROWS * CELL_H)));
+    this.span.set(
+      Math.min(1, (COLS * CELL_W * px) / Math.max(graph.nativeWidth, 1)),
+      Math.min(1, (ROWS * CELL_H * px) / Math.max(graph.nativeHeight, 1)),
     );
+
+    graph.drawScene(ctx, this.ensureQuad(), this.quadCamera, null, false);
   }
 
   dispose(): void {
     this.textTex.dispose();
     this.fontTex.dispose();
+    // The material is owned and cached by the factory; the geometry is ours.
+    this.quadScene?.traverse((o) => {
+      if (o instanceof THREE.Mesh) o.geometry.dispose();
+    });
+    this.quadScene = null;
   }
 }

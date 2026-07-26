@@ -130,9 +130,19 @@ async function boot(): Promise<void> {
   engine.start();
 
   const stillNull = engine.registry.nullKeys();
+  const materials = engine.services.materials;
   console.info(
     `[boot] ready · ${SHOT_MODULE_COUNT} shot module(s) · ` +
       `${stillNull.length} service(s) still null${stillNull.length ? `: ${stillNull.join(', ')}` : ''}`,
+  );
+  // Shader permutations are a SHARED budget with no reservation scheme, and
+  // `MaterialFactory.create` enforces it with a throw — so the lane that
+  // allocates last dies inside another lane's afterBoot with no clue that the
+  // budget was the problem. Printing the headroom every boot is how the next
+  // lane finds out before it costs it an afternoon. Note this counts only what
+  // has been allocated so far; shot-time allocation pushes it higher.
+  console.info(
+    `[boot] shader permutations · ${materials.permutationCount} / ${materials.permutationCap} allocated at boot`,
   );
   // The tick schedule, by phase. An EMPTY gameplay phase is the failure mode
   // this line exists to catch: a lane that forgets to register its system is

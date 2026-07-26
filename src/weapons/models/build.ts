@@ -610,7 +610,14 @@ export function buildWeaponModel(id: WeaponId, rng: Rng): WeaponModel {
     magazine: new THREE.Vector3(0, magTopY, magZ),
     charging: new THREE.Vector3(0, 0, rearZ),
     trigger: new THREE.Vector3(0, receiverBottom - 0.004, gripZ - 0.030),
-    handL: new THREE.Vector3(0, -(s.handguardRadius + 0.030), s.supportGrip),
+    // The support hand sits slightly to the SUPPORT side of the bore and a
+    // couple of centimetres back from the handguard's front lip, not squarely
+    // underneath it. Two reasons, and the second is the one that matters: a
+    // thumb-forward grip really does put the palm on the corner of the rail
+    // rather than the bottom of it — and a hand centred directly under the
+    // handguard is completely occluded BY the handguard from an eye that sits
+    // above the bore, so the viewmodel ends up with no visible hands at all.
+    handL: new THREE.Vector3(-0.013, -(s.handguardRadius + 0.034), s.supportGrip + 0.022),
     handR: new THREE.Vector3(0.004, receiverBottom - 0.048, gripZ - 0.004),
   };
 

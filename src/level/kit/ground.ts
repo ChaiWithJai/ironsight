@@ -102,14 +102,40 @@ export function groundSkirt(
   const sand = b.m(sandMat);
   const n = outline.length;
 
+  /**
+   * WHICH WAY IS OUT.
+   *
+   * `(ez, −ex)` is the outward normal of edge `(ex, ez)` only for a
+   * COUNTER-clockwise outline in XZ; for a clockwise one it points straight into
+   * the building. Half this lane's callers build their outlines corner-by-corner
+   * in a local frame and hand over a clockwise loop without knowing it, and the
+   * failure is completely silent: the drift, the rubble and the scatter are all
+   * still emitted, they are just emitted UNDER the plinth where nothing can see
+   * them, and the wall meets the ground with exactly the hard seam this whole
+   * file exists to remove.
+   *
+   * So the winding is measured rather than assumed. The shoelace sum is four
+   * multiplies per edge, it is exact, and it makes every caller correct by
+   * construction instead of by convention.
+   */
+  let area2 = 0;
   for (let e = 0; e < n; e++) {
     const a = outline[e];
     const c = outline[(e + 1) % n];
+    area2 += a.x * c.z - c.x * a.z;
+  }
+  // Reversing the LOOP rather than negating the normal, because the drift quad
+  // is wound from the edge direction as well: flip only the normal and the
+  // skirt faces the ground instead of the sky.
+  const poly = area2 < 0 ? [...outline].reverse() : outline;
+
+  for (let e = 0; e < n; e++) {
+    const a = poly[e];
+    const c = poly[(e + 1) % n];
     const ex = c.x - a.x;
     const ez = c.z - a.z;
     const len = Math.hypot(ex, ez);
     if (len < 0.25) continue;
-    // Outward normal for a clockwise-in-XZ outline.
     const nx = ez / len;
     const nz = -ex / len;
     // Windward faces get roughly twice the drift of leeward ones.

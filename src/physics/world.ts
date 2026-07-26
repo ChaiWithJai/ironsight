@@ -20,7 +20,24 @@
  *    screenshot in the repo unreviewable.
  */
 import * as RAPIER from '@dimforge/rapier3d-compat';
-import { Sim, type QualitySettings } from '@/engine/types';
+import { Sim, type QualitySettings, type Rng } from '@/engine/types';
+import { createRng } from '@/engine/rng';
+
+/**
+ * A deterministic layout stream for anything PHYS builds, seeded from a FIXED
+ * constant and never from the engine RNG. Pre-fracture patterns, proving-ground
+ * geometry and debris impulses are lane DATA: they must not move because another
+ * lane changed how many random numbers it draws — which is exactly what would
+ * happen if they came off the shared stream. `createRng`'s label does not select
+ * a sequence (only the seed does), so the label is folded into the seed here.
+ */
+export function physicsLayoutRng(label: string): Rng {
+  let hash = 0x50485953;
+  for (let i = 0; i < label.length; i++) {
+    hash = Math.imul(hash ^ label.charCodeAt(i), 0x01000193) >>> 0;
+  }
+  return createRng(hash, `phys.${label}`);
+}
 
 let initPromise: Promise<void> | null = null;
 let initialised = false;

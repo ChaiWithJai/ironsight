@@ -76,8 +76,12 @@ export function dmrMarksman(mesh: AssetKey<MeshAsset>): WeaponDef {
       // Longer eye relief than a red dot — a scoped rifle is held further out,
       // and the eyepiece has to clear the brow.
       eyeRelief: 0.205,
-      hip: v3(0.140, -0.148, -0.240),
-      hipRotation: v3(0.036, 0.106, -0.036),
+      // Solved against the same framing contract as `ar-service.ts`: optic at
+      // (65%, 65%) and pushed 2.5 cm further out than the rifle, because a 20"
+      // marksman rifle is genuinely longer and a shooter holds it further from
+      // the chest to balance it.
+      hip: v3(0.085, -0.098, -0.409),
+      hipRotation: v3(0.105, 0.104, -0.044),
     }),
     ballistics: ballistics({
       muzzleVelocity: 840,

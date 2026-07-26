@@ -120,6 +120,16 @@ export class Bot {
   lastShotTime = -1;
   recoil = 0;
 
+  /**
+   * Sim time this bot entered the world. THE CLOCK EVERY COSMETIC OSCILLATOR ON
+   * THIS BOT RUNS ON, and the reason is determinism: the harness reseeds the RNG
+   * before a capture but does NOT rewind `ctx.time`, so anything driven by
+   * absolute sim time — the aim error cone above all — produces a different
+   * frame depending on how long the page happened to idle before the shot was
+   * taken. Phrased as `time - spawnTime` it is identical every run.
+   */
+  spawnTime = 0;
+
   /** Think scheduling. */
   thinkPhase = 0;
   lastThinkTime = -1;
@@ -158,7 +168,14 @@ export class Bot {
       lastVelocity: new THREE.Vector3(),
       confidence: 0,
       visible: false,
-      lastSeenTime: -1000,
+      // `time`, NOT a large negative sentinel. `perceive` deletes any memory
+      // that is not yet VISIBLE and whose age exceeds `FORGET_SECONDS`, and a
+      // memory born at -1000 is already 1000 s old — so it was destroyed at the
+      // end of the very pass that created it, the detection accumulator could
+      // never carry confidence from one pass to the next, and a bot could only
+      // ever notice a target that crossed the whole threshold in a single
+      // round-robin slice.
+      lastSeenTime: time,
       firstSeenTime: time,
       reactionAt: Infinity,
       distance: Infinity,

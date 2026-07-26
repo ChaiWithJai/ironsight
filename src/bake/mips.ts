@@ -24,46 +24,65 @@
 import { MipMode } from '@/engine/types';
 import type { BakeGl, BakeTexture } from '@/bake/gl';
 
+/**
+ * THE FOUR TAPS, AND WHY THEY ARE NOT `texelFetch`.
+ *
+ * The obvious implementation is `texelFetch(uSrc, dst * 2 + offset, level - 1)`.
+ * It is wrong here, and the failure is subtle enough to be worth stating.
+ *
+ * Rendering into mip L while sampling mip L-1 of the SAME texture is only legal
+ * if the sampler's accessible range excludes the attachment, so the source is
+ * bound with `TEXTURE_BASE_LEVEL = TEXTURE_MAX_LEVEL = L-1`. But the GL and
+ * GLSL specs disagree in practice about whether `texelFetch`'s and
+ * `textureSize`'s `lod` argument is ABSOLUTE or RELATIVE TO THE BASE LEVEL.
+ * Pass `L-1` and a driver that treats it as relative reads level `2(L-1)`;
+ * pass `0` and a driver that treats it as absolute reads outside the accessible
+ * range. Either way the chain silently samples the wrong level from level 2
+ * downward, and the visible result is a set of nested rectangular bands across
+ * every surface at mid distance — which is exactly what a 512² bake showed and
+ * a 256² one (one level shorter) did not.
+ *
+ * `texture()` has no such ambiguity: with base == max the mip selection is
+ * forced to that one level regardless of the interpretation. A LINEAR sample
+ * taken exactly at a source texel CENTRE returns that texel unmodified, so four
+ * half-texel-offset samples give the exact 2×2 block — and, as a bonus, the
+ * sampler's own wrap mode applies at the border, which is what a tileable
+ * texture actually wants and what the old CLAMP did not do.
+ */
 const COMMON = /* glsl */ `
 precision highp float;
 precision highp int;
 in vec2 vUv;
 uniform vec2 uResolution;
 uniform sampler2D uSrc;
-uniform int uLevel;
 out vec4 outColor;
 
-ivec2 srcCoord(ivec2 dst, int dx, int dy, ivec2 srcSize){
-  return clamp(dst * 2 + ivec2(dx, dy), ivec2(0), srcSize - 1);
+/**
+ * One texel of the SOURCE level. The source is always exactly twice the
+ * destination, so it is derived rather than passed — one fewer uniform to get
+ * out of step with the level being written.
+ */
+vec4 tap(float dx, float dy){
+  return texture(uSrc, vUv + vec2(dx, dy) * (0.5 / uResolution));
 }
 `;
 
 const COLOR_FS = `${COMMON}
 void main() {
-  ivec2 dst = ivec2(gl_FragCoord.xy);
-  ivec2 srcSize = textureSize(uSrc, uLevel);
-  vec4 c = texelFetch(uSrc, srcCoord(dst, 0, 0, srcSize), uLevel)
-         + texelFetch(uSrc, srcCoord(dst, 1, 0, srcSize), uLevel)
-         + texelFetch(uSrc, srcCoord(dst, 0, 1, srcSize), uLevel)
-         + texelFetch(uSrc, srcCoord(dst, 1, 1, srcSize), uLevel);
-  outColor = c * 0.25;
+  outColor = 0.25 * (tap(-0.5, -0.5) + tap(0.5, -0.5) + tap(-0.5, 0.5) + tap(0.5, 0.5));
 }`;
 
 const MASK_FS = COLOR_FS;
 
 const NORMAL_FS = `${COMMON}
 void main() {
-  ivec2 dst = ivec2(gl_FragCoord.xy);
-  ivec2 srcSize = textureSize(uSrc, uLevel);
   vec3 n = vec3(0.0);
   vec2 rest = vec2(0.0);
-  for (int dy = 0; dy < 2; dy++) {
-    for (int dx = 0; dx < 2; dx++) {
-      vec4 s = texelFetch(uSrc, srcCoord(dst, dx, dy, srcSize), uLevel);
-      vec2 xy = s.xy * 2.0 - 1.0;
-      n += vec3(xy, sqrt(max(0.0, 1.0 - dot(xy, xy))));
-      rest += s.zw;
-    }
+  for (int i = 0; i < 4; i++) {
+    vec4 s = tap(i == 0 || i == 2 ? -0.5 : 0.5, i < 2 ? -0.5 : 0.5);
+    vec2 xy = s.xy * 2.0 - 1.0;
+    n += vec3(xy, sqrt(max(0.0, 1.0 - dot(xy, xy))));
+    rest += s.zw;
   }
   n = normalize(n);
   outColor = vec4(n.xy * 0.5 + 0.5, rest * 0.25);
@@ -77,19 +96,15 @@ void main() {
  */
 const TOKSVIG_FS = `${COMMON}
 void main() {
-  ivec2 dst = ivec2(gl_FragCoord.xy);
-  ivec2 srcSize = textureSize(uSrc, uLevel);
   vec3 nSum = vec3(0.0);
   float rough = 0.0;
   float ao = 0.0;
-  for (int dy = 0; dy < 2; dy++) {
-    for (int dx = 0; dx < 2; dx++) {
-      vec4 s = texelFetch(uSrc, srcCoord(dst, dx, dy, srcSize), uLevel);
-      vec2 xy = s.xy * 2.0 - 1.0;
-      nSum += vec3(xy, sqrt(max(0.0, 1.0 - dot(xy, xy))));
-      rough += s.z;
-      ao += s.w;
-    }
+  for (int i = 0; i < 4; i++) {
+    vec4 s = tap(i == 0 || i == 2 ? -0.5 : 0.5, i < 2 ? -0.5 : 0.5);
+    vec2 xy = s.xy * 2.0 - 1.0;
+    nSum += vec3(xy, sqrt(max(0.0, 1.0 - dot(xy, xy))));
+    rough += s.z;
+    ao += s.w;
   }
   nSum *= 0.25;
   rough *= 0.25;
@@ -127,9 +142,10 @@ export function buildMipChain(bgl: BakeGl, tex: BakeTexture, mode: MipMode): voi
       (u) => {
         // Clamp the sampler to the level BELOW the one being written: sampling
         // and rendering the same texture is only legal when the accessible mip
-        // range excludes the draw target.
+        // range excludes the draw target. With base == max the shader's
+        // `texture()` calls resolve to exactly that level with no lod argument
+        // to be misinterpreted — see the note above `COMMON`.
         u.setTextureLevels('uSrc', tex, level - 1, level - 1);
-        u.set('uLevel', level - 1);
       },
       level,
     );
