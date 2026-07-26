@@ -1,27 +1,32 @@
 /**
  * MaterialFactory — THE SINGLE PLACE ANY THREE.Material IS CREATED.
  *
- * OWNER: RCORE. This is the day-0 implementation. It is the ONLY file in the
- * repo (with the rest of `src/render/material/`) allowed to call
- * `new THREE.Mesh*Material` or `onBeforeCompile`; CI greps for both.
+ * OWNER: RCORE. This file and the rest of `src/render/material/` are the only
+ * places in the repo allowed to call `new THREE.Mesh*Material` or
+ * `onBeforeCompile`; CI greps for both.
  *
  * Why the whole project funnels through one factory:
  *  - it caps shader permutations, which is what keeps compile hitches and the
  *    program budget under control;
  *  - it keeps sixteen authors on ONE lighting model, so a wall built by LEVEL
  *    and a crate built by VFX shade identically;
- *  - it guarantees that CSM sampling, GTAO application, clustered lights,
- *    aerial perspective and wind animation are injected the same way everywhere;
+ *  - it guarantees that detail normals, wear masks, triplanar projection,
+ *    velocity and wind animation are injected the same way everywhere;
  *  - and it owns `registerDeform`, which is the motion-vector contract.
  *
- * RCORE replaces the body with the `iron-material.ts` uber material. The day-0
- * version below is a correctly-configured `MeshStandardMaterial` keyed on
- * `SurfaceId`, which is enough to light and shadow a scene and to prove the
- * boot path end to end.
+ * WHAT CHANGED FROM DAY 0, AND WHY IT MATTERS MORE THAN ANYTHING ELSE HERE
+ * -----------------------------------------------------------------------
+ * The day-0 factory handed out a flat `MeshStandardMaterial` per `SurfaceId`
+ * and ignored the baked `TextureSet` entirely, so the whole town was untextured
+ * single-colour geometry sitting on top of a working PBR bake. Every material
+ * now resolves its baked set through `textures()` and goes through
+ * `iron-material.ts`, which is where LOOK_SPEC §4's layer stack lives.
  */
 import * as THREE from 'three';
 import {
+  BakeAssets,
   MaterialFeature,
+  RTId,
   SurfaceId,
   type AssetRegistry,
   type BlendMode,
@@ -30,15 +35,23 @@ import {
   type FrameCtx,
   type GpuUniform,
   type MaterialFactory,
+  type MaterialLibrary,
   type MaterialSpec,
   type QualitySettings,
   type QualityService,
+  type Rng,
+  type Services,
   type SurfaceChunk,
   type SurfaceProfile,
   type TextureSet,
   type UnlitSpec,
 } from '@/engine/types';
-import { SURFACE_BASE_COLOR, surfaceProfile } from '@/render/material/surfaces';
+import { surfaceProfile } from '@/render/material/surfaces';
+import { DeformChunkRegistry } from '@/render/material/deform';
+import { buildFallbackTextureSet } from '@/render/material/fallback';
+import { buildIronMaterial, createIronGlobals, type IronGlobals } from '@/render/material/iron-material';
+import { buildDepthMaterial, buildVelocityMaterial, resetVelocityHistory } from '@/render/material/variants';
+import { prewarmMaterials } from '@/render/material/prewarm';
 
 /**
  * `BlendMode` → three's blend state. ONE table for the whole renderer: the
@@ -90,48 +103,61 @@ function flatDataArray(layers: number, rgba: readonly [number, number, number, n
   return tex;
 }
 
-function flatTexture(rgba: readonly [number, number, number, number], colorSpace: string): THREE.DataTexture {
-  const data = new Uint8Array(ARRAY_EDGE * ARRAY_EDGE * 4);
-  for (let i = 0; i < ARRAY_EDGE * ARRAY_EDGE; i++) {
-    data[i * 4] = rgba[0];
-    data[i * 4 + 1] = rgba[1];
-    data[i * 4 + 2] = rgba[2];
-    data[i * 4 + 3] = rgba[3];
-  }
-  const tex = new THREE.DataTexture(data, ARRAY_EDGE, ARRAY_EDGE);
-  tex.wrapS = THREE.RepeatWrapping;
-  tex.wrapT = THREE.RepeatWrapping;
-  tex.colorSpace = colorSpace;
-  tex.needsUpdate = true;
-  return tex;
+/** Everything the factory has to remember about one forward material. */
+interface MaterialRecord {
+  readonly spec: MaterialSpec;
+  readonly textures: TextureSet;
+  readonly cells: Map<string, GpuUniform>;
+  depth?: THREE.Material;
+  velocity?: THREE.Material;
 }
 
 export class IronMaterialFactory implements MaterialFactory {
+  /**
+   * The shared bulk arrays. They stay allocated and neutral: the uber material
+   * binds each material's OWN `TextureSet` rather than an array slice, because
+   * a per-material sampler pair keeps the bake's full resolution and its
+   * per-material tiling rate, where an array forces one edge length and one
+   * anisotropy for everything in it. `allocateLayer` therefore still hands out
+   * stable indices for any lane that wants to batch, and nothing samples them
+   * yet. Called out here because `docs/ARCHITECTURE.md` §4 assumes the array
+   * path; this is a deliberate, reported deviation.
+   */
   readonly albedoArray = flatDataArray(ARRAY_LAYERS, [140, 128, 108, 255]);
   readonly surfaceArray = flatDataArray(ARRAY_LAYERS, [128, 128, 200, 255]);
 
   private readonly cache = new Map<string, THREE.Material>();
   private readonly textureCache = new Map<SurfaceId, TextureSet>();
-  private readonly deformChunks = new Map<string, DeformChunk>();
+  private readonly records = new Map<THREE.Material, MaterialRecord>();
+  private readonly deformChunks = new DeformChunkRegistry();
   private readonly surfaceChunks = new Map<string, SurfaceChunk>();
-  private readonly depthVariants = new Map<THREE.Material, THREE.Material>();
-  /**
-   * Declared uniform cells per material. The factory holds the SAME objects the
-   * lane declared, and hands the same objects to every variant, so one write
-   * reaches the forward, depth, shadow and velocity programs at once. This map
-   * is also what makes `setUniform` able to throw on a typo instead of writing
-   * into nothing.
-   */
   private readonly declaredUniforms = new Map<THREE.Material, Map<string, GpuUniform>>();
-  /** Uniform name → the spec id that claimed it, so two lanes cannot collide. */
   private readonly uniformOwners = new Map<string, string>();
   private nextLayer = RESERVED_LAYERS;
   private readonly layerIds = new Map<string, number>();
 
+  private readonly globals: IronGlobals = createIronGlobals();
+  /** Unjittered VP this frame and last. The only correct velocity inputs. */
+  private readonly currVP: GpuUniform = { value: new THREE.Matrix4() };
+  private readonly prevVP: GpuUniform = { value: new THREE.Matrix4() };
+  private library: MaterialLibrary | undefined;
+  private services: Services | undefined;
+
   constructor(
     private readonly renderer: THREE.WebGLRenderer,
     private readonly quality: QualityService,
-  ) {}
+    private readonly assets: AssetRegistry,
+    private readonly rng: Rng,
+  ) {
+    // `bakeAll` has already run by the time any subsystem is constructed (see
+    // `src/main.ts`), so the library is available here and every material
+    // created during world build gets its real textures on the first try.
+    this.library = assets.tryGet(BakeAssets.materials);
+  }
+
+  attachServices(services: Services): void {
+    this.services = services;
+  }
 
   get permutationCount(): number {
     return this.cache.size;
@@ -174,37 +200,32 @@ export class IronMaterialFactory implements MaterialFactory {
       );
     }
 
-    const base = spec.baseColor ?? SURFACE_BASE_COLOR[spec.surface] ?? 0x808080;
-    const material = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(base),
-      // Everything is authored in sRGB and shaded in linear; three converts on
-      // assignment because ColorManagement is enabled at boot.
-      roughness: spec.roughness ?? 0.85,
-      metalness: spec.metalness ?? 0,
-      side: spec.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
-      transparent: spec.transparent === true,
-      alphaTest: spec.alphaTest ?? 0,
-      vertexColors: false,
-      flatShading: false,
+    const textures = this.textures(spec.surface);
+    const { material, cells } = buildIronMaterial({
+      spec,
+      textures,
+      globals: this.globals,
+      deforms: this.deformChunks,
+      surfaceChunk: spec.surfaceShader ? this.surfaceChunks.get(spec.surfaceShader) : undefined,
+      anisotropy: this.quality.settings.maxAnisotropy,
     });
-    material.name = spec.id;
-    if (spec.emissive !== undefined) {
-      material.emissive = new THREE.Color(spec.emissive);
-      material.emissiveIntensity = spec.emissiveIntensity ?? 1;
-    }
-    // Dielectric F0 lives in 0..0.08; three's `specularIntensity` on Standard is
-    // not exposed, so the day-0 path folds it into roughness only. RCORE's uber
-    // material carries the real F0.
-    if (spec.features & MaterialFeature.AlphaClip && !material.alphaTest) {
-      material.alphaTest = 0.5;
-    }
+
     // Depth state is explicit and separable from blending. Water is the case
     // that forces it: alpha-blended AND depth-writing, or volumetrics and every
     // sorted transparent draw straight through the sea.
     applyBlend(material, spec.blending ?? (spec.transparent ? 'alpha' : 'opaque'));
     material.depthWrite = spec.depthWrite ?? !spec.transparent;
     material.depthTest = spec.depthTest ?? true;
+
     this.bindUniforms(material, spec.id, spec.uniforms);
+    // The material's OWN cells (uIronTiling, uIronWearP, …) are declared too, so
+    // a lane can retune a surface at runtime through the same validated seam it
+    // uses for its own uniforms.
+    const declared = this.declaredUniforms.get(material) ?? new Map<string, GpuUniform>();
+    for (const [name, cell] of cells) declared.set(name, cell);
+    this.declaredUniforms.set(material, declared);
+
+    this.records.set(material, { spec, textures, cells: declared });
     this.cache.set(key, material);
     return material;
   }
@@ -212,7 +233,7 @@ export class IronMaterialFactory implements MaterialFactory {
   /**
    * UNLIT escape hatch — HUD text, debug gizmos, the sky dome. The alternative
    * is every lane deciding independently whether `new THREE.RawShaderMaterial`
-   * is legal (it is not; CI now fails on it) and finding out at integration.
+   * is legal (it is not; CI fails on it) and finding out at integration.
    */
   createUnlit(spec: UnlitSpec): THREE.Material {
     const existing = this.cache.get(`unlit|${spec.id}`);
@@ -241,12 +262,9 @@ export class IronMaterialFactory implements MaterialFactory {
     });
     material.name = `unlit:${spec.id}`;
     applyBlend(material, spec.blending ?? (spec.transparent ? 'alpha' : 'opaque'));
-    // The material owns the very cells the caller passed, so setUniform and a
-    // direct `.value =` write are the same write.
     const cells = new Map<string, GpuUniform>();
-    for (const [name, cell] of Object.entries(spec.uniforms)) {
+    for (const name of Object.keys(spec.uniforms)) {
       cells.set(name, material.uniforms[name] as GpuUniform);
-      void cell;
     }
     this.declaredUniforms.set(material, cells);
     this.cache.set(`unlit|${spec.id}`, material);
@@ -298,6 +316,11 @@ export class IronMaterialFactory implements MaterialFactory {
     // derived from it, so depth, shadow and velocity cannot fall out of step
     // with the lit pass — the same guarantee registerDeform gives for geometry.
     cell.value = value;
+    // A ShaderMaterial caches its uniform values against the program; the
+    // Mesh*Material path re-uploads every frame, but the unlit and velocity
+    // paths need telling.
+    const sm = material as THREE.ShaderMaterial;
+    if (sm.isShaderMaterial) sm.uniformsNeedUpdate = true;
   }
 
   uniform(material: THREE.Material, name: string): unknown {
@@ -312,23 +335,16 @@ export class IronMaterialFactory implements MaterialFactory {
     return surfaceProfile(id);
   }
 
+  /**
+   * The baked `TextureSet` for a surface, or a real synthesised one for the
+   * long tail BAKE has no recipe or alias for. Never a flat colour: an
+   * untextured surface is the first entry on the brief's defect list.
+   */
   textures(id: SurfaceId): TextureSet {
-    let set = this.textureCache.get(id);
-    if (set) return set;
-    const hex = SURFACE_BASE_COLOR[id] ?? 0x808080;
-    const r = (hex >> 16) & 0xff;
-    const g = (hex >> 8) & 0xff;
-    const b = hex & 0xff;
-    const profile = surfaceProfile(id);
-    // Roughness in the blue channel, AO in alpha — the packing the contract
-    // specifies, so a lane written against the null reads the right channels.
-    const rough = Math.round((1 - profile.hardness * 0.55) * 255);
-    set = {
-      albedoHeight: flatTexture([r, g, b, 128], THREE.SRGBColorSpace),
-      normalRoughAo: flatTexture([128, 128, rough, 255], THREE.NoColorSpace),
-      tiling: 2,
-      metalness: id === SurfaceId.BareMetal || id === SurfaceId.PaintedMetal ? 1 : 0,
-    };
+    const cached = this.textureCache.get(id);
+    if (cached) return cached;
+    const baked = this.library?.get(id);
+    const set = baked ?? buildFallbackTextureSet(id, this.rng);
     this.textureCache.set(id, set);
     return set;
   }
@@ -352,47 +368,15 @@ export class IronMaterialFactory implements MaterialFactory {
    * the lit pass. Any lane that animates a vertex in a shader MUST come through
    * here: displacing vertices in your own `onBeforeCompile` produces geometry
    * that ghosts and smears, and the bug will be blamed on TAA rather than on you.
-   *
-   * The chunk must also define `IRON_PREV_POSITION` — the same displacement
-   * evaluated with LAST frame's uniforms — or the velocity pass writes zero and
-   * every temporal filter treats moving geometry as static.
    */
   registerDeform(name: string, chunk: DeformChunk): void {
-    const existing = this.deformChunks.get(name);
-    if (existing !== undefined) {
-      if (
-        existing.common !== chunk.common ||
-        existing.displace !== chunk.displace ||
-        existing.prevPosition !== chunk.prevPosition
-      ) {
-        throw new Error(`MaterialFactory: deform chunk "${name}" registered twice with different GLSL`);
-      }
-      return;
-    }
-    if (chunk.displace.trim().length === 0) {
-      throw new Error(`MaterialFactory: deform chunk "${name}" has an empty \`displace\` — it moves nothing.`);
-    }
-    if (chunk.prevPosition.trim().length === 0) {
-      throw new Error(
-        `MaterialFactory: deform chunk "${name}" has an empty \`prevPosition\`. It must be a vec3 ` +
-          `EXPRESSION giving this vertex under last frame's uniforms — write \`position\` if the ` +
-          `vertex genuinely does not move, but do not leave it blank: the velocity pass would write ` +
-          `zero and TAA would treat moving geometry as static.`,
-      );
-    }
-    if (chunk.prevPosition.includes(';')) {
-      throw new Error(
-        `MaterialFactory: deform chunk "${name}" \`prevPosition\` contains ';' — it is an EXPRESSION, ` +
-          `not statements. Put helpers in \`common\`.`,
-      );
-    }
-    this.deformChunks.set(name, chunk);
+    this.deformChunks.register(name, chunk);
   }
 
   /**
    * The fragment counterpart. Registered chunks run after albedo/normal/
    * roughness resolve and before lighting, so a lane's own shading still gets
-   * CSM, clustered lights, GTAO and aerial perspective — which is the whole
+   * shadows, clustered lights, AO and aerial perspective — which is the whole
    * reason water may not be a hand-rolled ShaderMaterial.
    */
   registerSurface(name: string, chunk: SurfaceChunk): void {
@@ -414,7 +398,7 @@ export class IronMaterialFactory implements MaterialFactory {
 
   /** Registered chunks, for RCORE's prepass/shadow/velocity override materials. */
   get deforms(): ReadonlyMap<string, DeformChunk> {
-    return this.deformChunks;
+    return this.deformChunks.all;
   }
 
   /** Registered surface chunks, for RCORE's uber-material assembly. */
@@ -423,23 +407,24 @@ export class IronMaterialFactory implements MaterialFactory {
   }
 
   depthVariant(material: THREE.Material): THREE.Material {
-    let v = this.depthVariants.get(material);
-    if (!v) {
-      const src = material as THREE.MeshStandardMaterial;
-      v = new THREE.MeshDepthMaterial({
-        depthPacking: THREE.RGBADepthPacking,
-        alphaTest: src.alphaTest,
-        side: src.side,
-      });
-      // The variant shares the forward material's uniform CELLS, not copies of
-      // them, so `setUniform` reaches depth, shadow and velocity with one write
-      // and a deform can never displace the lit pass differently from the
-      // prepass. Same guarantee as registerDeform, one level down.
-      const cells = this.declaredUniforms.get(material);
-      if (cells) this.declaredUniforms.set(v, cells);
-      this.depthVariants.set(material, v);
+    const record = this.records.get(material);
+    if (!record) return material;
+    if (!record.depth) {
+      const spec = record.spec;
+      record.depth = buildDepthMaterial(
+        spec.id,
+        spec.deform ? this.deformChunks.get(spec.deform) : undefined,
+        (material as THREE.MeshPhysicalMaterial).alphaTest,
+        (spec.features & MaterialFeature.AlphaClip) !== 0 ? record.textures.albedoHeight : null,
+        (material as THREE.MeshPhysicalMaterial).side,
+        spec.uniforms,
+        this.globals,
+      );
+      // Variants share the forward material's uniform CELLS, not copies, so one
+      // `setUniform` write reaches all four programs.
+      this.declaredUniforms.set(record.depth, record.cells);
     }
-    return v;
+    return record.depth;
   }
 
   shadowVariant(material: THREE.Material): THREE.Material {
@@ -447,65 +432,130 @@ export class IronMaterialFactory implements MaterialFactory {
   }
 
   velocityVariant(material: THREE.Material): THREE.Material {
-    // Day 0 there is no velocity buffer, so the depth variant is a correct
-    // stand-in: same geometry, same alpha test, same deform chunk once RCORE
-    // wires the injection.
-    return this.depthVariant(material);
+    const record = this.records.get(material);
+    if (!record) return this.depthVariant(material);
+    if (!record.velocity) {
+      const spec = record.spec;
+      record.velocity = buildVelocityMaterial({
+        id: spec.id,
+        deform: spec.deform ? this.deformChunks.get(spec.deform) : undefined,
+        alphaTest: (material as THREE.MeshPhysicalMaterial).alphaTest,
+        alphaMap: (spec.features & MaterialFeature.AlphaClip) !== 0 ? record.textures.albedoHeight : null,
+        side: (material as THREE.MeshPhysicalMaterial).side,
+        uniforms: {
+          uIronCurrVP: this.currVP,
+          uIronPrevVP: this.prevVP,
+          uIronTime: this.globals.uIronTime,
+          uIronPrevTime: this.globals.uIronPrevTime,
+        },
+        laneUniforms: spec.uniforms,
+      });
+      this.declaredUniforms.set(record.velocity, record.cells);
+    }
+    return record.velocity;
   }
 
   /**
-   * Pushes sun, cascades, LUTs, clusters, wind and exposure into every material.
-   * Day 0 there are no custom uniforms, so this only keeps the shared texture
-   * arrays flagged for upload; the hook exists so lanes can rely on it running
-   * exactly once per frame, before submit.
+   * Pushes time, camera, screen size, the velocity matrices and the scene-depth
+   * handle into every material at once. Runs once per frame, before submit.
+   *
+   * These are SHARED CELLS, so this is ~10 writes for the whole frame rather
+   * than 10 per material — which is the reason the globals live in one object
+   * instead of being copied into each `onBeforeCompile`.
    */
-  updateGlobals(_ctx: FrameCtx): void {}
+  updateGlobals(ctx: FrameCtx): void {
+    const g = this.globals;
+    (g.uIronPrevTime as GpuUniform).value = g.uIronTime.value;
+    (g.uIronTime as GpuUniform).value = ctx.time;
+    (g.uIronCamPos.value as THREE.Vector3).copy(ctx.camera.position as THREE.Vector3);
+
+    const graph = ctx.services.graph;
+    (g.uIronScreen.value as THREE.Vector2).set(1 / Math.max(graph.width, 1), 1 / Math.max(graph.height, 1));
+
+    // Soft particles are a documented NO-OP when the graph has no SceneDepth —
+    // which is the whole of Low tier and every configuration before RCORE's
+    // prepass lands. Ask every frame: a pass can be added at boot and the
+    // answer during `setup` is a lie.
+    const hasDepth = graph.has(RTId.SceneDepth);
+    g.uIronSoftGlobal.enabled = hasDepth ? 1 : 0;
+    g.uIronSoftGlobal.near = ctx.camera.near;
+    g.uIronSoftGlobal.far = ctx.camera.far;
+    (g.uIronSceneDepth as GpuUniform).value = hasDepth ? graph.texture(RTId.SceneDepth) : null;
+    for (const record of this.records.values()) {
+      const soft = record.cells.get('uIronSoft')?.value as THREE.Vector4 | undefined;
+      if (soft) {
+        soft.y = g.uIronSoftGlobal.enabled;
+        soft.z = g.uIronSoftGlobal.near;
+        soft.w = g.uIronSoftGlobal.far;
+      }
+    }
+
+    // Velocity: last frame's matrix BEFORE this frame's overwrite, and the
+    // unjittered projection on both sides so TAA's own jitter never appears as
+    // per-pixel motion.
+    (this.prevVP.value as THREE.Matrix4).copy(this.currVP.value as THREE.Matrix4);
+    (this.currVP.value as THREE.Matrix4).copy(ctx.camera.viewProjection as THREE.Matrix4);
+  }
 
   /**
-   * Compile every live permutation against a probe scene BEFORE `markReady()`.
-   * A shader compiled lazily on first sight costs 20–120 ms on the main thread,
-   * which under the harness lands inside the shot's frame budget and shows up as
-   * a shot that "sometimes" looks different.
+   * Compile every live permutation BEFORE `markReady()`. A shader compiled
+   * lazily on first sight costs 20–120 ms on the main thread, which under the
+   * harness lands inside the shot's frame budget and shows up as a shot that
+   * "sometimes" looks different.
    */
   async prewarm(): Promise<void> {
-    if (this.cache.size === 0) return;
-    const probe = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 10);
-    camera.position.set(0, 0, 3);
-    // A light must be present or three compiles the unlit permutation instead.
-    probe.add(new THREE.DirectionalLight(0xffffff, 1));
-    probe.add(new THREE.HemisphereLight(0xffffff, 0x404040, 1));
-    const geometry = new THREE.PlaneGeometry(1, 1);
-    for (const material of this.cache.values()) {
-      probe.add(new THREE.Mesh(geometry, material));
-    }
-    this.renderer.compile(probe, camera);
-    geometry.dispose();
+    await prewarmMaterials(this.renderer, this.cache, this.services);
+  }
+
+  /** Harness reset: drop temporal state so a capture cannot depend on order. */
+  reset(): void {
+    (this.prevVP.value as THREE.Matrix4).identity();
+    (this.currVP.value as THREE.Matrix4).identity();
+    (this.globals.uIronTime as GpuUniform).value = 0;
+    (this.globals.uIronPrevTime as GpuUniform).value = 0;
+    resetVelocityHistory();
   }
 }
+
+let instance: IronMaterialFactory | null = null;
 
 /**
  * Factory referenced by `src/bootstrap/subsystems.ts`.
- *
- * RCORE: replace the BODY of this file, keep this signature and this path.
  */
 export function createMaterialFactory(ctx: BootContext): IronMaterialFactory {
-  return new IronMaterialFactory(ctx.renderer, ctx.quality);
+  const factory = new IronMaterialFactory(
+    ctx.renderer,
+    ctx.quality,
+    ctx.assets,
+    ctx.rng.fork('materials'),
+  );
+  instance = factory;
+  // The scene and camera only exist once every subsystem is constructed, and
+  // prewarm needs both to compile against the REAL light configuration rather
+  // than a probe rig that would produce a different NUM_DIR_LIGHTS and
+  // therefore a different program.
+  ctx.afterBoot((services) => factory.attachServices(services));
+  return factory;
 }
 
 /**
- * The albedo and surface `DataArrayTexture` layers, the BRDF LUT and the grade
- * LUT — step 2 of the bake table, and the largest single line item in it.
+ * The material bakes are BAKE's `bake.materials` step; the factory consumes it
+ * rather than declaring its own, because a second copy of the same six PBR sets
+ * would double the single largest line item in the bake budget.
  */
 export function registerMaterialsBakes(_assets: AssetRegistry, _quality: Readonly<QualitySettings>): void {
-  // The null factory bakes nothing; it makes flat `MeshStandardMaterial`s.
+  // Nothing of RCORE's own: the TextureSets come from `BakeAssets.materials`,
+  // and the fallback sets for the long-tail surfaces are CPU-generated on first
+  // request, which costs 128² of typed-array work and no bake units.
 }
 
 /**
- * Harness reset chain. Nothing a material holds is per-capture EXCEPT anything
- * that feeds a temporal filter — the global uniform block's previous-frame
- * values, and any per-instance wear accumulated during a live session.
+ * Harness reset chain. Nothing a material holds is per-capture EXCEPT what
+ * feeds a temporal filter — the previous view-projection and the shader clock.
+ * A stale previous VP makes the first frame of a capture write a full-screen
+ * velocity smear, which TAA then resolves into a ghost that survives the whole
+ * shot.
  */
 export function resetMaterials(_seed: number): void {
-  // The null factory holds no transient state.
+  instance?.reset();
 }

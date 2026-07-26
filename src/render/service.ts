@@ -29,6 +29,7 @@ import {
 } from '@/engine/types';
 import type { IronRenderGraph } from '@/render/graph';
 import type { IronCameraRig } from '@/render/camera-rig';
+import { registerCorePasses } from '@/render/passes';
 
 export class IronRenderService implements RenderService {
   readonly overlays = { viewmodel: true, hud: true };
@@ -159,6 +160,10 @@ export function createRenderService(ctx: BootContext): RenderService {
   ctx.addRender(new ResizeSystem(canvas, service, quality));
   ctx.addRender(new SubmitSystem(ctx.services.graph));
   service.resize(canvas.clientWidth || canvas.width, canvas.clientHeight || canvas.height);
+  // The whole frame — prepass, forward, TAA, motion blur, exposure, bloom, DOF,
+  // tonemap, lens, present — goes in from here, inside `afterBoot`. See
+  // `src/render/passes/index.ts` for why it cannot go in a factory body.
+  registerCorePasses(ctx);
   return service;
 }
 

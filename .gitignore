@@ -6,6 +6,16 @@ dist/
 # Captured frames from tools/shoot.sh — regenerated on demand, never committed.
 tools/shots/
 
+# Blind A/B sheets from tools/compare.sh. These COMPOSITE A REFERENCE FRAME beside
+# ours, so every sheet embeds third-party pixels and falls under exactly the same
+# rule as reference/ below: local only, never committed, never shipped. They were
+# untracked but not ignored, which meant one `git add -A` would have put real
+# Battlefield screenshots into the repo.
+tools/compare/
+
+# Scratch capture directories used while bisecting a defect (tools/probe*, etc).
+tools/probe*/
+
 # ---------------------------------------------------------------------------
 # Third-party reference imagery. LOCAL ONLY — NEVER COMMITTED, NEVER SHIPPED.
 #

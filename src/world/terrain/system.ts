@@ -1,162 +1,273 @@
 /**
- * TerrainService.
+ * TerrainService. Owned by TERRAIN.
  *
- * OWNER: TERRAIN. Day-0 stub: the null terrain from `src/bootstrap/nulls.ts`
- * (whose `heightAt` is MACRO_TERRAIN, not a flat plane) plus a coarse triangle
- * mesh of that same analytic field, split into surface groups by slope and
- * shore distance so the beach, the town terrace and the headland read as
- * different materials.
+ * Assembly only: the heightfield lives in `field.ts`, the LOD mesh in
+ * `chunks.ts`, the published maps in `maps.ts` and the shading in `shader.ts`.
  *
- * TERRAIN: delete `buildPlaceholderMesh`, keep `createTerrainService`'s
- * signature and this path.
- *
- * THE INVARIANT YOU INHERIT: `heightAt` must be LITERALLY the function the
- * terrain vertex shader displaces with. Both come from `NoiseLib`, which ships
- * matched CPU and GLSL over one permutation table. Any shader displacement
- * finer than the physics collider cell must be NORMAL-ONLY — position offsets
- * finer than the collider are what make players float over bumps and sink into
- * dips, and it is invisible until someone walks on it.
+ * THE INVARIANT THIS FILE EXISTS TO KEEP: `heightAt` is the function the terrain
+ * geometry is built from. Not a copy of it, not a shader port of it — the same
+ * call. `TerrainChunks` evaluates `TerrainField.height` per vertex on the CPU
+ * and uploads the result; nothing in this lane displaces a vertex in a shader,
+ * so the GPU and the physics collider cannot disagree by construction. The
+ * shader adds relief only through the NORMAL, which is the other half of the
+ * contract: position detail finer than the collider cell is exactly what makes
+ * players float over bumps and sink into dips.
  */
 import * as THREE from 'three';
 import {
-  MaterialFeature,
-  RenderLayer,
-  SceneGroup,
+  AssetKind,
+  BakeKind,
+  RenderStage,
   SurfaceId,
+  type AssetKey,
   type AssetRegistry,
   type BootContext,
-  type MaterialFactory,
+  type FrameCtx,
   type QualitySettings,
-  type SceneGraph,
   type TerrainService,
+  type Vec3,
 } from '@/engine/types';
-import { MACRO_TERRAIN } from '@/engine/macro';
-import { createNullTerrain, trackNull } from '@/bootstrap/nulls';
+import { clamp } from '@/engine/math/curves';
+import { FIELD_HALF, TerrainField } from '@/world/terrain/field';
+import { TerrainChunks } from '@/world/terrain/chunks';
+import { SHORE_RANGE_METRES, buildMaps, paintGroundTransitions, type TerrainMaps } from '@/world/terrain/maps';
+import { createTerrainMaterial } from '@/world/terrain/shader';
 
-/** Vertices per axis. 129² = 16 641 verts, 32 768 triangles — one draw. */
-const GRID = 128;
+interface TerrainBake {
+  readonly field: TerrainField;
+  readonly maps: TerrainMaps;
+}
 
-function buildPlaceholderMesh(scene: SceneGraph, materials: MaterialFactory): void {
-  const b = MACRO_TERRAIN.bounds;
-  const spanX = b.maxX - b.minX;
-  const spanZ = b.maxZ - b.minZ;
-  const verts = GRID + 1;
+let bakeKey: AssetKey<TerrainBake> | undefined;
+let live: HarbourTerrain | undefined;
 
-  const position = new Float32Array(verts * verts * 3);
-  const uv = new Float32Array(verts * verts * 2);
+class HarbourTerrain implements TerrainService {
+  readonly ready = true;
+  readonly bounds: THREE.Box3;
+  readonly seaLevel: number;
+  readonly collisionHeightfield: Readonly<{ data: Float32Array; size: number; scale: Vec3 }>;
+  readonly heightMap: THREE.Texture;
+  readonly splatMap: THREE.Texture;
+  readonly shoreMask: THREE.Texture;
+  readonly groundAlbedoMap: THREE.Texture;
+  readonly mapRect: Readonly<{ minX: number; minZ: number; sizeX: number; sizeZ: number }>;
+  readonly shoreRangeMetres = SHORE_RANGE_METRES;
 
-  for (let j = 0; j <= GRID; j++) {
-    for (let i = 0; i <= GRID; i++) {
-      const t = j * verts + i;
-      const x = b.minX + (i / GRID) * spanX;
-      const z = b.minZ + (j / GRID) * spanZ;
-      position[t * 3] = x;
-      position[t * 3 + 1] = MACRO_TERRAIN.height(x, z);
-      position[t * 3 + 2] = z;
-      // One UV repeat per 8 m so a detail texture has somewhere sane to land.
-      uv[t * 2] = x / 8;
-      uv[t * 2 + 1] = z / 8;
-    }
+  private readonly chunks: TerrainChunks;
+  private readonly grad = { gx: 0, gz: 0 };
+
+  constructor(
+    private readonly field: TerrainField,
+    private readonly maps: TerrainMaps,
+    chunks: TerrainChunks,
+  ) {
+    this.chunks = chunks;
+    this.seaLevel = field.seaLevel;
+    this.bounds = new THREE.Box3(
+      new THREE.Vector3(-FIELD_HALF, -40, -FIELD_HALF),
+      new THREE.Vector3(FIELD_HALF, 120, FIELD_HALF),
+    );
+    this.heightMap = maps.heightMap;
+    this.splatMap = maps.splatMap;
+    this.shoreMask = maps.shoreMask;
+    this.groundAlbedoMap = maps.groundAlbedo;
+    this.mapRect = maps.rect;
+    // The physics heightfield is the SAME SAMPLES the camera sees — no resample,
+    // no second evaluation of the field, only a transpose into rapier's
+    // column-major layout. `scale` gives the world extents; the samples are
+    // already metres, so the Y multiplier is 1.
+    this.collisionHeightfield = {
+      data: field.transposedForPhysics(),
+      size: field.res + 1,
+      scale: new THREE.Vector3(FIELD_HALF * 2, 1, FIELD_HALF * 2) as Vec3,
+    };
   }
 
-  // Bucket triangles by dominant surface so each becomes its own draw group.
-  // Three buckets, in the order the material array below expects.
-  const buckets: number[][] = [[], [], []];
-  const centre = new THREE.Vector3();
-  for (let j = 0; j < GRID; j++) {
-    for (let i = 0; i < GRID; i++) {
-      const a = j * verts + i;
-      const c = a + 1;
-      const d = a + verts;
-      const e = d + 1;
-      for (const tri of [[a, d, c], [c, d, e]]) {
-        centre.set(0, 0, 0);
-        for (const v of tri) {
-          centre.x += position[v * 3] / 3;
-          centre.y += position[v * 3 + 1] / 3;
-          centre.z += position[v * 3 + 2] / 3;
+  heightAt(x: number, z: number): number {
+    return this.field.height(x, z);
+  }
+
+  normalAt(x: number, z: number, out: Vec3): Vec3 {
+    this.field.gradient(x, z, this.grad);
+    const len = Math.hypot(this.grad.gx, 1, this.grad.gz);
+    return out.set(-this.grad.gx / len, 1 / len, -this.grad.gz / len);
+  }
+
+  /** Radians from vertical, which is what nav slope limits and AI want. */
+  slopeAt(x: number, z: number): number {
+    return Math.atan(this.field.slope(x, z));
+  }
+
+  /**
+   * Read back the SAME splat the shader reads, so a footstep cue, an impact
+   * decal and the pixel under the player's boot always agree about what the
+   * ground is made of. Deriving it from the rules a second time would be a
+   * second implementation that drifts.
+   */
+  surfaceAt(x: number, z: number): SurfaceId {
+    const { size, rect, splatData } = this.maps;
+    const i = clamp(Math.floor(((x - rect.minX) / rect.sizeX) * size), 0, size - 1);
+    const j = clamp(Math.floor(((z - rect.minZ) / rect.sizeZ) * size), 0, size - 1);
+    const t = (j * size + i) * 4;
+    const sand = splatData[t];
+    const scrub = splatData[t + 1];
+    const rock = splatData[t + 2];
+    const transition = splatData[t + 3];
+    if (transition > 150) return SurfaceId.Gravel;
+    if (rock >= sand && rock >= scrub) return SurfaceId.Sandstone;
+    if (sand >= scrub) return this.field.shoreDistance(x, z) < 1.6 ? SurfaceId.WetSand : SurfaceId.Sand;
+    return SurfaceId.Dirt;
+  }
+
+  /**
+   * Fixed-step march, bisected once a crossing is bracketed. Not a physics
+   * query: AI line-of-sight and VFX ground snapping call it thousands of times
+   * a second and cannot afford a rapier round trip.
+   */
+  raycast(origin: Vec3, direction: Vec3, maxDistance: number, out: Vec3): number {
+    const step = Math.max(0.4, maxDistance / 320);
+    let prevT = 0;
+    let prevD = origin.y - this.field.height(origin.x, origin.z);
+    for (let t = step; t <= maxDistance; t += step) {
+      const px = origin.x + direction.x * t;
+      const py = origin.y + direction.y * t;
+      const pz = origin.z + direction.z * t;
+      const d = py - this.field.height(px, pz);
+      if (d <= 0 && prevD > 0) {
+        let lo = prevT;
+        let hi = t;
+        for (let i = 0; i < 14; i++) {
+          const mid = (lo + hi) * 0.5;
+          if (
+            origin.y + direction.y * mid - this.field.height(origin.x + direction.x * mid, origin.z + direction.z * mid) <=
+            0
+          ) {
+            hi = mid;
+          } else {
+            lo = mid;
+          }
         }
-        // Slope from the two in-plane edges of the quad, which is exact for a
-        // grid and far cheaper than a normal per triangle.
-        const dy = Math.abs(position[d * 3 + 1] - position[a * 3 + 1]) + Math.abs(position[c * 3 + 1] - position[a * 3 + 1]);
-        const cell = spanX / GRID;
-        const slope = dy / cell;
-        const shore = MACRO_TERRAIN.shoreDistance(centre.x, centre.z);
-        const bucket = slope > 0.55 ? 2 : shore < 12 ? 0 : 1;
-        buckets[bucket].push(tri[0], tri[1], tri[2]);
+        out.set(origin.x + direction.x * hi, origin.y + direction.y * hi, origin.z + direction.z * hi);
+        return hi;
       }
+      prevT = t;
+      prevD = d;
     }
+    return -1;
   }
 
-  const index = new Uint32Array(buckets[0].length + buckets[1].length + buckets[2].length);
-  const geometry = new THREE.BufferGeometry();
-  let offset = 0;
-  const groups: { start: number; count: number; material: number }[] = [];
-  for (let g = 0; g < buckets.length; g++) {
-    index.set(buckets[g], offset);
-    groups.push({ start: offset, count: buckets[g].length, material: g });
-    offset += buckets[g].length;
+  update(ctx: FrameCtx): void {
+    const p = ctx.camera.position;
+    this.chunks.update(p.x, p.z);
   }
 
-  geometry.setAttribute('position', new THREE.BufferAttribute(position, 3));
-  geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-  geometry.setIndex(new THREE.BufferAttribute(index, 1));
-  for (const g of groups) geometry.addGroup(g.start, g.count, g.material);
-  geometry.computeVertexNormals();
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
+  forceRebuild(x: number, z: number): void {
+    this.chunks.update(x, z, true);
+  }
 
-  const surfaceMaterials = [SurfaceId.Sand, SurfaceId.Dirt, SurfaceId.Rubble].map((surface) =>
-    materials.create({
-      id: `terrain.placeholder.${surface}`,
-      surface,
-      layer: 0,
-      features: MaterialFeature.Triplanar,
-      roughness: surface === SurfaceId.Sand ? 0.94 : 0.88,
-      metalness: 0,
-    }),
-  );
+  paintTransitions(colliders: Parameters<typeof paintGroundTransitions>[1]): void {
+    paintGroundTransitions(this.maps, colliders, this.field);
+  }
 
-  const mesh = new THREE.Mesh(geometry, surfaceMaterials);
-  mesh.name = 'terrain(placeholder)';
-  mesh.receiveShadow = true;
-  mesh.castShadow = true;
-  mesh.layers.set(RenderLayer.WorldOpaque as number);
-  mesh.matrixAutoUpdate = false;
-  mesh.updateMatrix();
-
-  scene.group(SceneGroup.Terrain).add(mesh);
-  scene.addStatic(mesh, {
-    bounds: geometry.boundingBox ?? new THREE.Box3(),
-    layer: RenderLayer.WorldOpaque,
-    castsShadow: true,
-    // The terrain is not an occluder candidate: it is one object covering the
-    // whole screen, so its screen AABB would occlude everything behind the
-    // camera's own footprint. Occluders must be discrete and box-like.
-    occluder: false,
-  });
+  get stats(): Readonly<{ nodes: number; triangles: number; draws: number }> {
+    return this.chunks.stats;
+  }
 }
 
 /**
  * Factory referenced by `src/bootstrap/subsystems.ts`.
  *
- * TERRAIN: replace the BODY of this file, keep this signature and this path.
+ * Everything expensive already ran in the bake step; this wires the mesh, the
+ * material and the LOD system to services that only exist now.
  */
 export function createTerrainService(ctx: BootContext): TerrainService {
-  buildPlaceholderMesh(ctx.services.scene, ctx.services.materials);
-  return trackNull(createNullTerrain());
+  const bake = bakeKey ? ctx.assets.tryGet(bakeKey) : undefined;
+  if (!bake) {
+    throw new Error(
+      'TerrainService: the terrain field bake did not run. registerTerrainBakes must be called before bakeAll.',
+    );
+  }
+
+  const materials = ctx.services.materials;
+  const material = createTerrainMaterial({
+    materials,
+    maps: bake.maps,
+    sand: materials.textures(SurfaceId.Sand),
+    rock: materials.textures(SurfaceId.Sandstone),
+  });
+
+  const chunks = new TerrainChunks(bake.field, ctx.services.scene, material);
+  const service = new HarbourTerrain(bake.field, bake.maps, chunks);
+  live = service;
+
+  // Build a cut immediately so the very first frame — and every shot, which
+  // poses the camera and renders without ever walking — has real ground under
+  // it rather than an empty geometry.
+  service.forceRebuild(0, 0);
+
+  ctx.addRender({
+    name: 'terrain.lod',
+    stage: RenderStage.Scene,
+    update: (frame) => service.update(frame),
+  });
+
+  // LEVEL is guaranteed built by afterBoot, and its colliders are the only
+  // honest answer to "where does built geometry actually meet the ground".
+  ctx.afterBoot((services) => {
+    const colliders = services.level.collectColliders();
+    if (colliders.length > 0) service.paintTransitions(colliders);
+  });
+
+  return service;
 }
 
 /**
- * The heightfield (fBm then 64 hydraulic erosion iterations on a 2048 R32F
- * ping-pong, with ONE readback for the physics collider), plus splat, curvature,
- * AO and macro break-up. Steps 3 and 4 of the bake table, 280 units at `full`.
+ * Steps 3 and 4 of the bake table: the heightfield (macro → analytic detail →
+ * droplet erosion) and the splat / shore / ground-albedo maps derived from it.
+ *
+ * Deliberately CPU, not GPU. The architecture's sketch was a 2048² GPU
+ * ping-pong with one readback for the physics collider, and `allowReadback` is
+ * FALSE under the software rasteriser the capture harness runs on — which would
+ * leave physics reading a heightfield the GPU never handed back. Doing it on the
+ * CPU keeps one array that is simultaneously the mesh source, the collider and
+ * the texture, and droplet erosion is cheap enough (about 2 s at 1024²) that the
+ * GPU version would buy nothing but a divergence risk.
  */
-export function registerTerrainBakes(_assets: AssetRegistry, _quality: Readonly<QualitySettings>): void {
-  // The placeholder mesh is evaluated from MACRO_TERRAIN at construction.
+export function registerTerrainBakes(assets: AssetRegistry, quality: Readonly<QualitySettings>): void {
+  if (bakeKey) return;
+  bakeKey = assets.define<TerrainBake>('terrain.field', AssetKind.Data, {
+    kind: BakeKind.MainThread,
+    version: 3,
+    cost: 280,
+    async run(ctx) {
+      const resolution = Math.min(1024, Math.max(256, ctx.profile.terrainHeightRes));
+      ctx.progress(0.02, 'terrain: macro + detail');
+      const field = new TerrainField(ctx.noise, ctx.rng.fork('terrain.erosion'), {
+        resolution,
+        erosionIterations: ctx.profile.erosionIterations,
+      });
+      await ctx.yieldFrame();
+      ctx.progress(0.72, 'terrain: splat + shore');
+      const maps = buildMaps(field, ctx.noise, quality.terrain.splatSize);
+      await ctx.yieldFrame();
+      ctx.progress(1, 'terrain: ready');
+      return { field, maps };
+    },
+    dispose(value) {
+      value.maps.heightMap.dispose();
+      value.maps.splatMap.dispose();
+      value.maps.shoreMask.dispose();
+      value.maps.groundAlbedo.dispose();
+    },
+  });
 }
 
-/** Harness reset chain: clipmap centre and LOD hysteresis, nothing else. */
+/**
+ * Harness reset. The field, the maps and the material are immutable across
+ * captures — the only per-capture state is the LOD cut, which is rebuilt from
+ * wherever the next shot's camera lands. Forcing it here means a shot can never
+ * inherit the previous shot's tessellation.
+ */
 export function resetTerrain(_seed: number): void {
-  // The placeholder mesh is static.
+  live?.forceRebuild(0, 0);
 }

@@ -154,6 +154,14 @@ export class IronRenderGraph implements RenderGraph {
     this.fullscreenMesh = new THREE.Mesh(geometry, new THREE.ShaderMaterial());
     this.fullscreenMesh.frustumCulled = false;
     this.fullscreenScene.add(this.fullscreenMesh);
+    // The graph owns clear state (architecture 4.2), and every clear it issues
+    // is to black: `SceneDepth == 0` is the G-buffer's "no geometry" sentinel
+    // and `GVelocity == 0` its "did not move", so an MRT clear — which three
+    // applies to every attachment at once — has to be black or both sentinels
+    // become lies. Setting it once here rather than saving and restoring per
+    // pass also avoids re-converting the colour through sRGB on every restore,
+    // which walks it darker frame by frame.
+    renderer.setClearColor(0x000000, 1);
   }
 
   /* ---------------------------------------------------------------- resources */
@@ -474,6 +482,23 @@ export class IronRenderGraph implements RenderGraph {
    * Draw one RenderLayer's visible set. Layers map onto three's own 32-channel
    * `Object3D.layers` mask, so selecting a layer is a camera mask change rather
    * than a scene-graph walk toggling `.visible` on thousands of objects.
+   *
+   * Clears `dest` first, which is the contract every other lane codes against.
+   * **It COMPOSITES: it does not clear colour and it does not clear depth.**
+   *
+   * The day-0 implementation cleared both, because it inherited the renderer's
+   * `autoClear` and nothing else wrote `SceneColor` yet. That stopped being
+   * harmless the moment the forward chain landed: `SceneColor` is now bound by
+   * six passes in a frame (opaque, decals, sky, water, transparent, viewmodel),
+   * and a lane compositing into it — water drawing its surface over the world,
+   * decals drawing into it — was silently erasing every pass before it. It also
+   * threw away the depth buffer the world was drawn with, so the water surface
+   * could not be occluded by the quay in front of it.
+   *
+   * Compositing is the only semantic that can be right for a shared target, and
+   * a lane that genuinely owns its own target is drawing into a resource nobody
+   * else writes, where the previous frame's contents are its own and clearing is
+   * its decision to make.
    */
   drawLayer(
     ctx: FrameCtx,
@@ -481,16 +506,104 @@ export class IronRenderGraph implements RenderGraph {
     dest: THREE.WebGLRenderTarget | null,
     override?: THREE.Material | null,
   ): void {
-    const camera = layer === RenderLayer.Viewmodel ? ctx.camera.viewmodel : ctx.camera.world;
+    this.drawLayers(ctx, [layer], dest, { override: override ?? null });
+  }
+
+  /**
+   * The multi-layer, clear-controlled, jitter-aware draw the post chain is built
+   * on. Not on the `RenderGraph` interface: a content lane wanting a custom draw
+   * has `drawLayer`/`drawScene`, and everything here is a decision only the
+   * frame's owner is allowed to make.
+   *
+   * Three things it does that `drawLayer` cannot:
+   *
+   *  - **Clear control.** A frame binds `SceneColor` five times (opaque, decals,
+   *    sky, water, transparent, viewmodel). If every bind cleared, only the last
+   *    one would survive.
+   *  - **TAA jitter.** The camera keeps an UNJITTERED `projectionMatrix` so
+   *    culling, world-to-screen and velocity are all correct; the sub-pixel
+   *    offset is installed on the three camera for the duration of the draw and
+   *    removed immediately after. Getting this backwards is the classic
+   *    "TAA is soft and nobody can say why" bug.
+   *  - **Group suppression.** The depth prepass runs an override material over
+   *    `WorldOpaque`, and the sky dome lives on that layer with a vertex shader
+   *    that pins it to the far plane. Under an override it would instead be a
+   *    2 m box at the world origin, punching a hole in `SceneDepth`.
+   */
+  drawLayers(
+    ctx: FrameCtx,
+    layers: readonly RenderLayer[],
+    dest: THREE.WebGLRenderTarget | null,
+    opts: {
+      override?: THREE.Material | null;
+      clearColor?: boolean;
+      clearDepth?: boolean;
+      viewmodelCamera?: boolean;
+      jitter?: boolean;
+      /** Scene groups hidden for the duration of the draw. */
+      hideGroups?: readonly THREE.Object3D[];
+    } = {},
+  ): void {
+    const renderer = this.renderer;
+    const viewmodel = opts.viewmodelCamera === true;
+    const camera = viewmodel ? ctx.camera.viewmodel : ctx.camera.world;
+
+    const previousAutoClear = renderer.autoClear;
     const previousOverride = this.scene.root.overrideMaterial;
     const previousMask = camera.layers.mask;
-    camera.layers.set(layer as number);
-    if (override !== undefined) this.scene.root.overrideMaterial = override;
-    this.renderer.setRenderTarget(dest);
-    this.renderer.render(this.scene.root, camera);
-    this.renderer.setRenderTarget(null);
+    renderer.autoClear = false;
+
+    const restoreProjection = TMP_PROJECTION;
+    let jittered = false;
+    if (opts.jitter === true) {
+      restoreProjection.copy(camera.projectionMatrix);
+      camera.projectionMatrix.copy(
+        viewmodel ? this.viewmodelJitter(ctx, camera) : (ctx.camera.jitteredProjection as THREE.Matrix4),
+      );
+      camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+      jittered = true;
+    }
+
+    const hidden = opts.hideGroups;
+    if (hidden) {
+      for (let i = 0; i < hidden.length; i++) {
+        TMP_VISIBILITY[i] = hidden[i].visible;
+        hidden[i].visible = false;
+      }
+    }
+    if (opts.override !== undefined) this.scene.root.overrideMaterial = opts.override;
+
+    renderer.setRenderTarget(dest);
+    if (opts.clearColor === true || opts.clearDepth === true) {
+      renderer.clear(opts.clearColor === true, opts.clearDepth === true, false);
+    }
+
+    for (const layer of layers) {
+      camera.layers.set(layer as number);
+      renderer.render(this.scene.root, camera);
+    }
+    renderer.setRenderTarget(null);
+
+    if (hidden) for (let i = 0; i < hidden.length; i++) hidden[i].visible = TMP_VISIBILITY[i];
     this.scene.root.overrideMaterial = previousOverride;
     camera.layers.mask = previousMask;
+    renderer.autoClear = previousAutoClear;
+    if (jittered) {
+      camera.projectionMatrix.copy(restoreProjection);
+      camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+    }
+  }
+
+  /**
+   * The viewmodel camera's own jittered projection. It must carry the SAME
+   * sub-pixel offset as the world camera or the two halves of the frame
+   * converge against different sample grids and the seam between them crawls.
+   */
+  private viewmodelJitter(ctx: FrameCtx, camera: THREE.PerspectiveCamera): THREE.Matrix4 {
+    TMP_VM_PROJECTION.copy(camera.projectionMatrix);
+    TMP_VM_PROJECTION.elements[8] += (ctx.camera.jitter.x * 2) / Math.max(1, this.width);
+    TMP_VM_PROJECTION.elements[9] += (ctx.camera.jitter.y * 2) / Math.max(1, this.height);
+    return TMP_VM_PROJECTION;
   }
 
   /**
@@ -527,6 +640,13 @@ export class IronRenderGraph implements RenderGraph {
 
   execute(ctx: FrameCtx): void {
     this.sortPasses();
+    // A frame binds the renderer six or seven times, and three re-renders every
+    // shadow map on EVERY `render()` call while `autoUpdate` is on. Taking
+    // ownership of the flag here turns that into once per frame — same result,
+    // a sixth of the cost — and is the only place in the repo that knows how
+    // many times the scene is submitted.
+    this.renderer.shadowMap.autoUpdate = false;
+    this.renderer.shadowMap.needsUpdate = true;
     if (this.passList.length === 0) {
       this.executeFallback(ctx);
     } else {
@@ -610,8 +730,9 @@ export class IronRenderGraph implements RenderGraph {
     this.nativeWidth = Math.max(1, nativeW);
     this.nativeHeight = Math.max(1, nativeH);
     // A combined MRT framebuffer aliases textures that are about to be resized
-    // under it, so drop the cache and let the next pass rebuild it.
-    for (const rt of this.mrtTargets.values()) rt.dispose();
+    // under it, so drop the cache and let the next pass rebuild it. NOT
+    // disposed: `dispose()` on the combination would delete the GL textures it
+    // merely borrows, and the resources that actually own them would go blank.
     this.mrtTargets.clear();
     for (const res of this.resources.values()) {
       if (res.desc.size) continue; // absolute-sized LUTs and atlases do not scale
@@ -644,6 +765,28 @@ export class IronRenderGraph implements RenderGraph {
     this.renderer.setRenderTarget(previousTarget);
   }
 
+  /**
+   * Read a 1×1 RGBA32F target back to the CPU.
+   *
+   * Exactly one caller: auto-exposure, which must publish its result on
+   * `CameraState.exposureEv` for lanes that have no shader to sample it from.
+   * A readback is a pipeline stall, so it is one pixel, and P22 reads the
+   * PREVIOUS frame's value rather than the one just written.
+   */
+  readPixel(id: RTId | string, out: Float32Array): boolean {
+    const res = this.resources.get(String(id));
+    const rt = res?.desc.history ? res.previous : res?.current;
+    if (!rt) return false;
+    try {
+      this.renderer.readRenderTargetPixels(rt, 0, 0, 1, 1, out);
+      return true;
+    } catch {
+      // Some drivers refuse float readback outright. Losing the CPU-side mirror
+      // of the exposure is cosmetic; the shaders sample the texture directly.
+      return false;
+    }
+  }
+
   dispose(): void {
     for (const res of this.resources.values()) {
       res.current?.dispose();
@@ -655,6 +798,10 @@ export class IronRenderGraph implements RenderGraph {
     this.blitMaterial?.dispose();
   }
 }
+
+const TMP_PROJECTION = new THREE.Matrix4();
+const TMP_VM_PROJECTION = new THREE.Matrix4();
+const TMP_VISIBILITY: boolean[] = [];
 
 /**
  * Factory referenced by `src/bootstrap/subsystems.ts`.

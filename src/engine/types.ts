@@ -2122,7 +2122,15 @@ export interface RenderGraph {
     opts?: Readonly<FullscreenOpts>,
   ): void;
   blit(src: THREE.Texture, dest: THREE.WebGLRenderTarget | null): void;
-  /** Draw one RenderLayer's visible set with an optional material override. */
+  /**
+   * Draw one RenderLayer's visible set with an optional material override.
+   *
+   * **COMPOSITES — it clears neither colour nor depth.** `SceneColor` is bound
+   * by six passes in a frame and its depth buffer carries the opaque scene, so a
+   * lane drawing its layer into it (water over the world, decals into it) adds
+   * to what is already there and depth-tests against it. A lane that owns a
+   * private target owns the decision to clear it too.
+   */
   drawLayer(
     ctx: FrameCtx,
     layer: RenderLayer,
@@ -2383,6 +2391,23 @@ export interface TerrainService {
    * construction. Distances beyond ±`shoreRangeMetres` clamp.
    */
   readonly shoreRangeMetres: number;
+  /**
+   * Coarse (64²) ground albedo over `mapRect`, sRGB-encoded, sea cells carrying
+   * the sea's albedo rather than the land's.
+   *
+   * LOOK_SPEC §2.4 asks the terrain lane for exactly this and it has one
+   * consumer: LIGHT integrates it into the LOWER (bounce) SH lobe. Without it
+   * every downward-facing surface in the map is lit by a grey constant, upward-
+   * and downward-facing shadow read identically, and the frame flattens — and
+   * the warm-landward / cool-seaward split the spec calls the map's most
+   * valuable composition cannot happen at all, because the bounce lobe would not
+   * know the ground is water on one side of the wall.
+   *
+   * OPTIONAL because `src/bootstrap/nulls.ts` is frozen: a required member could
+   * not be added without editing it. Read it with a null check and fall back to
+   * a constant ground colour.
+   */
+  readonly groundAlbedoMap?: THREE.Texture;
 }
 
 /** Implemented by WATER (`src/world/water/system.ts`). */

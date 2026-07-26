@@ -35,6 +35,7 @@ import {
 import { AntiAliasMode } from '@/engine/types';
 import { clamp, damp } from '@/engine/math/curves';
 import { haltonJitter } from '@/engine/math/halton';
+import { EXPOSURE_PRESET_EV } from '@/render/color';
 
 const WORLD_NEAR = 0.08;
 const WORLD_FAR = 4000;
@@ -64,6 +65,23 @@ export class IronCameraRig implements CameraRig, RenderSystem {
   private readonly posedPosition = new THREE.Vector3();
   private readonly posedTarget = new THREE.Vector3();
   private posedFov = 55;
+  /**
+   * Set by `poseAbsolute`, consumed by the next `update`. A shot teleports the
+   * camera, so the previous frame's view-projection describes a jump of a
+   * hundred metres: motion blur would smear the first frames of every capture
+   * and TAA would reject its whole history. Seeding `prevViewProjection` from
+   * THIS frame instead makes the teleport frame a zero-velocity frame, which is
+   * what a cut is.
+   */
+  private poseTeleported = false;
+  /**
+   * TAA jitter phase. Deliberately NOT `FrameCtx.frame`: that counter runs
+   * across the whole session, so shot #7 would sample a different point of the
+   * Halton sequence than shot #1 and two captures of the same scene in a
+   * different ORDER would differ by a sub-pixel offset. `resetCamera` zeroes it
+   * per shot, which is what makes captures order-independent.
+   */
+  private jitterIndex = 0;
 
   private trauma = 0;
   private traumaFrequency = 22;
@@ -92,11 +110,12 @@ export class IronCameraRig implements CameraRig, RenderSystem {
       inverseViewProjection: new THREE.Matrix4(),
       prevViewProjection: new THREE.Matrix4(),
       jitter,
-      // 12.5 EV is a plausible golden-hour exterior key. RCORE's exposure pass
-      // overwrites this every frame once it lands; while `deterministic` is true
-      // it is FROZEN, which is what keeps a 32-frame shot from landing at a
-      // different EV than a live session that adapted for seconds.
-      exposureEv: 12.5,
+      // The GOLDEN preset anchor: EV = log2(L_grey/0.18) = log2(957/0.18) =
+      // 12.376, i.e. an exposure multiplier of 1.88e-4, exactly LOOK_SPEC §2.1.
+      // P22 overwrites this every frame from the metered value; while
+      // `deterministic` is true it is FROZEN here, which is what keeps a
+      // 32-frame capture from landing at a different EV than the shot before it.
+      exposureEv: EXPOSURE_PRESET_EV,
       world: this.world,
       viewmodel: this.viewmodel,
     };
@@ -117,8 +136,12 @@ export class IronCameraRig implements CameraRig, RenderSystem {
   poseAbsolute(position: Vec3, target: Vec3, fovDeg?: number): void {
     this.posedPosition.copy(position);
     this.posedTarget.copy(target);
-    if (fovDeg !== undefined) this.posedFov = fovDeg;
+    // Falling back to the BASE fov rather than to whatever the previous shot
+    // asked for: a shot that omits the argument must not inherit the last one's
+    // 38 deg cinematic lens, or the roster stops being order-independent.
+    this.posedFov = fovDeg ?? this.baseFovDeg;
     this.poseLocked = true;
+    this.poseTeleported = true;
     // Kill any in-flight shake immediately: a shot that inherits trauma from the
     // previous capture is the classic order-dependent screenshot.
     this.trauma = 0;
@@ -196,6 +219,11 @@ export class IronCameraRig implements CameraRig, RenderSystem {
     this.mutable.viewProjection.multiplyMatrices(this.stateValue.projection, this.stateValue.view);
     this.mutable.inverseViewProjection.copy(this.stateValue.viewProjection).invert();
 
+    if (this.poseTeleported) {
+      this.mutable.prevViewProjection.copy(this.stateValue.viewProjection);
+      this.poseTeleported = false;
+    }
+
     this.applyJitter(ctx);
     return this.stateValue;
   }
@@ -215,7 +243,9 @@ export class IronCameraRig implements CameraRig, RenderSystem {
       this.mutable.jitteredProjection.copy(this.stateValue.projection);
       return;
     }
-    haltonJitter(ctx.frame, q.taaSamples, jitter);
+    haltonJitter(this.jitterIndex, q.taaSamples, jitter);
+    this.jitterIndex++;
+    void ctx;
     const width = Math.max(1, this.renderWidth);
     const height = Math.max(1, this.renderHeight);
     this.mutable.jitteredProjection.copy(this.stateValue.projection);
@@ -247,6 +277,27 @@ export class IronCameraRig implements CameraRig, RenderSystem {
   setExposureEv(ev: number): void {
     this.mutable.exposureEv = ev;
   }
+
+  /**
+   * Frames rendered since the last harness reset. The post chain's stochastic
+   * bits — grain, motion-blur tap jitter — index off THIS rather than
+   * `FrameCtx.frame`, which runs across the whole session and would make a
+   * capture depend on how many shots ran before it.
+   */
+  get jitterPhase(): number {
+    return this.jitterIndex;
+  }
+
+  /** Harness reset: drop every scrap of per-shot temporal state. */
+  resetTransient(): void {
+    this.jitterIndex = 0;
+    this.trauma = 0;
+    this.posedFov = this.baseFovDeg;
+    this.poseTeleported = true;
+    this.currentFovDeg = this.baseFovDeg;
+    this.mutable.exposureEv = EXPOSURE_PRESET_EV;
+    this.mutable.prevViewProjection.identity();
+  }
 }
 
 const TMP_V4 = new THREE.Vector4();
@@ -256,8 +307,11 @@ const TMP_V4 = new THREE.Vector4();
  *
  * RCORE: replace the BODY of this file, keep this signature and this path.
  */
+let instance: IronCameraRig | null = null;
+
 export function createCameraRig(ctx: BootContext): IronCameraRig {
   const rig = new IronCameraRig(ctx.services, ctx.quality);
+  instance = rig;
   ctx.addRender(rig);
   // 68° vertical. Wider than a cinematic 50° because a shooter needs peripheral
   // awareness; narrower than the 90° that makes a viewmodel look like a toy.
@@ -276,5 +330,8 @@ export function registerCameraBakes(_assets: AssetRegistry, _quality: Readonly<Q
  * frames of a shot come out mid-shake.
  */
 export function resetCamera(_seed: number): void {
-  // The pose lock is cleared by the driver's reset chain, before this runs.
+  // The pose lock is cleared by the driver's reset chain, before this runs; the
+  // TAA jitter phase, the trauma spring and the previous view-projection are
+  // ours and would otherwise make a capture depend on the shot before it.
+  instance?.resetTransient();
 }
