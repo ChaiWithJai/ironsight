@@ -116,10 +116,44 @@ function macroHeight(x: number, z: number): number {
   // THE HEADLAND. Two overlapping bumps so the promontory has a shoulder rather
   // than reading as a single cone; it pushes land ~150 m out into the sea.
   h += 38 * bump(x, z, -228, -66, 96);
-  h += 16 * bump(x, z, -168, -20, 62);
+  // Secondary shoulder, lowered 16 m -> 8 m. See THE CHARLIE-BRAVO CORRIDOR note
+  // below: at 16 m this shoulder put 15 m of rock across the map's central
+  // sightline.
+  h += 8 * bump(x, z, -168, -20, 62);
   // A notch that separates the headland from the town, which is what makes it
   // read as a *headland* and gives CHARLIE its natural approach.
   h -= 11 * bump(x, z, -140, 34, 44);
+
+  // THE CHARLIE-BRAVO CORRIDOR.
+  //
+  // The map's premise is three points that contest each other. CHARLIE (the fort,
+  // 31 m) overlooking BRAVO (the quay, 3.4 m) at 194 m is the fight the whole
+  // layout is built around, and as first authored it did not exist: the terrain
+  // put a 15 m wall across it at (-153, -31).
+  //
+  // Measured, not guessed. Sampling the height field along the eye-to-eye line
+  // showed two SEPARATE obstructions, which is why an earlier attempt to fix this
+  // by cutting harder saturated at 1.8 m and stopped improving:
+  //
+  //   1. the secondary headland shoulder above — genuine terrain, cut here;
+  //   2. CHARLIE's OWN plateau. The terrace is flat at 31 m, so a player standing
+  //      at its centre has a sightline that drops below their own ground 33 m out.
+  //      No amount of cutting fixes that, because `plateau()` runs last and
+  //      re-flattens whatever this carve removes.
+  //
+  // (2) is not a terrain defect — it is what a flat terrace does, and it is why
+  // real fortifications put the fighting step at the parapet. LEVEL owns that
+  // half: CHARLIE's firing positions must sit >= 4 m above the terrace on the
+  // seaward rampart. With this saddle and a 6 m rampart the line clears by 1.8 m.
+  // With either alone it stays blocked.
+  //
+  // A saddle rather than a trench: sigma 58 m is wide enough that it reads as the
+  // natural col between the headland and the town, and the cut is applied BEFORE
+  // the plateaus so it can never eat a capture point's terrace.
+  h -= 14 * Math.exp(
+    -Math.pow(distToSegment(x, z, MACRO_ANCHORS.charlie.x, MACRO_ANCHORS.charlie.z, MACRO_ANCHORS.bravo.x, MACRO_ANCHORS.bravo.z), 2) /
+      (2 * 58 * 58),
+  );
 
   // THE BREAKWATER. A narrow stone arm running north-east from the quay; +5.5 m
   // above the water at the root, tapering as it goes out.
