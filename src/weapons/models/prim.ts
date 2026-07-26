@@ -311,6 +311,43 @@ export function boxProjectUv(geometry: THREE.BufferGeometry): THREE.BufferGeomet
   return geometry;
 }
 
+/**
+ * A flat annulus facing down the bore: a lens bezel, an ocular ring, a washer.
+ *
+ * It is a `lathe` with a closed four-corner profile rather than a `tube`,
+ * because a tube is SOLID and the entire point of a bezel is the hole. Closing
+ * the profile (last point equal to the first) is what caps the inner and outer
+ * cylindrical walls into one watertight shell; leave it open and the ring reads
+ * as two disconnected cylinders the moment the key light rakes across it.
+ *
+ * The chamfer is 0.25 mm on each of the four corners, taken as a fraction of the
+ * wall so a 3 mm bezel and a 12 mm one both look milled rather than stamped.
+ */
+export function ringZ(
+  radiusInner: number,
+  radiusOuter: number,
+  thickness: number,
+  segments = 24,
+): THREE.BufferGeometry {
+  const zf = thickness * 0.5;
+  const zb = -thickness * 0.5;
+  const c = Math.min(0.00025, thickness * 0.22, (radiusOuter - radiusInner) * 0.22);
+  return lathe(
+    [
+      [radiusInner + c, zb],
+      [radiusOuter - c, zb],
+      [radiusOuter, zb + c],
+      [radiusOuter, zf - c],
+      [radiusOuter - c, zf],
+      [radiusInner + c, zf],
+      [radiusInner, zf - c],
+      [radiusInner, zb + c],
+      [radiusInner + c, zb],
+    ],
+    segments,
+  );
+}
+
 /** Small raised cylinder — screw heads, pins, sling points, gas block detail. */
 export function stud(radius: number, height: number, segments = 10): THREE.BufferGeometry {
   const g = new THREE.CylinderGeometry(radius, radius * 1.04, height, segments, 1, false);

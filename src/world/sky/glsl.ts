@@ -21,10 +21,13 @@ import {
   HAZE_FLOOR,
   HAZE_GROUND_BAND,
   HAZE_GROUND_OCC,
+  HAZE_INSCATTER_BUILD,
+  HAZE_INSCATTER_NEAR,
   HAZE_K,
   HAZE_P,
   HAZE_ROLLIN,
   HAZE_SCALE_HEIGHT,
+  HAZE_TMIN,
   SKY_SCALE,
 } from '@/world/sky/model';
 
@@ -189,6 +192,10 @@ const float IRON_HAZE_P = ${f(HAZE_P)};
 const float IRON_HAZE_D0 = ${f(HAZE_ROLLIN)};
 const float IRON_HAZE_HS = ${f(HAZE_SCALE_HEIGHT)};
 const float IRON_HAZE_FLOOR = ${f(HAZE_FLOOR)};
+/** See HAZE_TMIN / HAZE_INSCATTER_* in model.ts for what these two are for. */
+const float IRON_HAZE_TMIN = ${f(HAZE_TMIN)};
+const float IRON_HAZE_IN_NEAR = ${f(HAZE_INSCATTER_NEAR)};
+const float IRON_HAZE_IN_BUILD = ${f(HAZE_INSCATTER_BUILD)};
 const float IRON_HAZE_GOCC = ${f(HAZE_GROUND_OCC)};
 const float IRON_HAZE_GBAND = ${f(HAZE_GROUND_BAND)};
 const vec3  IRON_HAZE_CH = ${v3(HAZE_CHANNEL)};

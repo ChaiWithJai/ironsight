@@ -186,6 +186,31 @@ const STOCHASTIC_SURFACES: ReadonlySet<SurfaceId> = new Set([
   SurfaceId.Gravel,
 ]);
 
+/**
+ * Surfaces whose mesoscale relief is DEEP enough to be worth ray-marching, and
+ * which are therefore given parallax-occlusion mapping WITHOUT being asked.
+ *
+ * The round-2 material critique's headline finding was that "the brick courses
+ * are drawn as ~1 px dark scribe lines on a flat plane" — and it was right,
+ * because no lane in the repo has ever set `MaterialFeature.ParallaxOcclusion`.
+ * Asking fifteen lanes to remember a feature bit for a property of the MATERIAL
+ * rather than of the mesh is the wrong seam: a sandstone wall has 12 mm mortar
+ * courses whoever built it. The factory owns the surface vocabulary, so the
+ * factory decides which surfaces have depth.
+ *
+ * Restricted to laid/quarried stone and cast concrete. Stucco, plaster, sand and
+ * every fabric are excluded on purpose: their height field is a noise band with
+ * no ledges in it, so a ray march finds nothing and only costs fetches.
+ */
+const RELIEF_SURFACES: ReadonlySet<SurfaceId> = new Set([
+  SurfaceId.Sandstone,
+  SurfaceId.Cobble,
+  SurfaceId.Tile,
+  SurfaceId.Concrete,
+  SurfaceId.Rubble,
+  SurfaceId.Gravel,
+]);
+
 export interface IronMaterialOptions {
   readonly spec: MaterialSpec;
   readonly textures: TextureSet;
@@ -230,7 +255,16 @@ function definesFor(spec: MaterialSpec, hasWear: boolean, block: BlockLattice): 
     if (block.lattice) d.IRON_TILE_LATTICE = '1';
   }
   if (f & MaterialFeature.WearMask && hasWear) d.IRON_WEAR = '1';
-  if (f & MaterialFeature.ParallaxOcclusion) d.IRON_PARALLAX = '1';
+  // POM is a UV-path technique for the same reason stochastic sampling is: it
+  // offsets the sample coordinate, so anything reading the map as a MASK, and
+  // anything projecting it three ways, is excluded. The `maskLike` set already
+  // encodes exactly that test.
+  if (
+    f & MaterialFeature.ParallaxOcclusion ||
+    (!(f & MaterialFeature.Triplanar) && !(f & maskLike) && RELIEF_SURFACES.has(spec.surface))
+  ) {
+    d.IRON_PARALLAX = '1';
+  }
   if (f & MaterialFeature.AlphaFromHeight) d.IRON_ALPHA_FROM_HEIGHT = '1';
   if (f & MaterialFeature.SoftParticle) d.IRON_SOFT_PARTICLE = '1';
   if (f & MaterialFeature.DitherFade) d.IRON_DITHER_FADE = '1';
@@ -364,7 +398,13 @@ export function buildIronMaterial(opts: IronMaterialOptions): IronMaterialResult
         // Parallax depth in metres. A weapon's relief is millimetres; a wall's
         // mortar course is over a centimetre, and `detailScale` is the only
         // signal in the spec for which of the two this is.
-        (spec.detailScale ?? 1) > 8 ? 0.002 : 0.012,
+        //
+        // 0.022 on laid stone, measured off a real ashlar joint: a 20-25 mm
+        // recess is what makes a course read as a LEDGE at 2 m rather than as a
+        // scribe line. It is also the depth the POM self-shadow needs to throw a
+        // visible shadow under an 11° sun — at 0.012 the shadow was 6 cm long
+        // and vanished into the joint it came from.
+        (spec.detailScale ?? 1) > 8 ? 0.002 : RELIEF_SURFACES.has(spec.surface) ? 0.022 : 0.012,
       ),
     },
     uIronSoft: { value: new THREE.Vector4(spec.softFadeDistance ?? 0.5, 0, 0.1, 1000) },

@@ -1722,7 +1722,14 @@ export enum SceneGroup {
   Debug = 'debug',
 }
 
-/** Draw buckets. The graph submits layers explicitly; three's sorting is off. */
+/**
+ * Draw buckets. The graph submits layers EXPLICITLY, one `render()` call each,
+ * and that inter-layer order is the graph's alone. Order WITHIN a layer is
+ * three's sort (see note 5 in `engine/renderer.ts`): opaque front-to-back,
+ * transparent back-to-front, `renderOrder` overriding both. A lane that needs a
+ * blended draw to land over another blended draw in the same layer says so with
+ * `Object3D.renderOrder` and nothing else.
+ */
 export enum RenderLayer {
   /** Opaque world. Prepass + forward. */
   WorldOpaque = 0,

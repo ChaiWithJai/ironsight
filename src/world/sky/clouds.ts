@@ -16,56 +16,74 @@
  * atmospheric in-scatter over the distance to it. That last step is what stops
  * clouds near the horizon reading as stickers.
  *
- * ── THE RECTILINEAR BLOCK NOISE, AND WHY THE PREVIOUS MARCH PRODUCED IT ──────
+ * ── ROUND 3: THE SALT-AND-PEPPER, AND WHY IT WAS THE SCHEDULE AGAIN ─────────
  *
- * Round-1 review, at severity 10: "every cloud interior is filled with
- * axis-aligned rectangular block noise … one systemic bug, not per-cloud". It
- * was, and the cause was NOT the dither the previous build had already removed.
- * It was the empty-space-skipping STATE MACHINE itself. That march had
+ * Round 2 came back at severity 10 with two descriptions of what is actually
+ * one defect: "the cloud alpha resolves into discrete stippled pixels" on the
+ * steep deck in `material_chart`, and "regular horizontal dash-striping at a
+ * ~2-3 px pitch" on the shallow deck in `level_bravo`. Per-pixel white noise
+ * and screen-locked stripes are the same bug seen at two elevations, and the
+ * bug was the ONE piece of state the round-1 rewrite left in the loop:
  *
- *   • a coarse stride and a fine stride, with a `bool fine` toggled by
- *     thresholds on the density it happened to sample,
- *   • a four-step bisection run on first contact,
- *   • a `ceil()` re-snap of the fine grid at every entry,
- *   • an exit rule with fifteen times the hysteresis of the entry rule,
- *   • and a hard iteration budget of `steps × 4`.
+ *     float dt = dtGeo * mix(1.0, 0.19, occ);   //  occ = f(previous sample)
  *
- * Every one of those is a BRANCH whose outcome is a discontinuous function of
- * the ray. Two pixels a milliradian apart could enter fine mode one coarse
- * stride apart, land on different snapped grids, integrate a different subset of
- * the wisps, and terminate on different iterations. The density field is smooth;
- * the SCHEDULE was not, and a discontinuous schedule over a smooth field prints
- * the schedule's own structure into the image. Because the schedule's
- * discontinuities are iso-distance surfaces, and iso-distance surfaces of a
- * near-horizontal ray bundle are near-vertical planes, they came out as
- * axis-aligned shards.
+ * A stride chosen from the field, inside a loop with a FIXED ITERATION BUDGET,
+ * is a chaotic map. The budget buys a total path length of Σdtᵢ, and every dtᵢ
+ * depends on the density the ray happened to find one sample earlier, so two
+ * pixels a milliradian apart — or the same pixel with a different start jitter —
+ * integrate DIFFERENT TOTAL DISTANCES through the slab. Inside an optically
+ * thin wisp, where transmittance never reaches the early-out, where the ray
+ * stops is where the silhouette ends. The arithmetic: at 20° elevation the slab
+ * is 4.8 km of path, the geometric stride is ~150 m, and the shortened stride is
+ * 28 m, so 32 samples buy anywhere between 0.9 km and 4.8 km of it depending on
+ * the density sequence. That variance IS the stipple. On shallow rays the same
+ * variance is bounded by the 1600 m stride clamp and modulates along iso-
+ * distance surfaces, which for a near-horizontal ray bundle are horizontal
+ * screen bands — the dashes.
  *
- * The rewrite removes the decisions instead of trying to noise them out:
+ * The fix is not more jitter and not more steps. It is to stop spending the
+ * budget on empty sky, so that the whole cloud fits inside it with a stride
+ * that is FIXED BEFORE THE FIRST SAMPLE IS TAKEN:
  *
- * 1. ONE SCHEDULE, GEOMETRIC, WITH NO STATE. `t_{i+1} = t_i · r` where
- *    `r = (t₁/t₀)^(1/N)` — constant *relative* stride, i.e. constant angular
- *    resolution, covering the whole slab in exactly N samples for every ray.
- *    `r` is a smooth function of the view direction, so neighbouring pixels
- *    sample near-identical depths and the quantisation error varies smoothly.
- *    There is no coarse mode, no fine mode, no bisection and no re-snap.
+ * 1. A CONSERVATIVE OCCUPANCY SCAN, then a fine integration. The scan walks the
+ *    slab in `IRON_CLOUD_SCAN` geometric segments testing one cheap predicate
+ *    per segment: does this segment's ALTITUDE INTERVAL overlap the cloud band
+ *    of the weather cell it passes through? One texture fetch, no shape, no
+ *    erosion, no light march, and conservative — `cov·profile` bounds the
+ *    density from above, so a segment the scan rejects cannot contain cloud.
+ *    Most of the sky is cloud-free, so this also makes the common pixel CHEAPER
+ *    than the old full-length march, which is what pays for the finer stride.
  *
- * 2. THE DETAIL IS BAND-LIMITED TO THE STRIDE. This is the other half of the
- *    artefact and the half that is easy to miss. The erosion octave puts ~37 m
- *    Worley cells in the field; the previous march sampled it at strides of
- *    24–75 m and, on grazing rays, effectively 143 m. Sampling 37 m detail with
- *    a 143 m stride is aliasing, and aliasing of a lumpy field is precisely the
- *    shredded, shard-like interior the review describes. Both fine octaves now
- *    fade toward their own MEAN as the stride grows past the feature size, which
- *    is a mip selection done by hand: distant cloud goes smooth instead of
- *    going noisy.
+ * 2. THE FINE SCHEDULE IS A GLOBAL GRID, NOT A GRID ANCHORED AT THE HIT. This
+ *    is the part that matters and the part that is easy to get wrong. The scan
+ *    returns a distance quantised to a coarse segment, so it is a step function
+ *    of the view ray — anchoring the fine samples to it would print those steps.
+ *    Instead the fine samples live on `{t₀·rf^k}`, a grid defined only by the
+ *    slab entry distance and the ray direction, both smooth; the scan result
+ *    merely selects WHICH grid cell to start in via a floor(). Moving the start
+ *    by whole grid cells changes no sample position at all, so the scan's
+ *    discontinuity cannot reach the image.
  *
- * 3. THE RAY START IS JITTERED BY A HASH, NOT BY AN ORDERED DITHER. What is
- *    left after (1) and (2) is a smooth contour at the stride frequency. A
- *    fraction-of-a-stride offset turns it into noise. The offset comes from a
- *    bit-mixing hash of `gl_FragCoord`, which is white in screen space and
- *    deterministic per pixel — an ordered/Bayer/interleaved-gradient dither is a
- *    REGULAR lattice and printing a lattice over a cloud is how this lane got
- *    here in the first place.
+ * 3. THE STRIDE HAS A FLOOR IN METRES. A purely geometric grid is the right
+ *    thing for angular resolution but hands a near-vertical ray a 9 m stride,
+ *    which spends the whole budget in the first 500 m of a 1.6 km slab. The
+ *    ratio is therefore `max(rc^(1/4), 1 + 24/t₀)` — still a pure function of
+ *    the ray, still smooth, and it holds the per-step optical depth near 0.8 in
+ *    solid cloud while covering 1.2–2.4 km of path.
+ *
+ * 4. THE DETAIL IS BAND-LIMITED TO THE STRIDE. The erosion octave puts ~37 m
+ *    Worley cells in the field, and sampling 37 m detail with a 30 m stride is
+ *    right at Nyquist; both fine octaves fade toward their own MEAN as the
+ *    stride grows past the feature size, which is a mip selection done by hand
+ *    — distant cloud goes smooth instead of going noisy.
+ *
+ * 5. THE RAY START IS JITTERED BY A HASH, NOT BY AN ORDERED DITHER. What is
+ *    left after the above is a smooth contour at the stride frequency, now an
+ *    order of magnitude weaker than it was. A fraction-of-a-stride offset turns
+ *    it into noise. The offset comes from a bit-mixing hash of `gl_FragCoord`,
+ *    which is white in screen space and deterministic per pixel — an
+ *    ordered/Bayer/interleaved-gradient dither is a REGULAR lattice and printing
+ *    a lattice over a cloud is how this lane got here in the first place.
  *
  * ── THE OTHER TWO ROUND-1 FINDINGS ──────────────────────────────────────────
  *
@@ -116,6 +134,29 @@ const float IRON_SLAB_HI = ${(CLOUD_BASE + CLOUD_BASE_VAR + CLOUD_THICKNESS).toF
  */
 const float IRON_CLOUD_SIGMA = 0.030;
 
+/**
+ * Segments in the conservative occupancy scan.
+ *
+ * 22 is enough that a scan segment is never a large fraction of a 2.9 km
+ * weather cell — at the 20° elevation the deck is usually seen at it is ~115 m —
+ * which is what lets the scan take its horizontal sample at the segment
+ * midpoint. The altitude test is interval-exact regardless, so the only thing
+ * this number trades is how much empty slab the fine march inherits.
+ */
+const int IRON_CLOUD_SCAN = 22;
+
+/**
+ * Floor on the fine stride, metres.
+ *
+ * A geometric grid is right for angular resolution and wrong at close range: a
+ * ray straight up enters the slab 680 m away, so a quarter of a scan segment is
+ * 9 m and forty of them cover a third of the deck. 24 m holds the per-step
+ * optical depth at ~0.7 in solid cloud — the front surface is still resolved
+ * over three or four samples — and covers 1.2–2.4 km of path, which is past the
+ * point where transmittance has died in anything but a wisp.
+ */
+const float IRON_CLOUD_MIN_DT = 24.0;
+
 uniform sampler2D uSkyCloudNoise;
 uniform float uSkyCloudCoverage;
 uniform vec2 uSkyCloudDrift;
@@ -151,6 +192,73 @@ vec4 ironCloudFetch(vec2 uv) {
 }
 
 /**
+ * The weather cell over a horizontal position: how much cloud, and between
+ * which two altitudes.
+ *
+ * Split out of ironCloudDensity so the occupancy scan can run it ALONE. It is
+ * one texture fetch and it bounds the density from above (d <= cov*profile),
+ * which is what makes a segment the scan rejects provably empty.
+ */
+float ironCloudColumn(vec2 xz, out float baseY, out float topN, out float billow) {
+  // 1.15e-4 → an ~8.7 km weather tile whose 3-octave content puts cells at
+  // ~2.9 km, so a 100 km sightline crosses a few dozen of them and the deck
+  // reads as separate cumulus rather than as one continent.
+  //
+  // Smoothed reconstruction on THIS fetch and no other. The weather tile is the
+  // only one magnified past its texel size on screen — the shape octave's tile
+  // is 5 m/texel and the erosion's is 1.3 m/texel, both far below a pixel at any
+  // distance the deck is drawn at — and it is the only one read through a steep
+  // threshold. See ironCloudFetch.
+  vec4 weather = ironCloudFetch(xz * 1.15e-4 + uSkyCloudDrift);
+
+  float coverage = clamp(uSkyCloudCoverage, 0.0, 1.0);
+  // Threshold deliberately soft over a wide band — a hard one gives the
+  // scalloped, stamped-out silhouette that reads as a texture, not a volume.
+  // The band is calibrated so the parameter means what it says: the weather
+  // channel is a contrast-stretched 3-octave fBm, roughly normal about 0.5, and
+  // [1 − 1.50c, 1 − 0.42c] lands c = 0.30 → ~23 % of sky under cloud and
+  // c = 0.38 → ~34 %, i.e. inside LOOK_SPEC §3.1's 0.25–0.35 band.
+  float cov = smoothstep(1.0 - coverage * 1.50, 1.0 - coverage * 0.42, weather.x);
+  // PER-CELL CONDENSATION LEVEL. Real cumulus in one air mass share a base to
+  // within a hundred metres or so, not to the metre; a constant base is a ruled
+  // horizontal line drawn across the whole sky, which is what round 1 saw as a
+  // "dead-flat slab base running for the full width". The wisp channel read at
+  // the weather tile's scale puts ~670 m cells on it, which is the right size:
+  // one value per cumulus, not a ripple through each one.
+  baseY = IRON_CLOUD_BASE + (weather.w - 0.5) * (2.0 * IRON_CLOUD_BASE_VAR);
+  // Per-cell top, for the same reason: a uniform top puts every crown in the
+  // frame on one horizontal line. Marginal cells stay low and wispy; cells at
+  // the middle of a weather cluster tower.
+  topN = mix(0.32, 1.0, cov * (0.42 + 0.58 * weather.y));
+  billow = weather.y;
+  return cov;
+}
+
+/**
+ * Does the segment [ta, tb] of this ray have any chance of containing cloud?
+ *
+ * CONSERVATIVE, and that is the whole contract. The xz position is taken at the
+ * segment MIDPOINT, which is safe because the weather field's cells are ~2.9 km
+ * across and the longest scan segment is a small fraction of that; the ALTITUDE
+ * test uses the segment's full interval rather than its midpoint, because
+ * altitude is the axis a ray crosses quickly and a midpoint test there would
+ * step straight over a cloud base. False positives cost one wasted fine march;
+ * false negatives would punch holes in the deck, so there are none.
+ */
+bool ironCloudSegment(vec3 origin, vec3 dir, float ta, float tb) {
+  vec3 pm = origin + dir * ((ta + tb) * 0.5);
+  float baseY, topN, billow;
+  float cov = ironCloudColumn(pm.xz, baseY, topN, billow);
+  // Exactly the threshold ironCloudDensity bails on, so the two agree on where
+  // the deck ends: a scan that rejected slightly more than the integrator does
+  // would clip the faintest cell edges off the silhouette.
+  if (cov <= 0.002) return false;
+  float y0 = origin.y + dir.y * ta;
+  float y1 = origin.y + dir.y * tb;
+  return max(y0, y1) > baseY && min(y0, y1) < baseY + topN * IRON_CLOUD_THICK;
+}
+
+/**
  * Density at a world point. The baked tile carries four decorrelated octaves:
  *   r = 3-octave fBm      (the weather / coverage field)
  *   g = 5-octave fBm      (billow shape)
@@ -171,41 +279,12 @@ vec4 ironCloudFetch(vec2 uv) {
  * or the cloud cannot be lit correctly.
  */
 float ironCloudDensity(vec3 p, float shapeW, float erodeW) {
-  // 1.15e-4 → an ~8.7 km weather tile whose 3-octave content puts cells at
-  // ~2.9 km, so a 100 km sightline crosses a few dozen of them and the deck
-  // reads as separate cumulus rather than as one continent.
-  vec2 w = p.xz * 1.15e-4 + uSkyCloudDrift;
-  // Smoothed reconstruction on THIS fetch and no other. The weather tile is the
-  // only one magnified past its texel size on screen — the shape octave's tile
-  // is 5 m/texel and the erosion's is 1.3 m/texel, both far below a pixel at any
-  // distance the deck is drawn at — and it is the only one read through a steep
-  // threshold. See ironCloudFetch.
-  vec4 weather = ironCloudFetch(w);
-
-  float coverage = clamp(uSkyCloudCoverage, 0.0, 1.0);
-  // Threshold deliberately soft over a wide band — a hard one gives the
-  // scalloped, stamped-out silhouette that reads as a texture, not a volume.
-  // The band is calibrated so the parameter means what it says: the weather
-  // channel is a contrast-stretched 3-octave fBm, roughly normal about 0.5, and
-  // [1 − 1.50c, 1 − 0.42c] lands c = 0.30 → ~23 % of sky under cloud and
-  // c = 0.38 → ~34 %, i.e. inside LOOK_SPEC §3.1's 0.25–0.35 band.
-  float cov = smoothstep(1.0 - coverage * 1.50, 1.0 - coverage * 0.42, weather.x);
+  float base, top, billow;
+  float cov = ironCloudColumn(p.xz, base, top, billow);
   if (cov <= 0.002) return 0.0;
 
-  // PER-CELL CONDENSATION LEVEL. Real cumulus in one air mass share a base to
-  // within a hundred metres or so, not to the metre; a constant base is a ruled
-  // horizontal line drawn across the whole sky, which is what round 1 saw as a
-  // "dead-flat slab base running for the full width". The wisp channel read at
-  // the weather tile's scale puts ~670 m cells on it, which is the right size:
-  // one value per cumulus, not a ripple through each one.
-  float base = IRON_CLOUD_BASE + (weather.w - 0.5) * (2.0 * IRON_CLOUD_BASE_VAR);
   float h = (p.y - base) / IRON_CLOUD_THICK;
   if (h < 0.0) return 0.0;
-
-  // Per-cell top, for the same reason: a uniform top puts every crown in the
-  // frame on one horizontal line. Marginal cells stay low and wispy; cells at
-  // the middle of a weather cluster tower.
-  float top = mix(0.32, 1.0, cov * (0.42 + 0.58 * weather.y));
   if (h > top) return 0.0;
   float hn = h / top;
 
@@ -221,9 +300,16 @@ float ironCloudDensity(vec3 p, float shapeW, float erodeW) {
   // 7.5e-4 → a 1.33 km tile; its 5 octaves run from 267 m cauliflower down to
   // 17 m wisps. The vertical plane is sampled 1.37× finer so the two never
   // beat against each other.
-  float a = texture(uSkyCloudNoise, p.xz * 7.5e-4 + uSkyCloudDrift * 2.0).g;
+  // BOTH TAPS ARE UNDER THE BAND LIMIT, not just the vertical-plane one. The
+  // light march runs at 85–680 m per segment, and this octave's dominant
+  // feature is a 267 m billow — sampling it at 680 m is aliasing, so the mean is
+  // both the cheaper answer and the more correct one. It also halves the light
+  // march's texture cost, which is what pays for the extra view samples: a lit
+  // sample was thirteen fetches and is now nine.
+  float a = 0.5;
   float b = 0.5;
   if (shapeW > 0.01) {
+    a = mix(0.5, texture(uSkyCloudNoise, p.xz * 7.5e-4 + uSkyCloudDrift * 2.0).g, shapeW);
     b = mix(0.5, texture(uSkyCloudNoise, q * 1.03e-3 + vec2(0.31, 0.17)).g, shapeW);
   }
   float shape = smoothstep(0.05, 0.46, a * b);
@@ -340,29 +426,50 @@ vec4 ironCloudMarch(
   t1 = min(t1, t0 + 46000.0);
   if (t1 <= t0) return vec4(0.0, 0.0, 0.0, 1.0);
 
-  // ---- the schedule -------------------------------------------------------
-  // CONSTANT RELATIVE STRIDE. r is the per-step ratio that walks t0 to t1 in
-  // exactly 'steps' samples, so every ray gets the same sample COUNT and the
-  // same sample DENSITY IN ANGLE — a cloud at 12 km is resolved with the same
-  // number of samples across it as one at 1.2 km, which is what the eye needs
-  // because it subtends a tenth as many pixels. r varies smoothly with the view
-  // direction, so two neighbouring pixels sample near-identical depths; that is
-  // the property the old coarse/fine state machine destroyed and the reason its
-  // quantisation error came out as rectilinear shards instead of a soft contour.
-  float r = pow(t1 / t0, 1.0 / float(steps));
-  // Offset the whole schedule by a fraction of the first stride. What survives
-  // (1) and the band limit below is a smooth contour at the stride frequency;
-  // this converts it to per-pixel noise instead.
+  // ---- 1. the occupancy scan ----------------------------------------------
+  // Walk the whole slab in IRON_CLOUD_SCAN geometric segments, one cheap fetch
+  // each, and stop at the first that could contain cloud. Constant RELATIVE
+  // stride, i.e. constant angular resolution: a cell at 12 km gets the same
+  // number of segments across it as one at 1.2 km, which is right because it
+  // subtends a tenth as many pixels. rc is a smooth function of the view
+  // direction.
   //
-  // 0.6 OF A STRIDE, NOT A WHOLE ONE. A full-stride offset is the textbook
-  // choice and it is right when a temporal resolve is going to average it away.
-  // There is no TAA on this deck — the harness renders a fixed frame count and
-  // grabs the last one — so whatever the jitter leaves is what ships, and at
-  // full amplitude it shipped as a fizzy stipple along every cumulus rim. The
-  // adaptive stride below already holds the per-step optical depth near 0.9, so
-  // the banding this is suppressing is small to begin with and 0.6 of a stride
-  // is more than enough to break it up.
-  float t = t0 * pow(r, jitter * 0.6);
+  // MOST PIXELS LEAVE HERE. At §3.1's 0.25–0.35 coverage two thirds of the sky
+  // has no cloud in any direction, and those rays now cost IRON_CLOUD_SCAN
+  // texture fetches instead of a full-length march. That saving is what buys
+  // the fine stride below.
+  float rc = pow(t1 / t0, 1.0 / float(IRON_CLOUD_SCAN));
+  float ta = t0;
+  float tHit = -1.0;
+  for (int i = 0; i < IRON_CLOUD_SCAN; i++) {
+    float tb = ta * rc;
+    if (ironCloudSegment(origin, dir, ta, tb)) { tHit = ta; break; }
+    ta = tb;
+  }
+  if (tHit < 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
+
+  // ---- 2. the fine schedule ------------------------------------------------
+  // FOUR SAMPLES PER SCAN SEGMENT, with a floor of IRON_CLOUD_MIN_DT metres on
+  // the stride. The floor is what stops a near-vertical ray — whose slab entry
+  // is only 680 m away, so whose geometric stride is 9 m — from spending its
+  // whole budget in the first third of a 1.6 km slab. Both terms are functions
+  // of t0 and the direction alone, so rf is smooth across the frame.
+  float rf = max(pow(rc, 0.25), 1.0 + IRON_CLOUD_MIN_DT / t0);
+
+  // THE GRID IS GLOBAL, ANCHORED AT t0, AND THE SCAN ONLY CHOOSES A CELL IN IT.
+  // tHit is quantised to a scan segment and is therefore a STEP function of the
+  // ray; anchoring the samples to it would print those steps into the deck as
+  // exactly the kind of iso-distance contour this file has spent two rounds
+  // removing. Sample k of every ray sits at t0·rf^(k + jitter) instead, so
+  // moving the start by whole cells — which is all the scan can do — moves no
+  // sample at all. floor() lands on the grid point at or before the hit, and
+  // the scan is already conservative by a full scan segment on top of that.
+  float k = floor(log(tHit / t0) / log(rf));
+  // A full stride of jitter, not a fraction: the stride now holds the per-step
+  // optical depth near 0.8 in solid cloud and far below that in the wisps where
+  // the eye can actually see the quantisation, so the residual contour is small
+  // enough that breaking it fully costs nothing in fizz.
+  float t = t0 * pow(rf, k + jitter);
 
   // ---- phase, once per ray ------------------------------------------------
   float cosTheta = clamp(dot(dir, sunDir), -1.0, 1.0);
@@ -376,79 +483,85 @@ vec4 ironCloudMarch(
   // 8 %, so without it the only route to a lit-looking cloud is ambient.
   float ph0 = ironCloudPhase(cosTheta, 1.000);
   float ph1 = ironCloudPhase(cosTheta, 0.500) * 0.52;
-  float ph2 = ironCloudPhase(cosTheta, 0.250) * 0.26;
-  float ph3 = ironCloudPhase(cosTheta, 0.125) * 0.13;
+  float ph2 = ironCloudPhase(cosTheta, 0.250) * 0.24;
+  float ph3 = ironCloudPhase(cosTheta, 0.125) * 0.10;
 
   vec3 scatter = vec3(0.0);
   float transmittance = 1.0;
-  // Occupancy of the PREVIOUS sample, which is what shortens the stride inside
-  // the cloud. Using the previous sample rather than the current one keeps the
-  // stride a smooth function of a smooth field — a stride chosen from the sample
-  // it is about to take is a fixed point, and solving it per pixel is the sort
-  // of branch that put shards on this deck in the first place.
-  float occ = 0.0;
-
-  for (int i = 0; i < steps; i++) {
-    if (t >= t1 || transmittance < 0.012) break;
-    // Clamped so a near-vertical ray does not spend its budget at 4 m strides
-    // and a grazing one does not step a kilometre through the first cloud.
-    //
-    // ADAPTIVE INSIDE THE MEDIUM, and this is what decides how much noise the
-    // jitter above costs. A constant-relative stride puts ~160 m between samples
-    // at the 5 km the deck is typically seen at, and 160 m of unit-density cloud
-    // is an optical depth of 4.8 — one sample decides the whole silhouette, so a
-    // per-pixel offset of that sample is a per-pixel offset of the SILHOUETTE
-    // and the interior comes back as salt and pepper. At 0.19 of the stride the
-    // per-step optical depth is ~0.9 and the edge is spread over three or four
-    // samples, which is where the jitter stops being visible. It costs almost
-    // nothing: the only rays that take short steps are the ones inside cloud,
-    // and those hit the transmittance floor within half a dozen of them.
-    float dtGeo = clamp(t * (r - 1.0), 20.0, 1600.0);
-    float dt = dtGeo * mix(1.0, 0.19, occ);
+  // SAMPLES THAT FOUND MEDIUM. The budget is spent on these and on nothing
+  // else, and that is what decouples the result from the scan.
+  //
+  // The scan hands over a distance quantised to a scan segment, so the fine
+  // march starts up to four grid cells before the cloud actually begins, and
+  // which side of a segment boundary the cloud's front surface falls on is a
+  // STEP FUNCTION of the view ray. If empty samples consumed the budget, that
+  // step would decide how deep the march reaches, and in optically thin cloud —
+  // where transmittance never reaches the early-out — it printed as a thin
+  // bright contour tracing the level sets of the scan index. That is exactly
+  // what this build showed after the stipple was fixed: closed loops of raised
+  // luminance a few units high, inside the body of every cloud. Not counting
+  // empty samples makes those four cells free, so a ray that starts a cell early
+  // integrates the same grid points to the same depth as its neighbour that
+  // did not, and the contour has nothing left to be a contour of.
+  int used = 0;
+  for (int i = 0; i < steps + 12; i++) {
+    if (used >= steps || t >= t1 || transmittance < 0.012) break;
+    // The stride, and NOTHING in this loop changes it. Round 2's stipple was a
+    // stride that depended on the density found one sample earlier; with a fixed
+    // iteration budget that makes the TOTAL PATH INTEGRATED a chaotic function
+    // of the ray, and inside an optically thin wisp — where transmittance never
+    // reaches the early-out — where the ray stops is where the silhouette ends.
+    // See the header. dt is now a pure function of t.
+    float dt = t * (rf - 1.0);
 
     // THE BAND LIMIT. Both fine octaves fade toward their own mean once the
-    // stride can no longer resolve them. 38–150 m brackets the 37 m Worley
-    // cells; 140–520 m brackets the shape octave's 267 m billows. Sampling
-    // detail finer than the stride is aliasing, and aliased lumpy noise is the
-    // shredded cloud interior round 1 called texture corruption.
-    //
-    // Driven by the GEOMETRIC stride (times 0.45, the mean of the adaptive
-    // range) rather than by the stride actually taken. Two reasons: the
-    // geometric stride is the one that tracks the pixel FOOTPRINT, which is what
-    // a mip level should follow; and it is the same for every sample along a ray
-    // at a given depth, so the first sample of a cloud — taken at the long
-    // stride, because the occupancy that shortens it comes from the sample
-    // before — is band-limited identically to the samples behind it instead of
-    // being the one sample on the ray with a different density field.
-    float lodStride = dtGeo * 0.45;
-    float erodeW = 1.0 - smoothstep(38.0, 150.0, lodStride);
-    float shapeW = 1.0 - smoothstep(140.0, 520.0, lodStride);
+    // stride can no longer resolve them. The erosion octave's Worley cells are
+    // ~37 m, so Nyquist puts full detail at a stride of ~18 m and none by ~70;
+    // the shape octave's billows are 267 m, hence 90–340. Sampling detail finer
+    // than the stride is aliasing, and aliased lumpy noise is the shredded cloud
+    // interior round 1 called texture corruption.
+    float erodeW = 1.0 - smoothstep(18.0, 70.0, dt);
+    float shapeW = 1.0 - smoothstep(90.0, 340.0, dt);
+
+    // THE BUDGET IS TAPERED, NOT CUT. The fine march runs 'steps' grid cells
+    // from the cell the scan handed it, so where it STOPS tracks the cloud's
+    // front surface one budget deep — and in an optically thin cell, where
+    // transmittance has not died by then, a hard stop prints as a thin bright
+    // contour running parallel to the silhouette. (That contour is what was
+    // left of round 2's stipple once the schedule was made deterministic: same
+    // cause — an integration limit that is a step function of the ray — one
+    // order of magnitude smaller.) Ramping the medium out over the last quarter
+    // of the budget replaces the step with a gradient spread over several
+    // hundred metres of path, on a body whose value changes over ten.
+    float fade = 1.0 - smoothstep(0.74, 1.0, float(used) / float(steps));
 
     // Midpoint of the segment about to be integrated, not its near end: second
     // order instead of first, for one add.
     vec3 p = origin + dir * (t + dt * 0.5);
-    float d = ironCloudDensity(p, shapeW, erodeW) * density;
-    occ = smoothstep(0.003, 0.075, d);
+    float d = ironCloudDensity(p, shapeW, erodeW) * density * fade;
     if (d <= 0.0015) { t += dt; continue; }
+    used++;
 
     // Light march: four exponentially-spaced segments toward the sun, total
-    // 0.94 km — a slab thickness and a little, so the march covers the cloud and
+    // 1.27 km — a slab thickness and a little, so the march covers the cloud and
     // stops rather than spending its last and longest tap in clear air above.
     // This is the whole self-shadowing term and it is why a cloud has a dark
-    // base. Each segment is evaluated at its MIDPOINT: the far-end rule assigns
-    // a 650 m segment the density found after 650 m of travel, which
-    // systematically under-shadows the near field where the gradient is. Both
-    // fine octaves are at their mean here — a shadow can afford a smoother
-    // density than the silhouette it falls on, and matching the MEAN is what
-    // keeps the sun march and the view march agreeing on how much medium there
-    // is between them.
+    // base; round 2 measured only 11 levels between a lit crown and a shaded
+    // base, and one of the two reasons was a 0.94 km reach that never saw the
+    // bottom half of a tall cell. Each segment is evaluated at its MIDPOINT: the
+    // far-end rule assigns a 680 m segment the density found after 680 m of
+    // travel, which systematically under-shadows the near field where the
+    // gradient is. Both fine octaves are at their mean here — a shadow can
+    // afford a smoother density than the silhouette it falls on, and matching
+    // the MEAN is what keeps the sun march and the view march agreeing on how
+    // much medium there is between them.
     float lightTau = 0.0;
-    float ls = 70.0;
+    float ls = 85.0;
     float lt = 0.0;
     for (int j = 0; j < 4; j++) {
       lightTau += ironCloudDensity(p + sunDir * (lt + ls * 0.5), 0.0, 0.0) * density * ls;
       lt += ls;
-      ls *= 1.95;
+      ls *= 2.0;
     }
     float tauL = lightTau * IRON_CLOUD_SIGMA;
 
@@ -457,11 +570,18 @@ vec4 ironCloudMarch(
     // brighter. Only the single-scatter octave gets it; the higher orders are
     // diffuse by construction and powdering them flattens the whole cloud.
     float powder = 1.0 - exp(-tauL * 2.0);
+    // The deepest octave's extinction scale is 0.055, not 0.028, and that is the
+    // OTHER half of round 2's flat cloud. At 0.028 a core at τ ≈ 25 toward the
+    // sun still transmits 50 % of the fourth order, so the fourth order became a
+    // depth-independent floor under the whole cloud and no amount of
+    // self-shadowing could show through it. At 0.055 the same core transmits
+    // 25 %, which keeps the octave doing its job — giving a thick cloud a route
+    // to ~E/π — without letting it paint the base the same value as the crown.
     vec3 sun = sunIrradiance * (
         ph0 * exp(-tauL) * mix(1.0, powder * 1.7, 0.25)
       + ph1 * exp(-tauL * 0.320)
-      + ph2 * exp(-tauL * 0.100)
-      + ph3 * exp(-tauL * 0.028));
+      + ph2 * exp(-tauL * 0.115)
+      + ph3 * exp(-tauL * 0.055));
 
     // Sky fill, and it is NOT a constant across the cloud. A cloud top sees the
     // whole hemisphere; a base sees it through a kilometre of its own body. The
@@ -469,8 +589,17 @@ vec4 ironCloudMarch(
     // volume. Depth in the slab drives it, with the sun-march optical depth as a
     // second-order proxy for how buried this particular sample is.
     float hh = clamp((p.y - IRON_SLAB_LO) / (IRON_SLAB_HI - IRON_SLAB_LO), 0.0, 1.0);
-    float skyOcc = mix(0.18, 1.0, hh * hh) * (0.30 + 0.70 * exp(-tauL * 0.32));
-    vec3 lit = sun + skyFill * skyOcc;
+    float skyOcc = mix(0.12, 1.0, hh * hh) * (0.24 + 0.76 * exp(-tauL * 0.32));
+    // CLAMPED HERE, PER SAMPLE, AND NOT ONLY ON THE ACCUMULATED TOTAL. Inside
+    // ~2° of the sun the narrow lobe of ironCloudPhase reaches 6.5 sr⁻¹, and
+    // 6.5 × the 55 200 lx red channel is 1.4e5 cd/m² — past fp16's 65 504. The
+    // SwiftShader path the capture harness runs on demotes intermediates, and
+    // Inf × the (1 − stepT) that follows is NaN, which is what round 2 saw as
+    // "two stray unfiltered orange fireflies" and what this build still showed
+    // as a clump of green and pink pixels in the sun-side crown. Clamping the
+    // SUM after the loop cannot help: the overflow happens inside it. 6e4 cd/m²
+    // is 11 EV over mid grey, so AgX clips it to white either way.
+    vec3 lit = min(sun + skyFill * skyOcc, vec3(6.0e4));
 
     // Energy-conserving integration of the segment, not a naive accumulate:
     // ∫ σ·L·T ds over a segment of constant density is L·(1 − e^(−σ d dt)).
@@ -479,6 +608,21 @@ vec4 ironCloudMarch(
     transmittance *= stepT;
     t += dt;
   }
+
+  // ---- 3. the two clamps that make the result safe to bloom ---------------
+  // Round 2 found two unfiltered orange fireflies sitting inside the deck. A
+  // firefly is a single sample that disagreed with its neighbours, and the two
+  // ways this integral can produce one are a radiance that overflows on the way
+  // through a 16-bit intermediate, and an opacity accumulated without the
+  // radiance that belongs to it. Both are bounded here rather than downstream,
+  // because a bloom pass cannot tell an outlier from a highlight.
+  //
+  // The floor is physical, not cosmetic: every sample inside the medium sees at
+  // least the sky fill through its own body's worst-case occlusion, so an
+  // integral that came out darker than (that floor × the opacity it
+  // accumulated) is an artefact of the march and not a shadow.
+  scatter = min(scatter, vec3(6.0e4));
+  scatter = max(scatter, skyFill * 0.030 * (1.0 - transmittance));
   return vec4(scatter, transmittance);
 }
 `;

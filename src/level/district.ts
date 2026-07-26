@@ -18,7 +18,7 @@ import * as THREE from 'three';
 import { CollisionGroup, SurfaceId, type Rng } from '@/engine/types';
 import type { LevelBuild } from '@/level/build';
 import { buildBuilding, type Plot } from '@/level/building';
-import { groundSkirt } from '@/level/kit/ground';
+import { groundSkirt, spillTongues } from '@/level/kit/ground';
 import { laundryLine, stairs } from '@/level/kit/detail';
 import {
   barrel, bollard, concreteBarrier, crateStack, lowWall, marketStall,
@@ -286,21 +286,53 @@ export function buildStreets(b: LevelBuild, ground: Ground, rng: Rng): void {
             _v[3].set(prev.rx, prev.ry, prev.rz),
             0.5,
           );
-          // Kerbs: two low boxes tracking the same edge.
+          /**
+           * KERBS — laid as SETTS, not as an extrusion.
+           *
+           * These used to be one 0.13 × 0.13 box per paving step, all the same
+           * height, all exactly end to end, and round 2 named it: *"one unbroken
+           * extruded prism with a constant triangular profile: no breaks, no sag,
+           * no missing sections, no chips."* A real kerb is 1 m stones bedded by
+           * hand on sand, and after thirty years of lorries they sit at slightly
+           * different heights, they rock, one in ten has been knocked out and
+           * never replaced, and every arris is chipped.
+           *
+           * So: 0.9–1.4 m setts along the edge, each with its own height, cross
+           * fall, yaw and lateral offset; a chamfer so the raking sun catches the
+           * arris; and two failure modes drawn per stone — MISSING (nothing but
+           * the sand drift, which the skirt below fills) and SUNK (dropped 6–11 cm
+           * and tipped, the classic settled sett).
+           */
           for (const [ax, az, ay, bx, bz, by] of [
             [prev.lx, prev.lz, prev.ly, lx, lz, ly],
             [prev.rx, prev.rz, prev.ry, rx, rz, ry],
           ] as const) {
-            const mx = (ax + bx) / 2;
-            const mz = (az + bz) / 2;
+            const run = Math.hypot(bx - ax, bz - az);
             const yaw = Math.atan2(bx - ax, bz - az);
-            const seg = Math.hypot(bx - ax, bz - az) / 2;
-            const m = new THREE.Matrix4()
-              .makeTranslation(mx, (ay + by) / 2 - 0.06, mz)
-              .multiply(new THREE.Matrix4().makeRotationY(yaw));
-            b.xf.pushAbsolute(m);
-            kerb.boxAt(0, 0, 0, 0.13, 0.13, seg, 1, 0x3f);
-            b.xf.pop();
+            const setts = Math.max(1, Math.round(run / 1.15));
+            for (let q = 0; q < setts; q++) {
+              if (rng.bool(0.09)) continue; // a stone that was never put back
+              const u = (q + 0.5) / setts;
+              const mx = ax + (bx - ax) * u;
+              const mz = az + (bz - az) * u;
+              const my = ay + (by - ay) * u;
+              const sunk = rng.bool(0.14);
+              const half = (run / setts) * 0.5 * rng.range(0.86, 0.98);
+              const m = new THREE.Matrix4()
+                .makeTranslation(
+                  mx + Math.cos(yaw) * rng.range(-0.03, 0.03),
+                  my - 0.06 - (sunk ? rng.range(0.06, 0.11) : rng.range(-0.012, 0.018)),
+                  mz - Math.sin(yaw) * rng.range(-0.03, 0.03),
+                )
+                .multiply(new THREE.Matrix4().makeRotationY(yaw + rng.range(-0.035, 0.035)))
+                .multiply(new THREE.Matrix4().makeRotationX(sunk ? rng.range(-0.09, 0.09) : rng.range(-0.025, 0.025)))
+                .multiply(new THREE.Matrix4().makeRotationZ(rng.range(-0.03, 0.03)));
+              b.xf.pushAbsolute(m);
+              kerb.setUvShift(rng.range(0, 16), rng.range(0, 16));
+              kerb.chamferBox(0, 0, 0, 0.13, 0.13 * rng.range(0.88, 1.06), half, 0.022, 1, rng, 0.28);
+              kerb.clearUvShift();
+              b.xf.pop();
+            }
           }
         }
         prev = { lx, lz, ly, rx, rz, ry };
@@ -316,8 +348,33 @@ export function buildStreets(b: LevelBuild, ground: Ground, rng: Rng): void {
         ],
         ground,
         rng,
-        { amount: 0.5, noScatter: true },
+        { amount: 0.55, blockFraction: 0.55 },
       );
+      /**
+       * …and sand spilling the OTHER way, out over the paving.
+       *
+       * The skirt banks drift against the outside of the kerb, which fixes the
+       * sand-side seam and does nothing at all for the tile side: round 2 saw
+       * *"the sand-to-pavement material boundary … is a hard polygon seam with no
+       * blend, no scattered grains on the tile and no wear decal."* The proper
+       * fix is a height-blended material transition, which lives in a shader
+       * LEVEL does not own, so the read is bought geometrically — irregular
+       * tongues of sand lying 1.5 cm proud of the paving, clumped by a noise mask
+       * so the boundary advances two metres onto the tile in one place and stops
+       * at the kerb in the next. The `inward` normal points at the road
+       * centreline, which is the paved side by construction.
+       */
+      for (const s of [1, -1] as const) {
+        spillTongues(
+          b,
+          a.x + s * nx * half, a.z + s * nz * half,
+          c.x + s * nx * half, c.z + s * nz * half,
+          -s * nx, -s * nz,
+          (gx, gz) => ground(gx, gz) + 0.07,
+          rng,
+          2.1,
+        );
+      }
     }
   }
 }
@@ -400,8 +457,26 @@ export function buildSquare(
       { x: cx - hx, z: cz - hz }, { x: cx + hx, z: cz - hz },
       { x: cx + hx, z: cz + hz }, { x: cx - hx, z: cz + hz },
     ],
-    ground, rng, { amount: 0.55, noScatter: true },
+    ground, rng, { amount: 0.6, blockFraction: 0.55 },
   );
+  /**
+   * Sand blown IN over the paving on all four sides. Without this the square's
+   * slab ends on a straight polygon edge — round 2 measured the tell as a line
+   * running from (0,920) to (790,730) in `weapon_ads` — and the drift banked
+   * against the outside of that edge does not hide it, because the eye reads the
+   * boundary from the paved side. See `spillTongues`.
+   */
+  for (const [ax, az, bx, bz, ix, iz] of [
+    [cx - hx, cz - hz, cx + hx, cz - hz, 0, 1],
+    [cx + hx, cz + hz, cx - hx, cz + hz, 0, -1],
+    [cx - hx, cz + hz, cx - hx, cz - hz, 1, 0],
+    [cx + hx, cz - hz, cx + hx, cz + hz, -1, 0],
+  ] as const) {
+    // The slab is a single flat box at `y + 0.12`, NOT a surface that follows the
+    // terrain — sampling `ground()` here would sink the tongues under it wherever
+    // the terrace falls away from the square's centre.
+    spillTongues(b, ax, az, bx, bz, ix, iz, () => y + 0.12, rng, 2.6);
+  }
 
   // Stepped fountain / cistern head. The one thing in the square you can stand
   // ON as well as behind, which is what makes the middle worth holding.

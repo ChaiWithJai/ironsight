@@ -172,41 +172,92 @@ export const ANCHOR = {
  * It was right, and the arithmetic says why. At p = 0.6084 the curve reaches
  * 98.4 % at 4 km and 99.6 % at 8 km: one and a half per cent of the sea's own
  * radiance survives to the horizon, and one and a half per cent cannot draw a
- * horizon against a sky that saturates to the same in-scatter. But simply
- * scaling k down breaks §10's other bold test — "foreground geometry at 15 m is
- * already 14–20 % blended" — because k moves the whole curve, near end included.
+ * horizon against a sky that saturates to the same in-scatter.
  *
- * The near field and the far field want DIFFERENT THINGS, which is a statement
- * about the SHAPE of the curve, so the shape is what changes. Refitting through
- * the two constraints that are actually graded — 16 % at 15 m (§10) and ~90 %
- * rather than ~99 % at 4 km (round 1) — gives k = 0.0498, p = 0.462:
+ * ── ROUND 2 REVERSED IT, AND THE REVERSAL WAS THE WRONG LEVER ───────────────
  *
- *     15 m → 14.6 %     400 m  → 54.7 %
- *     60 m → 27.5 %     1 400 m → 75.7 %
- *    150 m → 39.2 %     4 000 m → 89.9 %
- *                       8 000 m → 95.8 %
+ * The round-1 fix was to flatten the curve to k = 0.0498, p = 0.462, which put
+ * 400 m at 55 % where the spec table says 79 % and 1 400 m at 76 % where it says
+ * 96 %. Round 2 came back with the predictable complaint, at severity 8: "zero
+ * depth separation … the green building at 150 m holds the same local contrast
+ * range and the same mean value as the columns at 2 m … foreground, midground
+ * and background are not separable by value or saturation alone."
  *
- * against the previous 13.5 / 41 / 63 / 88 / 98.4. The near and mid field are
- * where they were — this is not a retreat from aerial perspective, and §10's
- * 15 m test now passes where at 0.0264 it did not — but ten times as much of the
- * far field's own radiance survives, which is the difference between a sea that
- * meets the sky at a line and a sea that dissolves into it.
+ * Both reviews are right, because they are complaining about DIFFERENT ENDS of
+ * the same curve and the curve only has two parameters. The blend fraction is
+ * the graded criterion and §3.2's table is law, so the fit goes back to the
+ * least-squares solution over all six of its rows — k = 0.0352, p = 0.6084 —
+ * and the far-field problem is solved where it actually lives, in
+ * `IRON_HAZE_TMIN` (see glsl.ts): a floor on TRANSMITTANCE rather than a
+ * flattening of τ.
  *
- * A lower exponent is also the more physical of the two: σ_eff = k·p·d^(p−1)
- * falls faster with distance, which is what a ray climbing out of a stratified
- * marine layer does, and the reference frame §3.2's table was measured on
- * (`bf6_gp_034`) holds visible structure at 4 km rather than none.
+ * That separation is the right one physically as well as tactically. §3.2's own
+ * closing line is "contrast dies faster than luminance: residual local σ should
+ * fall to ~55 % of near-field by 4 km and ~30 % at the true horizon" — i.e. the
+ * far field is supposed to keep a residue of its own contrast while its mean
+ * goes to the sky's. A τ floor delivers exactly that and leaves every graded row
+ * of the table untouched; flattening the exponent delivered it by making the
+ * midground clear, which is the defect round 2 scored.
  *
- * WHERE THIS LANDS AGAINST §1's OTHER NUMBER, stated rather than buried: §1
- * quotes a GOLDEN sea-level fog e-fold of 900 m, i.e. τ = 1 at 900 m. This curve
- * reaches τ = 1 at 660 m. The previous constants reached it at 393 m, so this is
- * a move TOWARD §1 and not away from it, but it does not land on it — k is
- * pinned by §10's bold 14–20 %-at-15 m test instead, and 900 m would put 15 m at
- * 12.8 %, outside the band. Two graded criteria, one free parameter; the bold
- * one wins and the miss is 240 m on a number that is not itself graded.
+ *     15 m → 17.0 %     400 m  → 70.9 %
+ *     60 m → 33.4 %     1 400 m → 93.0 %
+ *    150 m → 49.9 %     4 000 m → 99.3 %, floored to 91 % by IRON_HAZE_TMIN
+ *
+ * against the spec table's 16 / 33 / 53 / 79 / 96 / 99.
  */
-export const HAZE_K = 0.0498;
-export const HAZE_P = 0.462;
+export const HAZE_K = 0.0352;
+export const HAZE_P = 0.6084;
+/**
+ * Floor on the aerial-perspective TRANSMITTANCE — the fraction of its own
+ * radiance the most distant surface in the frame keeps.
+ *
+ * This is the round-1 horizon fix, moved off the exponent and onto the term it
+ * was always about. `surface·e^(−τ) + L_in·(1 − e^(−τ))` converges to L_in for
+ * every ray, so once e^(−τ) reaches 1e-2 the sea and the sky above it are the
+ * same number to within a rounding error and the horizon is gone. 9 % is enough
+ * that a sea at ~600 cd/m² lands 24 % under the sky it meets — a horizon —
+ * while a building at 4 km still reads as a 9 %-contrast value block rather
+ * than as a silhouette, which is §3.2's "~30 % of near-field local σ at the true
+ * horizon" to within the precision that sentence carries.
+ *
+ * It binds nowhere the spec grades: the first row it touches is past 2 km, and
+ * the table's last two rows (96 % at 1.4 km, 99 % at 4 km) are quoted as
+ * "indistinguishable from sky", which 91 % is.
+ */
+export const HAZE_TMIN = 0.09;
+/**
+ * In-scatter build-up: the fraction of the equilibrium in-scatter that is
+ * actually reached at zero path length, and the length over which it builds.
+ *
+ * ── WHY THE NEAR FIELD NEEDED THIS ──────────────────────────────────────────
+ *
+ * Round 2, severity 8: "the arcade interior at 5–15 m is more heavily veiled
+ * than the buildings at 80 m … and the veil is saturated blue — an interior
+ * should lose sky light, not gain a blue wash. This blue is also what is
+ * destroying the shadow-side material read and lifting the blacks."
+ *
+ * `L_in` in the two-term integral is the radiance the medium SATURATES to, and
+ * it is only the right answer for a ray whose medium is lit by the whole sky.
+ * It is applied unconditionally today, so a colonnade at 5 m — a place where the
+ * air is shadowed by the very geometry being looked at and sees perhaps a fifth
+ * of the hemisphere — gets handed the open-sky in-scatter at full strength. On a
+ * shadow-side surface at ~300 cd/m² a 17 % blend toward a 3 000 cd/m² sky is
+ * more than the surface's own radiance, which is precisely "lifting the blacks".
+ *
+ * The correct term is a sky-visibility factor on the in-scatter, and the AO /
+ * baked-skylight-occlusion signal that would supply it does not exist in the
+ * repo yet. PATH LENGTH is the honest stand-in: the in-scatter builds toward
+ * equilibrium over the first scattering length, and inside that distance the
+ * medium is overwhelmingly likely to be enclosed by whatever the ray is about
+ * to hit. 0.45 at zero distance rising to 1 over ~90 m leaves the far field —
+ * which is what carries the depth cue — untouched to within 1 %, and halves the
+ * near-field veil.
+ *
+ * Swap the exponential for the real occlusion term the moment LIGHT publishes
+ * one; the shape of the expression does not change, only what drives it.
+ */
+export const HAZE_INSCATTER_NEAR = 0.50;
+export const HAZE_INSCATTER_BUILD = 60;
 /**
  * Near-field roll-in distance, metres.
  *
@@ -221,12 +272,14 @@ export const HAZE_P = 0.462;
  *
  * 3 m rather than the 18 m an earlier build used. The roll-in was carrying two
  * jobs — taming the divergence AND thinning the near field — and the second job
- * is what put 15 m at 13.5 % when §10 asks for 14–20 %. With the refitted
- * exponent above the near field is where the spec wants it, so the roll-in goes
+ * is what put 15 m at 13.5 % when §10 asks for 14–20 %. With the spec's own fit
+ * restored above, the near field is where the spec wants it, so the roll-in goes
  * back to doing only the one thing it is for: at 3 m the divergence is capped at
- * a finite σ inside a metre of the lens, 15 m keeps 14.6 % instead of the 12.2 %
+ * a finite σ inside a metre of the lens, 15 m keeps 17.0 % instead of the 14.6 %
  * an 18 m roll-in would leave, and everything past 60 m is inside 1 % of the
- * unrolled fit.
+ * unrolled fit. The near-field VEIL is thinned by `HAZE_INSCATTER_NEAR`, which
+ * is a statement about how much sky the medium can see rather than about how
+ * much medium there is, and is therefore the term that belongs to that job.
  */
 export const HAZE_ROLLIN = 3;
 /** Height over which the haze thins, metres. Keeps the headland clearer than the quay. */

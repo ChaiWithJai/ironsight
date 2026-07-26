@@ -132,8 +132,18 @@ export function weaponSurfaceChunk(p: WeaponSurfaceParams): SurfaceChunk {
       // pass. The 8:1 aspect IS the anisotropy — an isotropic grain at this
       // frequency reads as sand.
       float wpnGrain = wpnFbm( vec2( wpnBore * 88.0, wpnUv.y * 700.0 ) );
-      // ~1.8 cm: cerakote orange-peel and anodising density.
-      float wpnMeso = wpnFbm( wpnUv * 56.0 );
+      // ~4.5 mm: cerakote orange-peel and anodising density.
+      //
+      // ROUND 3 TOOK THIS FROM 56 (1.8 cm) TO 210. The frequency is the whole
+      // finding: at an ADS eye relief of 0.295 m and a 44° viewmodel FOV, the
+      // 41 mm optic housing is 200 px tall, so an 18 mm feature is a 90-pixel
+      // blotch. Ninety-pixel grey blotches with a two-octave falloff are what
+      // gravel looks like, and the round-2 critique read them exactly that way:
+      // "a low-resolution greyscale gravel noise reading as concrete, not
+      // gunmetal". Real cerakote orange-peel is under a millimetre; 4.5 mm is
+      // the compromise that survives one mip level down at hipfire distance and
+      // still lands at 22 px in ADS, which is texture rather than terrain.
+      float wpnMeso = wpnFbm( wpnUv * 210.0 );
       // ~7 cm: which parts of this weapon have been handled.
       float wpnMacro = wpnValue( wpnUv * 13.0 + vec2( 4.7, 1.3 ) );
 
@@ -142,10 +152,33 @@ export function weaponSurfaceChunk(p: WeaponSurfaceParams): SurfaceChunk {
       // edge it spikes; on a flat panel it is ~0. This is the edge-weighted
       // mask the wear rides, and it is why the silver lands on rail teeth and
       // magwell lips rather than in the middle of the receiver flat.
-      vec3 wpnDnx = dFdx( normal );
-      vec3 wpnDny = dFdy( normal );
+      // ROUND 3 MOVED THIS OFF normal AND ONTO vNormal, AND IT IS THE FIX
+      // FOR THE WHOLE "RECEIVER READS AS AGGREGATE" FAMILY OF DEFECTS.
+      //
+      // normal at this point in the shader has been through the bake's normal
+      // map AND the uber material's detail and micro normal bands. The micro
+      // band alone runs at 6x the detail frequency, which puts it at or under
+      // one pixel — so dFdx( normal ) is not measuring curvature, it is
+      // measuring per-pixel noise, and it SATURATES on flat panels. The wear it
+      // gates then fires everywhere, and wear is not a subtle term: it lifts the
+      // albedo 6x toward bare metal AND takes metalness from 0.10 to 0.95. A
+      // scatter of near-mirror metal specks across a flat panel reflects the sky
+      // on one pixel and the sunlit street on the next, which is the actual
+      // mechanism behind the blue-and-orange speckle a critic reads as lichen on
+      // concrete. Two earlier round-3 attempts — dropping the normal-map
+      // frequency, then raising this threshold to 0.32 — both failed because
+      // they treated the symptom while the input stayed noisy.
+      //
+      // vNormal is the INTERPOLATED VERTEX normal, before any map touches it.
+      // Its screen derivative is zero across a flat panel, ~0.04 across a
+      // smooth-shaded barrel facet, and 0.3-0.5 across the two pixels of a
+      // 0.6 mm machining chamfer. That is a real curvature signal with a real
+      // zero, which is what an edge-wear mask needs and what puts the silver on
+      // the rail teeth and the magwell lip instead of over everything.
+      vec3 wpnDnx = dFdx( vNormal );
+      vec3 wpnDny = dFdy( vNormal );
       float wpnCurv = clamp( sqrt( dot( wpnDnx, wpnDnx ) + dot( wpnDny, wpnDny ) ) * 3.1, 0.0, 1.0 );
-      float wpnEdge = smoothstep( 0.14, 0.66, wpnCurv );
+      float wpnEdge = smoothstep( 0.18, 0.62, wpnCurv );
 
       // Broken by the macro band so the wear is a history rather than an
       // outline: a rifle has a bright rail and a bright magwell lip, not a
@@ -165,10 +198,15 @@ export function weaponSurfaceChunk(p: WeaponSurfaceParams): SurfaceChunk {
       wpnSoot = clamp( wpnSoot * ${f(p.fouling)}, 0.0, 1.0 );
 
       // ---- albedo ----------------------------------------------------------
-      // ±11 % of value on the macro band and ±6 % on the meso: LOOK_SPEC's
+      // ±7 % of value on the macro band and ±3 % on the meso: LOOK_SPEC's
       // "two bricks in a wall are never the same colour", applied to a finish
-      // that was sprayed by a person.
-      vec3 wpnBase = ${v3(p.base)} * ( 0.89 + 0.22 * wpnMacro + 0.12 * ( wpnMeso - 0.5 ) );
+      // that was sprayed by a person. Both were halved in round 3 alongside the
+      // meso frequency change above — a ±6 % albedo swing at 4.5 mm is fine
+      // grain, the same swing at 18 mm was mottling, and mottling on a 44 mm
+      // receiver is the single strongest "this is a rock, not a rifle" signal
+      // there is. Value variation on a weapon belongs almost entirely in the
+      // ROUGHNESS, which is where it moved to.
+      vec3 wpnBase = ${v3(p.base)} * ( 0.93 + 0.14 * wpnMacro + 0.06 * ( wpnMeso - 0.5 ) );
       vec3 wpnCol = mix( wpnBase, ${v3(p.substrate)}, wpnWear );
       // Soot is near-black and slightly warm; it also kills the specular, which
       // is most of why a fouled muzzle device looks fouled.
@@ -181,8 +219,12 @@ export function weaponSurfaceChunk(p: WeaponSurfaceParams): SurfaceChunk {
 
       // ---- roughness -------------------------------------------------------
       float wpnRough = ${f(p.roughness)};
-      wpnRough += ( wpnGrain - 0.5 ) * 0.16;
-      wpnRough += ( wpnMeso - 0.5 ) * 0.10;
+      // Both bands halved in round 3. Roughness variation is the right place for
+      // a metal's surface interest — but at +-0.08 on a 1.4 mm grain it was
+      // swinging the specular lobe hard enough to speckle on its own, on top of
+      // everything the wear mask was doing.
+      wpnRough += ( wpnGrain - 0.5 ) * 0.08;
+      wpnRough += ( wpnMeso - 0.5 ) * 0.05;
       // Handled edges polish: worn metal is SMOOTHER than the finish it lost.
       wpnRough -= wpnWear * 0.26;
       // Fouling is soot, and soot is matte.
@@ -211,9 +253,45 @@ export function weaponSurfaceChunk(p: WeaponSurfaceParams): SurfaceChunk {
       // why it is worth getting right rather than discovering later on a field
       // that is not symmetric.
       //
-      // ×5 lands a typical delta of 0.05 on a tangent slope near 0.25 — about
-      // 14° of tilt, which is bead blasting. Past ~0.5 it turns to gravel.
-      vec2 wpnSlope = -vec2( wpnGx, wpnGy ) * ( ${f(p.grain)} * 5.0 );
+      // ROUND 3 TOOK THE GAIN FROM 5.0 TO 1.9, and this is the other half of the
+      // "concrete, not gunmetal" finding. At 5.0 a typical delta of 0.05 became
+      // a tangent slope of 0.25 — 14° of per-pixel normal swing. Fourteen
+      // degrees is not bead blasting, it is a rock face, and it interacts
+      // catastrophically with a hemisphere light: every micro-facet tilted UP
+      // sampled the blue sky half and every one tilted DOWN sampled the warm
+      // ground bounce, so a flat receiver panel resolved into a five-pixel
+      // blue-and-orange dazzle that reads as lichen on stone. The mottle was
+      // never in the albedo — it was the NORMAL sampling a two-colour dome.
+      // 1.9 lands the same delta at 5.4°, which is the real figure for a
+      // 120-grit blast, and the panel goes quiet without going smooth.
+      vec2 wpnSlope = -vec2( wpnGx, wpnGy ) * ( ${f(p.grain)} * 1.9 );
+
+      // BROACHING MARKS. Shallow ridges running ALONG the bore at a 6 mm pitch,
+      // on the metal roles only (they are gated by 'streak', which is zero on
+      // polymer and on the glove — a moulded part has no tool path).
+      //
+      // This is the mesoscale band the round-2 critique said was missing: "one
+      // tiled noise texture applied identically to the top, side and front faces
+      // ... no receiver machining". A noise field cannot supply it, because the
+      // thing that says "milled" is not randomness, it is PERIODICITY WITH A
+      // DIRECTION — parallel highlights that stay parallel across a face and
+      // break at every edge. The peak slope works out at 0.055 on the receiver
+      // and 0.067 on parkerised steel — 3.1 and 3.8 degrees, i.e. 52 and 64
+      // micrometres of relief at this pitch. Invisible in silhouette, and a run
+      // of thin parallel specular lines the moment the key rakes across the
+      // receiver. The pitch is in the box map's metres, so it is the same 6 mm
+      // on the magazine as on the rail, which is what a broach actually does.
+      //
+      // FADED OUT BY TEXEL DENSITY, because this is the one term in the file
+      // that is PERIODIC and periodic detail is the only kind that aliases into
+      // a moving moire rather than into harmless mush. fwidth( wpnUv.y ) is
+      // metres of surface per pixel; the pitch is 6 mm, so Nyquist is 3 mm per
+      // pixel and the ramp is placed under it. On the viewmodel the term is
+      // always at full strength (0.02 mm per pixel in ADS); on the third-person
+      // MeshAsset, which shares these materials, it is gone by about 12 m.
+      float wpnBroach = 1.0 - smoothstep( 0.0009, 0.0030, fwidth( wpnUv.y ) );
+      wpnSlope.y += cos( wpnUv.y * 1047.0 ) * ${f(p.streak)} * 0.42 * wpnBroach;
+
       normal = normalize( wpnTbn * normalize( vec3( wpnSlope, 1.0 ) ) );
     }
 `,

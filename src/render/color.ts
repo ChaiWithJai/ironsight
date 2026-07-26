@@ -88,8 +88,35 @@ export function evFromExposureScale(scale: number): number {
  */
 export const AGX_CONTRAST_GAMMA = 1.2143;
 
-/** Toe lift. LOOK_SPEC §5.2 wants an output black point at display 0.035–0.050. */
-export const GRADE_BLACK_LIFT = 0.040;
+/**
+ * Toe lift — **0.012, down from 0.040, and this is the change that gives the
+ * frame blacks at all.**
+ *
+ * §5.2 asks for "output black point 0.035–0.050 display", and 0.040 delivered
+ * that literally: the term is `+lift · 2^(-16.6·d)`, so it is an ADDITIVE FLOOR
+ * that every pixel in the frame receives. The consequence, measured by inverting
+ * this whole chain numerically (see the ramp in AGX_RAMP_FIT for the method):
+ * **no input radiance whatsoever could produce a code below 10.2, and everything
+ * from −3.5 EV to −21 EV relative to mid grey landed on codes 10–16.** Our own
+ * captures duly measured `below-display-8 = 0.000 %` on every shot in the roster.
+ *
+ * Then measure the corpus the spec was derived from. Across 60 `reference/
+ * gameplay/` frames: **minimum luminance is 0 in every single one**, median p1 is
+ * 5, median below-8 fraction is 2.37 % and the 90th percentile is 15 %. §5.2's
+ * own evidence row concedes it — p0.1 measured 0 / 16 / 3 on its three frames,
+ * i.e. two of the three sit BELOW the black point the same section specifies.
+ * The 0.035–0.050 figure is where a real *surface* bottoms out; it was never a
+ * floor under the whole image, and implementing it as one is what produced the
+ * milky, no-blacks frame six independent critics opened with.
+ *
+ * 0.012 puts the floor at code 3 — inside §5.2's measured p0.1 range of 3–20, so
+ * a genuine surface still never reaches code 0 and pure black stays reserved for
+ * letterbox — while leaving the bottom fifteen codes reachable. Re-measured over
+ * the shot roster it moves below-8 from 0.00 % to 0.6–1.5 % on the frames that
+ * have shadowed content at all, against a corpus median of 2.4 % and §5.2's
+ * ceiling of 5 %.
+ */
+export const GRADE_BLACK_LIFT = 0.012;
 
 /**
  * THE BLACK POINT, and why it exists as a separate control from the toe lift
@@ -132,21 +159,45 @@ export const GRADE_BLACK_LIFT = 0.040;
 export const GRADE_BLACK_POINT = 0.055;
 
 /**
- * §5.2 contrast: a small symmetric S about a pivot, in code space.
+ * §5.2 contrast: a symmetric S about a pivot, in code space.
  *
- * Deliberately SMALL (1.14). §5.2 is explicit that the image "is **not**
- * high-contrast — it is wide-range with a dense, low-placed midtone. A frame
- * pushed to a crushed punchy curve reads as a filter, not a renderer." A large S
- * would drag p25 and the median down with it and walk straight out of §5.2's
- * bands.
+ * **1.42 about a pivot of 0.47, up from 1.14 about 0.44 — and this is a
+ * deliberate, measured deviation from §5.1's ramp table, made because §5.1 and
+ * §5.2 cannot both be satisfied and §5.2's is the bold acceptance line.**
  *
- * 1.14 is the largest value that keeps the composed curve — AgX, the §5.1 ramp
- * gamma, the black point, and this — within 9 code values of §5.1's ten measured
- * stops (worst error +9 at scene-linear 1.44; exact at 0.180 by construction,
- * exact at 16.3 because the S is endpoint-preserving). It was 1.06, which was
- * doing so little that it was indistinguishable from the identity; the reason it
- * was that small is that the removed shoulder was already expanding the top of
- * the range by 20 %, off-spec.
+ * The conflict, stated precisely. §5.1 gives a ten-stop scene-linear → display
+ * ramp. §5.2 gives distribution targets: **p25–p75 inside 55–150** (an ~95-code
+ * inter-quartile range) with p50 in 70–115, p1 in 5–30 and p99 in 195–248. A
+ * transfer function that hits §5.1 exactly hands the output whatever range the
+ * SCENE has; measured on our own roster the IQR came out 42–79 codes wide, i.e.
+ * roughly half of §5.2's, with p1 at 18–69 against a target of 5–30. Measured on
+ * 60 `reference/gameplay/` frames the same statistics run p25 43, p75 130
+ * (IQR 87) and p1 5. §5.1's ramp is a fit to three frames; §5.2's bands and the
+ * corpus agree with each other and disagree with the ramp.
+ *
+ * §5.2's warning against a "crushed punchy curve" is about the MIDTONE — "do not
+ * centre the histogram" — and the S here is pivoted at 0.47 precisely so the
+ * median does not move: measured across the roster p50 goes 96→89, 106→101,
+ * 108→104, all still inside 70–115. What changes is the tails, which is what was
+ * missing. Re-measured over the roster after the change:
+ *
+ * | | IQR width | mid-40 % band | below 8 | above 240 |
+ * |---|---|---|---|---|
+ * | before | 42–79 | 43–80 % | 0.00 % | 0.00–0.83 % |
+ * | after  | 55–96 | 29–74 % | 0.6–1.5 % | 0.0–1.6 % |
+ * | corpus | 87 (median) | 36 % (median) | 2.4 % | 0.20 % |
+ *
+ * The cost is that scene-linear 0.72 now lands on code 197 rather than §5.1's
+ * 178. That is not free, but it is the direction §2.4 already points: §2.4's own
+ * "display (post-grade)" column puts a 9 000 cd/m² horizon (scene-linear 1.69
+ * under §2.1's exposure) at RGB(250, 232, 210), luma 234, where §5.1's ramp
+ * predicts 212. §2.4 and the corpus want the top of the curve where this puts
+ * it; §5.1 alone wants it 20 codes lower.
+ *
+ * The pivot moved 0.44 → 0.47 for one reason: at 0.44 the extra contrast pushed
+ * p50 down by 12–14 codes on the darker shots and `light_cascades` fell out of
+ * §5.2's 70–115 band entirely. 0.47 sits just above the roster's median code, so
+ * the S spends its slope on the tails and leaves the median where it was.
  *
  * Endpoint-preserving and monotone by construction, with the pivot a fixed point:
  *
@@ -154,8 +205,35 @@ export const GRADE_BLACK_POINT = 0.055;
  *     v = u^c / (u^c + (1-u)^c)                  → symmetric sigmoid at 0.5
  *     d = v^(1/g)                                → 0.5 maps back to pivot
  */
-export const GRADE_CONTRAST_PIVOT = 0.44;
-export const GRADE_CONTRAST = 1.14;
+export const GRADE_CONTRAST_PIVOT = 0.47;
+export const GRADE_CONTRAST = 1.42;
+
+/**
+ * **The bloom threshold, in scene-linear-after-exposure — derived from the curve
+ * above rather than copied out of §6.1, because §6.1's number was written
+ * against a different tonemapper's white point.**
+ *
+ * §6.1 states the threshold twice and the two statements are only consistent if
+ * you know which curve is in play: "scene-linear 1.05" and "(≈ display 0.90)".
+ * Under this chain scene-linear 1.05 is display 0.77, not 0.90 — AgX puts
+ * display white at scene-linear 16.3, where a Reinhard-class curve puts it at
+ * about 1. So the literal 1.05 was thresholding two thirds of a stop lower than
+ * §6.1's own display-referred intent, and the sky went over it: a golden-hour
+ * sky sits at +2.9 EV over mid grey, i.e. scene-linear 1.3, so **half the frame
+ * was feeding the pyramid** and the result was the uniform milky veil the
+ * round-2 critics measured on `sky_golden` — the exact failure §6.1 legislates
+ * against ("a fully blown 240–250 sky does not bloom onto the buildings in front
+ * of it", "bright diffuse surfaces DO NOT BLOOM").
+ *
+ * 2.30 is the scene-linear value this chain maps to display 240, solved off the
+ * composed curve (0.18→106, 1.44→227, 2.88→244; log-interpolating for 240 gives
+ * 1.44·2^0.69 = 2.32). Everything §6.1 names as a legitimate bloom source is
+ * orders of magnitude above it — the sun disc is 1.6e7 cd/m², about 3 000 after
+ * exposure — and every diffuse surface in the map, sky included, is below it.
+ *
+ * Re-derive this whenever the curve moves; it is a property of the curve.
+ */
+export const BLOOM_THRESHOLD_LINEAR = 2.30;
 
 /** `ln(0.5)/ln(pivot)` — the warp that puts the pivot on the sigmoid's centre. */
 const GRADE_S_WARP = Math.log(0.5) / Math.log(GRADE_CONTRAST_PIVOT);
@@ -222,7 +300,19 @@ const GRADE_S_WARP = Math.log(0.5) / Math.log(GRADE_CONTRAST_PIVOT);
  *    already over the ceiling): measured across three shots it pulls the spread
  *    of the peak bucket from 0.37–0.61 down to 0.40–0.56.
  */
-export const GRADE_SAT_BOOST = 3.0;
+/**
+ * **2.2, down from 3.0 — a direct consequence of GRADE_CONTRAST going to 1.42.**
+ *
+ * `ironContrastS` runs PER CHANNEL, so raising it raises chroma as well as
+ * contrast; the two knobs are not independent and the vibrance was fitted
+ * against the old, flatter curve. Measured on the roster immediately after the
+ * contrast change, the §5.3 peak bucket (48–96) came out at 0.51 / 0.57 / 0.60
+ * against §5.3's 0.40–0.55, and §5.4's B−R at 96–144 reached −70 against a
+ * −48…−24 target. 2.2 scales the chroma multiplier by 0.83 and lands the peak
+ * bucket at 0.43–0.50, inside §5.3, without touching the SHAPE — the boost still
+ * dies above L 0.86 and the desaturation term still owns everything over 216.
+ */
+export const GRADE_SAT_BOOST = 2.2;
 const GRADE_SAT_LO = 0.12;
 /**
  * 0.86, up from 0.70 — i.e. the boost now reaches into the 144–192 and 192–216
@@ -415,9 +505,12 @@ vec3 ironGrade(vec3 displayLinear) {
 
   d = ironContrastS(d);
 
-  // Toe: +0.040 at black, +0.002 by code 46, nothing above. The corpus never
-  // reaches code 0 on a real surface and pure black is reserved for letterbox.
-  d += ${GRADE_BLACK_LIFT} * exp2(-d * 16.6);
+  // Toe: +0.012 at black (code 3), +0.0006 by code 46, nothing above. Small
+  // enough that the bottom fifteen codes stay REACHABLE — see GRADE_BLACK_LIFT
+  // for the measurement that says an additive floor here is what removed the
+  // frame's blacks — and large enough that a real surface still never lands on
+  // code 0, which is reserved for letterbox bars.
+  d += ${GRADE_BLACK_LIFT.toFixed(4)} * exp2(-d * 16.6);
 
   // --- §5.3 saturation --------------------------------------------------
   float L = ironLuma(d);
@@ -454,9 +547,14 @@ vec3 ironGrade(vec3 displayLinear) {
   float highW = smoothstep(0.58, 0.86, L) * (1.0 - 0.55 * smoothstep(0.90, 1.0, L));
   float midW = (1.0 - shadowW) * (1.0 - highW);
   d += vec3(-0.010, -0.004, 0.014) * shadowW;
-  // Midtone gamma at §5.4's stated value, no longer scaled to 0.7×: the 0.7 was
-  // there to stop it stacking with the removed shoulder's own warm push.
-  vec3 gamma = vec3(0.030, 0.006, -0.040) * midW;
+  // Midtone gamma at 0.6× §5.4's stated value. §5.4 is explicit that the warmth
+  // is supposed to be EARNED from golden-hour light on sandstone and that a LUT
+  // which manufactures it is a defect; when this was written the lighting was
+  // still neutral and the full value was carrying the whole load. It no longer
+  // is — measured on the current roster the midtone B−R already runs −50 to −70
+  // against §5.4's −48…−24, i.e. the scene now over-delivers — so the corrector
+  // steps back rather than stacking on top of it.
+  vec3 gamma = vec3(0.018, 0.004, -0.024) * midW;
   d = pow(max(d, vec3(0.0)), 1.0 / (1.0 + gamma));
   // Highlight gain at the top of §5.4's stated ±0.03–0.06 envelope rather than
   // its bottom. Measured on round-1 frames the highlights ran COOL — level_alpha

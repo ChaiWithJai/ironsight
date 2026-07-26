@@ -181,6 +181,18 @@ class IronWater implements WaterService {
   private readonly uWaterRingCount: GpuUniform<number> = { value: 0 };
   private readonly uWaterTime: GpuUniform<number> = { value: 0 };
   private readonly uWaterPrevTime: GpuUniform<number> = { value: 0 };
+  /**
+   * `(Hs, windX, windZ, windSpeed)` — the sea state as the shader needs it.
+   *
+   * The wave table already carries all four, but the shader only ever sees the
+   * per-component arrays, and three separate terms in it (whitecap threshold,
+   * transmission slab thickness, Langmuir streak bearing) need the AGGREGATE
+   * rather than any one component. Deriving Hs in the shader would mean summing
+   * fifteen amplitudes per fragment for a number that changes when the wind does.
+   */
+  private readonly uWaterSeaState: GpuUniform<THREE.Vector4> = {
+    value: new THREE.Vector4(0.82, 0, 1, 4.5),
+  };
   private readonly uWaterSeaLevel: GpuUniform<number> = { value: MACRO_TERRAIN.seaLevel };
   private readonly uWaterOrigin: GpuUniform<THREE.Vector3> = { value: new THREE.Vector3() };
   private readonly uWaterSeabed: GpuUniform<THREE.Texture>;
@@ -373,6 +385,7 @@ class IronWater implements WaterService {
       uWaterRingCount: this.uWaterRingCount as GpuUniform,
       uWaterTime: this.uWaterTime as GpuUniform,
       uWaterPrevTime: this.uWaterPrevTime as GpuUniform,
+      uWaterSeaState: this.uWaterSeaState as GpuUniform,
       uWaterSeaLevel: this.uWaterSeaLevel as GpuUniform,
       uWaterOrigin: this.uWaterOrigin as GpuUniform,
       uWaterSeabed: this.uWaterSeabed as GpuUniform,
@@ -437,6 +450,16 @@ class IronWater implements WaterService {
     this.uWaterVarianceLutA.value.set(v[0], v[1]);
     this.uWaterVarianceLutB.value.set(v[2], v[3]);
     this.uWaterVarianceLutC.value.set(v[4], v[5], v[6], v[7]);
+    this.uWaterSeaState.value.set(
+      this.table.significantHeight,
+      this.table.windX,
+      this.table.windZ,
+      // `tableSpeed` is deliberately NaN until the first `syncSpectrum`, which is
+      // how a reset forces a rebuild. A NaN in a uniform is not a "not yet" — it
+      // poisons every expression it touches for one frame — so the constructor's
+      // own wind speed stands in until the sky has been asked.
+      Number.isFinite(this.tableSpeed) ? this.tableSpeed : 4.5,
+    );
   }
 
   /**

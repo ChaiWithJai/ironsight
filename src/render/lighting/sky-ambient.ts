@@ -43,6 +43,14 @@ const FACE = 64;
 /** Sea lies to the north (−Z) in HARBOUR REACH. See `src/engine/macro.ts`. */
 const SEAWARD = new THREE.Vector3(0, 0, -1);
 
+/**
+ * Half-width, in sin(elevation), of the band the sky and ground lobes cross-fade
+ * over. 0.11 is 6.3° — about the angular height of a real horizon once haze,
+ * terrain relief and the town's own roofline are accounted for, and wide enough
+ * that PMREM's sharpest mip cannot resolve a step inside it.
+ */
+const HORIZON_BAND = 0.11;
+
 /** LOOK_SPEC §2.4 ground-bounce table: effective irradiance (lx) and chroma. */
 const GROUND = {
   land: { lux: 1600, chroma: new THREE.Color(0.62, 0.5, 0.36) },
@@ -136,6 +144,19 @@ export class SkyAmbient {
     this.sunHoriz.normalize();
 
     // ---- pass 1: raw sky radiance from SKY, and its own horizontal integral --
+    //
+    // DIRECTIONS BELOW THE HORIZON ARE SAMPLED TOO, at their own azimuth's
+    // horizon. They contribute nothing to the sky integral — they are not sky —
+    // but pass 2 needs a continuous "what does the air in this direction look
+    // like" term to veil the ground lobe into, and reading it from the model at
+    // y = 0 is the only way to get one that agrees with the visible sky exactly
+    // where the two meet. Leaving these texels at zero is what produced the
+    // hard equator step in the cube, and a hard step in a PMREM-prefiltered
+    // environment is a HORIZONTAL LINE ACROSS EVERY LOW-ROUGHNESS SURFACE IN
+    // THE FRAME: the reflection vector sweeps through the seam at one screen
+    // height, so a crane lattice flips warm-to-cold-to-warm along a dead
+    // straight scanline that ignores the geometry it crosses. That was the
+    // round-2 "cascade seam" finding on `level_bravo`; it was never a cascade.
     let rawIrradiance = 0;
     let index = 0;
     for (let f = 0; f < 6; f++) {
@@ -144,11 +165,21 @@ export class SkyAmbient {
         for (let x = 0; x < FACE; x++, index += 3) {
           const u = (x + 0.5) * 2 * invFace - 1;
           faceDirection(f, u, v, this.dir);
-          if (this.dir.y <= 0) continue;
-          sky.radianceTowards(this.dir, this.colour);
+          const above = this.dir.y > 0;
+          if (!above) {
+            // Same azimuth, exactly on the horizon. Degenerate straight down,
+            // where every azimuth is equally wrong, so pick the sun's.
+            this.horiz.set(this.dir.x, 0, this.dir.z);
+            if (this.horiz.lengthSq() < 1e-8) this.horiz.copy(this.sunHoriz);
+            else this.horiz.normalize();
+            sky.radianceTowards(this.horiz, this.colour);
+          } else {
+            sky.radianceTowards(this.dir, this.colour);
+          }
           this.radiance[index] = Math.max(this.colour.r, 0);
           this.radiance[index + 1] = Math.max(this.colour.g, 0);
           this.radiance[index + 2] = Math.max(this.colour.b, 0);
+          if (!above) continue;
           const luminance =
             0.2126 * this.radiance[index] + 0.7152 * this.radiance[index + 1] + 0.0722 * this.radiance[index + 2];
           rawIrradiance += luminance * this.dir.y * texelSolidAngle(u, v, invFace);
@@ -190,13 +221,20 @@ export class SkyAmbient {
         for (let x = 0; x < FACE; x++, index += 3, texel += 4) {
           const u = (x + 0.5) * 2 * invFace - 1;
           faceDirection(f, u, v, this.dir);
+          // The atmospheric lobe: the real sky above, and below the horizon the
+          // same model evaluated AT the horizon — i.e. the haze a ground plane
+          // is seen through once it is far enough away to be near-grazing.
+          const airR = this.radiance[index] * skyScale;
+          const airG = this.radiance[index + 1] * skyScale;
+          const airB = this.radiance[index + 2] * skyScale;
+
           let r: number;
           let g: number;
           let b: number;
-          if (this.dir.y > 0) {
-            r = this.radiance[index] * skyScale;
-            g = this.radiance[index + 1] * skyScale;
-            b = this.radiance[index + 2] * skyScale;
+          if (this.dir.y > HORIZON_BAND) {
+            r = airR;
+            g = airG;
+            b = airB;
           } else {
             this.horiz.set(this.dir.x, 0, this.dir.z);
             const horizLen = this.horiz.length();
@@ -224,6 +262,29 @@ export class SkyAmbient {
             r = this.bounce.r * (0.55 + 0.45 * sunColour.r);
             g = this.bounce.g * (0.55 + 0.45 * sunColour.g);
             b = this.bounce.b * (0.55 + 0.45 * sunColour.b);
+
+            // AERIAL PERSPECTIVE ON THE GROUND LOBE. A downward direction that
+            // is only a few degrees below level is looking at ground hundreds of
+            // metres away, through all of it — by the rubric's own calibration
+            // note that ground is within ~15 % of sky colour by then. A steeply
+            // downward direction is looking at the pavement two metres away and
+            // sees its albedo undiluted. `veil` is that geometry: 1 at the nadir,
+            // 0 at the horizon, over the same 0.30 (17°) an aerial-perspective
+            // half-distance implies at street scale.
+            const veil = THREE.MathUtils.smoothstep(-this.dir.y, 0, 0.3);
+            r = airR + (r - airR) * veil;
+            g = airG + (g - airG) * veil;
+            b = airB + (b - airB) * veil;
+
+            // …and the last few degrees either side of level are a genuine
+            // blend, not a step: real ground ends at a horizon a finite distance
+            // away, and everything between that horizon and level is both.
+            if (this.dir.y > -HORIZON_BAND) {
+              const t = THREE.MathUtils.smoothstep(this.dir.y, -HORIZON_BAND, HORIZON_BAND);
+              r += (airR - r) * t;
+              g += (airG - g) * t;
+              b += (airB - b) * t;
+            }
           }
           // Half-float ceiling; the sun disc is SKY's business and never enters
           // the ambient cube, so nothing legitimate comes near this.

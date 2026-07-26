@@ -112,6 +112,22 @@ const MOVING_EPSILON = 0.35;
  */
 const WALK_CADENCE_HZ = 2;
 
+/**
+ * How far the viewmodel's key and rim point lights stand off the eye, in metres,
+ * and the d² factor that turns a requested illuminance into the candela three
+ * wants. See the light-rig comment in `IronViewmodel` for why they are point
+ * lights at all.
+ *
+ * 24 m is chosen against the weapon, not the world: across the 0.55 m from the
+ * buttpad to the muzzle the light direction swings 1.3° and the inverse-square
+ * falloff varies by ±2.3 %. Both are below the threshold at which anyone could
+ * tell this from a directional light, and the residual falloff is in the right
+ * direction anyway — the muzzle is further from the shooter's shoulder and
+ * genuinely does sit a hair darker in every reference frame.
+ */
+const VM_LIGHT_DISTANCE = 24;
+const VM_LIGHT_FALLOFF = VM_LIGHT_DISTANCE * VM_LIGHT_DISTANCE;
+
 type MutableFeel = { -readonly [K in keyof WeaponFeelState]: WeaponFeelState[K] };
 
 interface WeaponRigInstance {
@@ -179,11 +195,41 @@ class IronViewmodel implements ViewmodelRig {
    * modelling of the form. That is not a look; it is an arithmetic error, and it
    * is the one that made the viewmodel read as a cardboard wedge. The
    * intensities below are all set per frame from the live sun and sky.
+   *
+   * WHY THE KEY AND THE RIM ARE POINT LIGHTS AND NOT DIRECTIONAL ONES. This is
+   * the round-3 fix and it is the single reason the weapon had no key at all.
+   * LIGHT patches three's `lights_fragment_begin` (`render/lighting/shading.ts`)
+   * so that inside the unrolled DIRECTIONAL loop every light — not the sun, EVERY
+   * directional light — is multiplied by `ironSunShadow(worldPos, worldNormal,
+   * viewZ, dot(N, sunDir))`, the world's cascaded sun shadow. That is right for
+   * the world, which has exactly one directional light, and it is catastrophic
+   * here for two compounding reasons:
+   *
+   *   1. the viewmodel is a CASCADE-0 CASTER by design (`csm.ts` SHADOW_LAYERS,
+   *      LOOK_SPEC §2.6 wants the weapon's shadow on the ground), and it sits
+   *      inside cascade 0 at a few centimetres from the eye, where one shadow
+   *      texel is centimetres across — so the weapon shadows ITSELF, entirely;
+   *   2. the term is the world's, so standing in a building's shadow — which
+   *      this shot's camera does — takes the key to zero anyway.
+   *
+   * The measured result on the round-2 `weapon_ads` frame was a viewmodel whose
+   * brightest surface was (43, 62, 75) sRGB — pure sky chroma, B/R = 1.7,
+   * meaning ZERO contribution from a warm 40 000 lux key. A flat, cool, evenly
+   * lit object at the same value as the hazy midground is what a critic reads as
+   * "alpha-blended over the scene": it has no key, so it has no form, so it does
+   * not occlude anything perceptually even though it occludes it in the buffer.
+   *
+   * Three's POINT-light block carries no such patch, and its shadow lookup is
+   * behind `NUM_POINT_LIGHT_SHADOWS`, which is zero while `castShadow` is false.
+   * So the key and rim are point lights parked `VM_LIGHT_DISTANCE` away with
+   * their intensity multiplied by d² — inverse-square makes that exactly the
+   * illuminance we asked for, and at 24 m the direction varies by 0.6° and the
+   * falloff by ±2 % across a 0.5 m weapon, which is a directional light in every
+   * way that can be measured on a viewmodel.
    */
-  private readonly keyLight = new THREE.DirectionalLight(0xffd9a8, 0);
+  private readonly keyLight = new THREE.PointLight(0xffd9a8, 0, 0, 2);
   private readonly fillLight = new THREE.HemisphereLight(0x9dc0e0, 0x5a4a34, 0);
-  private readonly rimLight = new THREE.DirectionalLight(0xbcd2ea, 0);
-  private readonly lightTarget = new THREE.Object3D();
+  private readonly rimLight = new THREE.PointLight(0xbcd2ea, 0, 0, 2);
 
   /* ---- feel state. Every one of these is transient and reset per capture. -- */
 
@@ -278,11 +324,13 @@ class IronViewmodel implements ViewmodelRig {
     // The lights are SIBLINGS of `root`, not children of it: `addDynamic`
     // rewrites the layer mask of everything it traverses, and a light that ends
     // up frustum-culled or re-layered is a light that silently stops working.
+    // `castShadow` stays off on both: it is what keeps `NUM_POINT_LIGHT_SHADOWS`
+    // at zero, which is what keeps three's point-light shadow lookup compiled
+    // out. A viewmodel light that acquired a shadow map would put the weapon in
+    // an atlas at arm's length from the light and shadow it with itself again.
     this.keyLight.castShadow = false;
     this.rimLight.castShadow = false;
-    this.keyLight.target = this.lightTarget;
-    this.rimLight.target = this.lightTarget;
-    for (const light of [this.keyLight, this.fillLight, this.rimLight, this.lightTarget]) {
+    for (const light of [this.keyLight, this.fillLight, this.rimLight]) {
       light.layers.set(RenderLayer.Viewmodel as number);
       group.add(light);
     }
@@ -729,18 +777,17 @@ class IronViewmodel implements ViewmodelRig {
    * bolted to the barrel. Anchored to the eye and aimed along the world sun,
    * the highlights stay where the world says they should be and the weapon
    * moves THROUGH them, which is the entire point.
+   *
+   * The key and rim are POINT lights standing `VM_LIGHT_DISTANCE` off the eye
+   * with their intensity multiplied by d²; the class comment says why, and it is
+   * the round-3 fix for a viewmodel that had no key light at all.
    */
   private updateLightRig(ctx: FrameCtx): void {
     const lighting = ctx.services.lighting;
     const sun = lighting.sun;
     const eye = ctx.camera.position;
-    this.lightTarget.position.copy(eye);
-    this.lightTarget.updateMatrixWorld(true);
 
-    // 3 m is arbitrary and irrelevant — a directional light only uses the
-    // DIRECTION from its position to its target — but it has to be far enough
-    // that float error in the subtraction cannot flip a component.
-    this.keyLight.position.copy(eye).addScaledVector(sun.direction, 3);
+    this.keyLight.position.copy(eye).addScaledVector(sun.direction, VM_LIGHT_DISTANCE);
     this.keyLight.color.copy(sun.color);
 
     // LUX, straight off the world's own sun. Not a remapping of it — the same
@@ -751,53 +798,103 @@ class IronViewmodel implements ViewmodelRig {
     const above = Math.max(0, sun.direction.y);
     const sunLux = sun.illuminanceLux;
     const skyLux = lighting.skyIlluminanceLux;
-    // The shooter's own head, shoulder and forearm are between the sun and half
-    // of the weapon and are not modelled, so the beam is knocked down rather
-    // than taken at full strength. 0.85 is the fraction of the weapon's visible
-    // surface that is genuinely in open sun with the rifle at the shoulder.
-    this.keyLight.intensity = sunLux * 0.85;
+    // THE BODY-OCCLUSION FACTOR, and round 3 took it from 0.85 to 0.42 on a
+    // measurement rather than a feeling.
+    //
+    // The viewmodel is deliberately shadowless — that is what the point-light
+    // rig above buys, and it is the right trade, because a self-shadowing
+    // viewmodel at cascade-0 texel sizes is worse than none. But "shadowless"
+    // means the one occluder that matters most is missing: the shooter. A rifle
+    // held at the hip or at the shoulder sits inside a cone of the shooter's own
+    // torso, head and forearms, and that geometry is not in the scene at any
+    // LOD. Taking 85 % of the sun implies a weapon floating in open air.
+    //
+    // The measurement is `weapon_hipfire` at 0.85: the sunlit face of the
+    // handguard read (120, 83, 48) sRGB against sunlit paving at (133, 86, 54) —
+    // the same value and the same hue. That is physically defensible (the
+    // weapon's side takes the low sun near-normal while the ground takes it at
+    // sin 25°, and the 2.1x irradiance almost exactly cancels the 2.2x albedo
+    // deficit) and compositionally fatal: LOOK_SPEC §7.2 requires the near-field
+    // occluder to read 2-4x DARKER than the midground, and every first-person
+    // frame in the corpus obeys it. 0.42 lands the weapon at ~2.4x down, inside
+    // that window, without touching an albedo that is right for the material.
+    //
+    // × d² because this is a point light standing in for a directional one:
+    // three's inverse-square attenuation divides it straight back out at the
+    // weapon, so what lands on the receiver is `sunLux · 0.42` lux exactly.
+    this.keyLight.intensity = sunLux * 0.42 * VM_LIGHT_FALLOFF;
 
     // Ground bounce, computed rather than dialled: the horizontal illuminance
     // falling on the street times the street's albedo is what comes back up.
     // 0.34 is sandstone/dry sand, which is what this town is made of and is why
     // the undersides of a weapon carried here go warm rather than black.
     const bounceLux = (sunLux * above + skyLux) * 0.34;
-    // The FULL computed hemisphere, not half of it, and the reason is measured
-    // rather than felt. `Scene.environment` is a prefiltered sky probe, so it
-    // already carries the dome — but it is baked from the SKY and knows nothing
-    // about the two square metres of sunlit street directly under the weapon,
-    // which for a first-person camera is the single largest thing in the
-    // viewmodel's own hemisphere. Holding this at half the physical value put
-    // the optic housing at 7.9 % of the frame's bright anchor; the same class of
-    // optic in `reference/gameplay/bf6_gp_019` sits at 16 %, and the shipped
-    // frame is not cheating — it is receiving the bounce.
+    // What the hemisphere buys over `Scene.environment`'s prefiltered sky probe
+    // is DIRECTION: it separates the sky term from the ground term along the
+    // surface normal, so the top of the receiver goes cool and the magwell,
+    // trigger guard and bottom rail go warm, instead of everything settling on
+    // one ambient value. The probe knows nothing about the two square metres of
+    // sunlit street directly under the weapon, which for a first-person camera
+    // is the single largest thing in the viewmodel's own hemisphere.
     //
-    // What the hemisphere buys over the probe either way is DIRECTION: it
-    // separates the sky term from the ground term along the surface normal, so
-    // the top of the receiver goes cool and the magwell, trigger guard and
-    // bottom rail go warm, instead of everything settling on one ambient value.
-    const fillLux = Math.max(skyLux, bounceLux);
-    this.fillLight.intensity = fillLux;
+    // ROUND 3 TOOK IT FROM THE FULL PHYSICAL VALUE TO 0.62 OF IT, and the reason
+    // is that until this round the key was being extinguished (see the light-rig
+    // comment above) and this term was carrying the ENTIRE weapon on its own.
+    // With 40 000 lux of key back, the full hemisphere plus the probe is a
+    // double count of the sky and it flattens the modelling to a key:fill of
+    // about 1.6:1 — which is a weapon photographed under an overcast, not one in
+    // hard golden-hour sun. 0.62 puts it near 2.6:1, which is where the
+    // reference frames sit and where a chamfer still has a bright side and a
+    // dark side.
+    // The same body occlusion applies to the dome — a weapon held against a
+    // torso sees maybe half the sky — so the 0.62 above carries a further 0.72,
+    // which is what keeps the key:fill ratio where the round-3 rebalance put it
+    // rather than letting the ambient swallow the weapon again now that the key
+    // has come down.
+    const hemisphereLux = Math.max(skyLux, bounceLux);
+    this.fillLight.intensity = hemisphereLux * 0.62 * 0.72;
     // Colours carry the RATIO between the two halves; the intensity carries the
     // magnitude. Sky is the LOOK_SPEC teal shadow chroma, ground is sandstone.
-    const skyShare = Math.min(1, skyLux / Math.max(fillLux, 1e-3));
-    const groundShare = Math.min(1, bounceLux / Math.max(fillLux, 1e-3));
-    this.fillLight.color.setRGB(0.34 * skyShare, 0.46 * skyShare, 0.70 * skyShare);
-    this.fillLight.groundColor.setRGB(0.62 * groundShare, 0.50 * groundShare, 0.35 * groundShare);
+    // The shares divide by the UNSCALED hemisphere, not by the scaled intensity:
+    // dividing by the scaled one clamps both to 1 and silently throws away the
+    // sky/ground split that is the only reason this light exists.
+    const skyShare = Math.min(1, skyLux / Math.max(hemisphereLux, 1e-3));
+    const groundShare = Math.min(1, bounceLux / Math.max(hemisphereLux, 1e-3));
+    //
+    // ROUND 3 PULLED BOTH HALVES A THIRD OF THE WAY TOWARD EACH OTHER (sky was
+    // 0.34/0.46/0.70, ground 0.62/0.50/0.35). The split is still unmistakably
+    // teal-over-warm, which is what LOOK_SPEC §1 asks for, but at the old spread
+    // the dome was effectively two SATURATED lights 180° apart, and a
+    // bead-blasted surface whose micro-normals swing either side of horizontal
+    // then resolves into a blue-and-orange speckle rather than into metal. The
+    // hue split belongs on the FORM — the top of a receiver against its magwell —
+    // not on adjacent pixels of the same panel.
+    this.fillLight.color.setRGB(0.42 * skyShare, 0.50 * skyShare, 0.64 * skyShare);
+    this.fillLight.groundColor.setRGB(0.60 * groundShare, 0.52 * groundShare, 0.42 * groundShare);
 
     // Rim: opposite the key and only slightly above, so it draws a line down
     // the top EDGE of the receiver rather than washing the whole top face. It
-    // is the cheapest separation there is and the easiest to overdo. At sky
-    // illuminance × 0.45 it is under half the fill and about a hundredth of the
-    // key — visible on a chamfer, invisible on a flat — and it is what draws the
-    // line down the top edge of the receiver that the round-1 critique recorded
-    // as missing.
+    // is the cheapest separation there is and the easiest to overdo — visible on
+    // a chamfer, invisible on a flat — and it is what draws the line down the top
+    // edge of the receiver that the round-1 critique recorded as missing.
+    //
+    // ROUND 3: raised from 0.45 to 0.80 of sky illuminance. It was authored when
+    // it was competing with a full-strength hemisphere and no key at all, and a
+    // rim that is half the ambient is not a rim, it is a second ambient. Against
+    // a 0.62 hemisphere it is now genuinely the brightest thing on an up-facing
+    // chamfer that the sun is not reaching, which is exactly the 1–2 px silver
+    // line down the top of the receiver that separates the silhouette.
+    const rimUp = VM_LIGHT_DISTANCE * 0.37;
     this.rimLight.position.set(
-      eye.x - sun.direction.x * 3,
-      eye.y + 1.1,
-      eye.z - sun.direction.z * 3,
+      eye.x - sun.direction.x * VM_LIGHT_DISTANCE,
+      eye.y + rimUp,
+      eye.z - sun.direction.z * VM_LIGHT_DISTANCE,
     );
-    this.rimLight.intensity = skyLux * 0.45;
+    // Same d² compensation as the key, measured rather than assumed: the sun
+    // direction is a unit vector, so dropping its `y` leaves a horizontal run
+    // SHORTER than `VM_LIGHT_DISTANCE` by cos(elevation) and the rim would come
+    // out up to 20 % hot at a high sun.
+    this.rimLight.intensity = skyLux * 0.80 * this.rimLight.position.distanceToSquared(eye);
     this.keyLight.updateMatrixWorld(true);
     this.rimLight.updateMatrixWorld(true);
 

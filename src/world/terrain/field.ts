@@ -132,11 +132,83 @@ export class TerrainField {
     return cubic(c0, c1, c2, c3, fz);
   }
 
-  /** Central-difference gradient of `height`, in metres per metre. */
+  /**
+   * Gradient of the field, in metres per metre — the ANALYTIC derivative of a
+   * cubic B-spline reconstruction of the same grid.
+   *
+   * THIS IS THE ROUND-2 SHADING-SEAM FIX, and it is not an optimisation.
+   * `height()` is Catmull-Rom, which is C1: its second derivative jumps across
+   * every grid line. A central difference of it is therefore a gradient field
+   * with a KINK on x = n·cell and z = n·cell — the normal is continuous but its
+   * derivative is not, and the eye's lateral inhibition turns a derivative
+   * discontinuity into a Mach band. Under an 11° sun, on open unoccluded ground,
+   * that is the "long straight dark lines across the full terrain width, −28
+   * levels over 12 px" the round-2 critique measured. No amount of extra
+   * tessellation removes it, because it is in the interpolant, not the mesh.
+   *
+   * The cubic B-spline over the same samples is C2, so this gradient is C1 and
+   * no line survives anywhere. It is an approximating rather than interpolating
+   * basis — it reads as a lightly smoothed copy of the field, which is exactly
+   * what a shading normal should be, and it also filters the single-cell noise
+   * the droplet erosion writes. Positions stay on the Catmull-Rom surface, so
+   * nothing about collision, LEVEL's placement or the mesh moves.
+   *
+   * 16 taps instead of 4 Catmull-Rom evaluations (64 taps): cheaper as well.
+   */
   gradient(x: number, z: number, out: { gx: number; gz: number }): void {
-    const e = this.cell * 0.5;
-    out.gx = (this.height(x + e, z) - this.height(x - e, z)) / (2 * e);
-    out.gz = (this.height(x, z + e) - this.height(x, z - e)) / (2 * e);
+    const gx = (x + FIELD_HALF) / this.cell;
+    const gz = (z + FIELD_HALF) / this.cell;
+    if (gx < 1 || gz < 1 || gx > this.res - 2 || gz > this.res - 2) {
+      const e = this.cell * 0.5;
+      out.gx = (this.height(x + e, z) - this.height(x - e, z)) / (2 * e);
+      out.gz = (this.height(x, z + e) - this.height(x, z - e)) / (2 * e);
+      return;
+    }
+    const ix = Math.floor(gx);
+    const iz = Math.floor(gz);
+    const fx = gx - ix;
+    const fz = gz - iz;
+    const d = this.data;
+    const s = this.stride;
+
+    // Cubic B-spline basis and its t-derivative, over the four taps i-1 … i+2.
+    const ox = 1 - fx;
+    const wx0 = (ox * ox * ox) / 6;
+    const wx1 = (3 * fx * fx * fx - 6 * fx * fx + 4) / 6;
+    const wx2 = (-3 * fx * fx * fx + 3 * fx * fx + 3 * fx + 1) / 6;
+    const wx3 = (fx * fx * fx) / 6;
+    const dx0 = (-ox * ox) / 2;
+    const dx1 = (3 * fx * fx - 4 * fx) / 2;
+    const dx2 = (-3 * fx * fx + 2 * fx + 1) / 2;
+    const dx3 = (fx * fx) / 2;
+
+    const oz = 1 - fz;
+    const wz0 = (oz * oz * oz) / 6;
+    const wz1 = (3 * fz * fz * fz - 6 * fz * fz + 4) / 6;
+    const wz2 = (-3 * fz * fz * fz + 3 * fz * fz + 3 * fz + 1) / 6;
+    const wz3 = (fz * fz * fz) / 6;
+    const dz0 = (-oz * oz) / 2;
+    const dz1 = (3 * fz * fz - 4 * fz) / 2;
+    const dz2 = (-3 * fz * fz + 2 * fz + 1) / 2;
+    const dz3 = (fz * fz) / 2;
+
+    // Unrolled: this runs ~280 000 times per LOD rebuild and once per AI ground
+    // query, so a four-element scratch array here is a real allocation rate.
+    const r0 = (iz - 1) * s + ix - 1;
+    const r1 = r0 + s;
+    const r2 = r1 + s;
+    const r3 = r2 + s;
+    const v0 = d[r0] * wx0 + d[r0 + 1] * wx1 + d[r0 + 2] * wx2 + d[r0 + 3] * wx3;
+    const v1 = d[r1] * wx0 + d[r1 + 1] * wx1 + d[r1 + 2] * wx2 + d[r1 + 3] * wx3;
+    const v2 = d[r2] * wx0 + d[r2 + 1] * wx1 + d[r2 + 2] * wx2 + d[r2 + 3] * wx3;
+    const v3 = d[r3] * wx0 + d[r3 + 1] * wx1 + d[r3 + 2] * wx2 + d[r3 + 3] * wx3;
+    const s0 = d[r0] * dx0 + d[r0 + 1] * dx1 + d[r0 + 2] * dx2 + d[r0 + 3] * dx3;
+    const s1 = d[r1] * dx0 + d[r1 + 1] * dx1 + d[r1 + 2] * dx2 + d[r1 + 3] * dx3;
+    const s2 = d[r2] * dx0 + d[r2 + 1] * dx1 + d[r2 + 2] * dx2 + d[r2 + 3] * dx3;
+    const s3 = d[r3] * dx0 + d[r3 + 1] * dx1 + d[r3 + 2] * dx2 + d[r3 + 3] * dx3;
+
+    out.gx = (s0 * wz0 + s1 * wz1 + s2 * wz2 + s3 * wz3) / this.cell;
+    out.gz = (v0 * dz0 + v1 * dz1 + v2 * dz2 + v3 * dz3) / this.cell;
   }
 
   /** |∇h|. Not an angle — the splat rules and the LOD rules both want the slope. */

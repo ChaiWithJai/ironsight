@@ -18,10 +18,11 @@
  * aerial perspective — while replacing the palette. See that file for why the
  * detail is generated rather than fetched.
  *
- * `tilingScale` still matters even so: the bake's NORMAL and AO maps survive
- * underneath the chunk, and at the default rate they are a 2.6 m rust relief
- * blown up 60×. Pulling one repeat down to ~9 cm turns them into the fine
- * base relief the analytic grain then sits on top of.
+ * `tilingScale` and `detailScale` still matter even so: the bake's NORMAL and AO
+ * maps survive underneath the chunk, and the uber material adds a detail normal
+ * on top of both. All three are NORMAL sources, all three feed the same
+ * hemisphere light, and getting their frequencies wrong is what made a receiver
+ * read as aggregate — see `WEAPON_TILING` and the `detailScale` note below.
  */
 import type * as THREE from 'three';
 import { MaterialFeature, SurfaceId, type MaterialFactory } from '@/engine/types';
@@ -31,29 +32,92 @@ import { opticLensChunk, weaponSurfaceChunk } from '@/weapons/viewmodel/surface'
 export type RoleMaterials = Readonly<Record<PartRole, THREE.Material>>;
 
 /**
- * Divisor on the bake's own repeat rate. The harbour bakes run 1.8–2.6 m; /40
- * puts one repeat at 45–65 mm, so the recipe's coarsest octave (3 per repeat)
- * lands at ~2 cm and its finest (48 per repeat) at 1.4 mm.
+ * Divisor on the bake's own repeat rate. The harbour bakes run 1.8–2.6 m; /14
+ * puts one repeat at 130–186 mm, so the recipe's coarsest octave (3 per repeat)
+ * lands at ~5 cm and its finest (48 per repeat) at 3.9 mm.
  *
- * Raised from 28 after looking at the render: at 28 the repeat was 93 mm and the
- * coarsest octave drew 3 cm blotches, which on a 41 mm optic housing is not a
- * metal finish, it is a pebble. It is deliberately NOT raised further, and that
- * is the interesting half. All the surface chunk keeps of the bake is its NORMAL
- * and AO, and it reads the SCREEN-SPACE DIVERGENCE of that normal as its
- * curvature signal. Push the repeat down to a millimetre and the normal map's
- * own high-frequency noise dominates that derivative, the curvature term
- * saturates everywhere, and the edge wear stops being edge wear and becomes a
- * uniform silver haze. 1.4 mm of finest octave is roughly a 9-pixel feature at
- * viewmodel distance — fine enough to be base relief, coarse enough that a real
- * chamfer still out-swings it.
+ * ROUND 3 TOOK IT FROM 40 DOWN TO 14, reversing the round-2 move, and the
+ * measurement that forced it is worth writing down because the intuition points
+ * the wrong way.
+ *
+ * All the surface chunk keeps of the bake is its NORMAL and AO — the albedo is
+ * overwritten outright. A normal map's SLOPE is its amplitude over its
+ * wavelength, so shortening the repeat does not add detail, it adds TILT: at /40
+ * the finest octave was 1.4 mm and every one of those 1.4 mm facets picked its
+ * own colour off the hemisphere light, the up-tilted ones blue and the
+ * down-tilted ones warm. Six pixels of blue against six pixels of orange, across
+ * a whole receiver panel, is the "low-resolution greyscale gravel reading as
+ * concrete" the round-2 critic saw — and no albedo change could have fixed it,
+ * because it was never in the albedo.
+ *
+ * Lengthening the repeat 2.9x divides that tilt by 2.9 and moves what remains
+ * from a 6-pixel dazzle to a 20-pixel undulation, which is form rather than
+ * noise. The fine band is not lost: `surface.ts` supplies it analytically at
+ * 1.4 mm with a slope authored for bead blast rather than for rusted sheet.
+ *
+ * The second win is the curvature signal. `wpnEdge` reads the screen-space
+ * divergence of this same normal to find chamfers, and at /40 the map's own
+ * noise floor cleared the threshold on flat panels, spraying edge wear over
+ * them as silver speckle. At /14 the floor drops below it and the wear lands
+ * where the geometry actually is.
  */
-const WEAPON_TILING = 40;
+const WEAPON_TILING = 14;
 
 export function buildViewmodelMaterials(materials: MaterialFactory): RoleMaterials {
   const layer = (id: string, surface: SurfaceId): number => {
     const tex = materials.textures(surface);
     return materials.allocateLayer(id, tex.albedoHeight, tex.normalRoughAo);
   };
+
+  /**
+   * The four SOLID roles say so out loud rather than relying on the factory's
+   * defaults (`blending ?? (transparent ? 'alpha' : 'opaque')`,
+   * `depthWrite ?? !transparent`). The defaults are correct today and this
+   * changes nothing about the frame — it is here because "is the viewmodel
+   * being drawn with transparency or depthWrite off?" is a question that came up
+   * in review and cost real time to answer, and a spec that states the answer
+   * cannot be misread the next time. The only two roles allowed to be
+   * transparent on this weapon are the combiner and the dot, and both say so
+   * explicitly below.
+   */
+  const solid = { transparent: false, depthWrite: true, depthTest: true } as const;
+
+  /* AND WHY ALL FOUR SOLID ROLES NOW ASK FOR `MaterialFeature.None`.
+   *
+   * `DetailNormal` is the uber material's own two-band procedural normal, and on
+   * a wall it is exactly right. On a weapon it is REDUNDANT and destructive:
+   * `surface.ts` already writes a bead-blast grain at 1.4 mm and a broaching
+   * pattern at 6 mm, both authored with slopes measured for machined metal, and
+   * the uber bands sit on top of them at `20 x detailScale` and six times that
+   * again. At the bottom of an ADS frame the buttstock passes within 5 cm of the
+   * eye, where the micro band lands at well under a pixel — so it contributes no
+   * detail at all, only per-pixel normal noise, and that noise sampled against a
+   * sky-over-ground hemisphere is the blue-and-orange speckle that three
+   * successive round-3 attempts (bake frequency, curvature source, roughness
+   * amplitude) failed to shift, because none of them were the source.
+   *
+   * `detailScale` is kept on the specs below even though the feature bit is off:
+   * it is the only place the intended mesoscale of each role is written down,
+   * and turning the bit back on without it would put the band at 5 cm.
+   */
+
+  /* A NOTE ON `detailScale`, WHICH IS THE THIRD NORMAL SOURCE AND WAS THE
+   * LOUDEST OF THE THREE.
+   *
+   * `iron-material.ts` turns it into `20 x detailScale` repeats per METRE and
+   * then runs a micro band a further 6x up. The round-2 values (42-140) put the
+   * weapon's detail band at 0.4-1.2 mm and its micro band at 0.07-0.2 mm — i.e.
+   * both at or below one pixel even in ADS. Sub-pixel normal detail does not
+   * resolve as detail; it resolves as per-pixel normal noise, which under a
+   * two-colour hemisphere is exactly the blue-and-orange speckle that made a
+   * receiver read as aggregate. Round 3 brings the detail band to 4.5-5.6 mm
+   * (20-26 px in ADS, ~2 px at hipfire) where it is legible as machining.
+   *
+   * They stay ABOVE 8 deliberately: `iron-material.ts` reads `detailScale > 8`
+   * as "this is a weapon, not a wall" and drops the parallax depth from 12 mm to
+   * 2 mm. Fall under 8 and the uber material starts parallax-shifting a rifle by
+   * a centimetre.
+   */
 
   // Registered BEFORE any create() that names them — the factory throws
   // otherwise, which is the correct place to find out rather than at first draw.
@@ -154,29 +218,31 @@ export function buildViewmodelMaterials(materials: MaterialFactory): RoleMateria
   materials.registerSurface('weapon.lens', opticLensChunk());
 
   const receiver = materials.create({
+    ...solid,
     id: 'weapon.receiver',
     surface: SurfaceId.PaintedMetal,
     layer: layer('weapon.receiver', SurfaceId.PaintedMetal),
-    features: MaterialFeature.DetailNormal,
+    features: MaterialFeature.None,
     surfaceShader: 'weapon.receiver',
     tilingScale: WEAPON_TILING,
     baseColor: 0x33362f,
     roughness: 0.44,
     metalness: 0.18,
-    detailScale: 42,
+    detailScale: 9,
   });
 
   const steel = materials.create({
+    ...solid,
     id: 'weapon.steel',
     surface: SurfaceId.BareMetal,
     layer: layer('weapon.steel', SurfaceId.BareMetal),
-    features: MaterialFeature.DetailNormal,
+    features: MaterialFeature.None,
     surfaceShader: 'weapon.steel',
     tilingScale: WEAPON_TILING,
     baseColor: 0x4a4a4c,
     roughness: 0.31,
     metalness: 1.0,
-    detailScale: 60,
+    detailScale: 10,
   });
 
   // NOTE on `baseColor` in the four chunk-driven specs below: the surface chunk
@@ -185,16 +251,17 @@ export function buildViewmodelMaterials(materials: MaterialFactory): RoleMateria
   // spec whose stated colour disagrees with what it draws is a trap for the next
   // person to read it.
   const polymer = materials.create({
+    ...solid,
     id: 'weapon.polymer',
     surface: SurfaceId.Rubber,
     layer: layer('weapon.polymer', SurfaceId.Rubber),
-    features: MaterialFeature.DetailNormal,
+    features: MaterialFeature.None,
     surfaceShader: 'weapon.polymer',
     tilingScale: WEAPON_TILING,
     baseColor: 0x6f5c40,
     roughness: 0.68,
     metalness: 0.0,
-    detailScale: 90,
+    detailScale: 11,
   });
 
   // The optic combiner. Transparent, DEPTH-WRITE OFF and driven by
@@ -244,16 +311,17 @@ export function buildViewmodelMaterials(materials: MaterialFactory): RoleMateria
   });
 
   const glove = materials.create({
+    ...solid,
     id: 'weapon.glove',
     surface: SurfaceId.Fabric,
     layer: layer('weapon.glove', SurfaceId.Fabric),
-    features: MaterialFeature.DetailNormal,
+    features: MaterialFeature.None,
     surfaceShader: 'weapon.glove',
     tilingScale: WEAPON_TILING,
     baseColor: 0x453f38,
     roughness: 0.88,
     metalness: 0.0,
-    detailScale: 140,
+    detailScale: 14,
   });
 
   return { receiver, steel, polymer, glass, reticle, glove };

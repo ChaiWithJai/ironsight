@@ -86,9 +86,11 @@ export class EngineSceneGraph implements SceneGraph {
 
   constructor() {
     this.root.name = 'ironsight';
-    // The render graph submits in a precomputed material order; three's own
-    // per-frame sort costs ~0.4 ms of CPU we cannot spare and would fight the
-    // explicit ordering the graph relies on.
+    // Left on: lanes move registered objects by writing `position`/`quaternion`
+    // and nothing recomputes the world matrix for them if this is off. The
+    // per-group `matrixAutoUpdate = false` below is where the saving actually
+    // comes from — twelve groups that never move, decomposed every frame for
+    // nothing. Draw ORDER is not decided here; see note 5 in engine/renderer.ts.
     this.root.matrixAutoUpdate = true;
     for (const name of Object.values(SceneGroup)) {
       const g = new THREE.Group();

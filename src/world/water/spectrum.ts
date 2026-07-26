@@ -9,19 +9,37 @@
  * is the number a person can actually reason about ("Hs 0.8 m" is a working
  * harbour; "amplitude 0.14" is nothing).
  *
- * THREE BANDS, BECAUSE THEY ARE CONSUMED IN THREE DIFFERENT PLACES:
+ * FOUR BANDS, BECAUSE THEY ARE CONSUMED IN FOUR DIFFERENT PLACES:
  *
  *   SWELL   58–132 m   displaces geometry, drives buoyancy, tight directional
  *                      spread (swell has travelled and has forgotten the local
  *                      wind), and is the reason the sea has a silhouette at all
+ *   CROSS   30–64 m    displaces geometry, runs 62° off the wind. THE SECOND
+ *                      WAVE SYSTEM, and it is not a decoration. A sea built
+ *                      from one bearing produces parallel diagonal corduroy at
+ *                      one wavelength — the single loudest "this is a sum of
+ *                      sines" tell there is. Every real coast carries a remote
+ *                      swell that arrives on a different bearing from the local
+ *                      wind sea, and the interference between the two is what
+ *                      makes crests short-crested: they build, run a few
+ *                      wavelengths and die, instead of striping the frame.
  *   CHOP     7–34 m    displaces geometry, wide spread, carries the crests that
  *                      break into whitecaps
- *   RIPPLE  0.7–4.5 m  NORMAL ONLY, evaluated per-fragment. These are the waves
+ *   RIPPLE 0.09–4.5 m  NORMAL ONLY, evaluated per-fragment. These are the waves
  *                      the glitter path is actually made of: at 11° sun a 1.5 m
  *                      ripple with 8 cm amplitude has a 20° slope, which is
  *                      exactly the facet population that throws the sun at the
  *                      camera. Displacing them in the mesh would need a 20 cm
  *                      tessellation and would alias anyway.
+ *                      THE BAND RUNS DOWN TO 9 cm, and that is what keeps the
+ *                      near field from going to plastic. A pixel at 3 m covers
+ *                      about 7 mm of sea, so a 9 cm capillary is eleven pixels
+ *                      across and fully resolved; at 60 m the same wave is a
+ *                      fifth of a pixel and the shader's band limit has already
+ *                      handed its slope to the roughness term. That hand-off is
+ *                      a LOD blend, not a fade to flat — the energy never
+ *                      leaves the frame, it changes from a normal into a
+ *                      roughness.
  *
  * EVERYTHING HERE IS EVALUATED TWICE — once in TypeScript for buoyancy,
  * `heightAt` and `normalAt`, and once in GLSL for the surface itself. The two
@@ -30,18 +48,32 @@
  */
 import type { Rng } from '@/engine/types';
 
-export const SWELL_COUNT = 4;
+export const SWELL_COUNT = 3;
+export const CROSS_COUNT = 2;
 export const CHOP_COUNT = 5;
-export const RIPPLE_COUNT = 6;
+export const RIPPLE_COUNT = 8;
 /** Bands that displace geometry. The CPU height query evaluates exactly these. */
-export const DISPLACING_COUNT = SWELL_COUNT + CHOP_COUNT;
+export const DISPLACING_COUNT = SWELL_COUNT + CROSS_COUNT + CHOP_COUNT;
 export const WAVE_COUNT = DISPLACING_COUNT + RIPPLE_COUNT;
 
 /** Standard gravity. Deep-water dispersion is ω = √(gk) and nothing else. */
 const G = 9.80665;
 
-/** Cutoff wavelengths of the slope-variance LUT, in metres, ascending. */
-export const VARIANCE_LUT_LAMBDA = [0.35, 0.8, 1.8, 4.0, 9.0, 20.0, 45.0, 140.0] as const;
+/**
+ * Cutoff wavelengths of the slope-variance LUT, in metres, ascending.
+ *
+ * The bottom of the ladder is the shortest wave in the spectrum, not the
+ * shortest wave anyone expects to see: the LUT's job is to tell a fragment how
+ * much slope lives BELOW its own footprint, so if the table starts above a band
+ * that band's variance is invisible to it and the water loses that energy
+ * instead of converting it to roughness. `ironWaterVariance` maps λ onto this
+ * ladder in log space, so the two ends here and the two ends there are one
+ * number and must move together.
+ */
+export const VARIANCE_LUT_LAMBDA = [0.09, 0.22, 0.55, 1.4, 3.5, 9.0, 30.0, 140.0] as const;
+/** Bottom and top of that ladder, exported so the shader cannot drift from it. */
+export const VARIANCE_LUT_MIN = VARIANCE_LUT_LAMBDA[0];
+export const VARIANCE_LUT_MAX = VARIANCE_LUT_LAMBDA[VARIANCE_LUT_LAMBDA.length - 1];
 
 export interface WaveTable {
   /** Per wave, `vec4(dirX, dirZ, k, omega)`. */
@@ -75,19 +107,40 @@ interface BandSpec {
   readonly lambdaMax: number;
   /** Half-angle of the directional spread, radians. */
   readonly spread: number;
+  /** Mean bearing of the band, as an offset from the wind bearing, radians. */
+  readonly bearing: number;
   /** Share of the total variance this band is allowed to carry. */
   readonly variance: number;
 }
 
 /**
- * The three bands. The variance split is the sea state's character: 62 % in the
- * swell gives a harbour with a long, calm heave under it; pushing it into the
- * chop gives a windier, choppier, less Mediterranean sea.
+ * The four bands. The variance split is the sea state's character: half in the
+ * primary swell gives a harbour with a long, calm heave under it; pushing it
+ * into the chop gives a windier, choppier, less Mediterranean sea.
+ *
+ * The RIPPLE share is 0.09 rather than the 0.05 it was, and the band now runs
+ * an octave and a half further down. Both changes buy the same thing: mean-
+ * square slope. Cox and Munk measured mss ≈ 0.003 + 0.00512·U for a clean sea,
+ * which at our 4.5 m/s breeze is 0.026 — rms slope 9°, and essentially all of it
+ * lives below a metre of wavelength. A spectrum that stops at 0.7 m carries
+ * about a third of that, and a sea missing two thirds of its slope variance has
+ * a glitter path a third as wide and a near field with nothing in it.
  */
 const BANDS: readonly BandSpec[] = [
-  { count: SWELL_COUNT, lambdaMin: 58, lambdaMax: 132, spread: 0.24, variance: 0.62 },
-  { count: CHOP_COUNT, lambdaMin: 7, lambdaMax: 34, spread: 0.66, variance: 0.33 },
-  { count: RIPPLE_COUNT, lambdaMin: 0.7, lambdaMax: 4.5, spread: 1.08, variance: 0.05 },
+  { count: SWELL_COUNT, lambdaMin: 58, lambdaMax: 132, spread: 0.24, bearing: 0, variance: 0.5 },
+  // 62° off the wind, the classic remote-swell-against-wind-sea angle. Wide
+  // enough that the two systems beat rather than lock, narrow enough that it
+  // still reads as a swell and not as noise.
+  { count: CROSS_COUNT, lambdaMin: 30, lambdaMax: 64, spread: 0.3, bearing: 1.08, variance: 0.14 },
+  { count: CHOP_COUNT, lambdaMin: 7, lambdaMax: 34, spread: 0.66, bearing: -0.26, variance: 0.27 },
+  {
+    count: RIPPLE_COUNT,
+    lambdaMin: 0.09,
+    lambdaMax: 4.5,
+    spread: 1.08,
+    bearing: 0.34,
+    variance: 0.09,
+  },
 ];
 
 /**
@@ -142,17 +195,42 @@ export function buildWaveTable(
       const lam = band.lambdaMin * Math.pow(band.lambdaMax / band.lambdaMin, t);
       const k = (2 * Math.PI) / lam;
 
-      const theta = windDirectionRad + rng.gaussian() * band.spread * 0.5;
+      const theta = windDirectionRad + band.bearing + rng.gaussian() * band.spread * 0.5;
       const dirX = Math.sin(theta);
       const dirZ = Math.cos(theta);
       // cos² directional spreading, the standard shape, plus Phillips' own
       // suppression of components running across the wind.
       const align = Math.max(0, dirX * windX + dirZ * windZ);
-      const spread = align * align;
+      // cos² spreading, floored. Without the floor a band whose mean bearing is
+      // far off the wind — which is the entire point of the cross-swell — has
+      // components whose directional weight is nearly zero, and the per-band
+      // renormalisation below then has to multiply the survivors by hundreds to
+      // recover the band's variance. That collapses a five-component band into
+      // one enormous sine, which is the artefact this band exists to remove.
+      const spread = Math.max(align * align, 0.05);
 
       const dLam = (lam * Math.log(band.lambdaMax / band.lambdaMin)) / band.count;
       const dk = (2 * Math.PI * dLam) / (lam * lam);
-      const energy = phillips(k, spectrumWind) * dk * spread;
+      // THE RING MEASURE, and leaving it out is why the sea had no small waves.
+      //
+      // `phillips` is the TWO-DIMENSIONAL spectrum S(k⃗) ∝ k⁻⁴. Each component
+      // here stands for an annulus of the k-plane of radius k and width dk, and
+      // the energy in an annulus is S(k⃗)·(2πk)·dk — the circumference grows
+      // with k, so a one-dimensional reduction of a 2D spectrum carries a factor
+      // of k that is not optional. Without it every component was weighted one
+      // full power of k too steeply: A ∝ k⁻¹·⁵ instead of k⁻¹, so A·k — which
+      // IS the surface slope, the only thing the shading actually sees — fell as
+      // k⁻⁰·⁵ instead of staying flat.
+      //
+      // Flat is the correct answer and it is not a coincidence: a k⁻⁴ spectrum
+      // is Phillips' SATURATION range, defined as the state where each octave of
+      // wavelength carries the same slope variance. Restoring the k puts the sea
+      // back in it — total mean-square slope lands at 0.037 against Cox and
+      // Munk's measured 0.003 + 0.00512·U = 0.026 for a clean sea at our 4.5 m/s
+      // breeze, and the excess is the swell, which their fetch-limited fit does
+      // not contain. Before this the ripple band's slope was dominated by its
+      // own longest component and the near field had nothing in it.
+      const energy = phillips(k, spectrumWind) * k * dk * spread;
 
       lambda[w] = lam;
       raw[w] = Math.sqrt(Math.max(energy, 1e-12));

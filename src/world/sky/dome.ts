@@ -115,7 +115,13 @@ float ironBoundaryTau(vec3 dir) {
 const DOME_FRAGMENT = /* glsl */ `
   vec3 dir = normalize(vDirection);
 
-  vec3 sky = ironSkyViewLut(uSkyViewLut, dir, uSkySunDirection, uSkySunElevationDeg, uSkySunChroma);
+  // Clamped AT THE SOURCE, not only where it is composited. The re-applied Mie
+  // aureole reaches a few hundred thousand cd/m² inside a degree of the sun and
+  // every later expression that touches it then has to survive an fp16
+  // intermediate. See the ceiling note below the cloud block for the failure.
+  vec3 sky = min(
+    ironSkyViewLut(uSkyViewLut, dir, uSkySunDirection, uSkySunElevationDeg, uSkySunChroma),
+    vec3(6.0e4));
 
   // ---- sun disc ---------------------------------------------------------
   // 0.265° angular RADIUS (LOOK_SPEC §2.2 gives 0.53° diameter). The edge is

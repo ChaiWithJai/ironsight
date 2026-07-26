@@ -139,6 +139,113 @@ const RULES = [
   },
 ];
 
+/**
+ * GLSL ES 3.00 has NO implicit int->float conversion, and JavaScript stringifies
+ * a whole-valued number without its decimal point. So:
+ *
+ *     const GRADE_SAT_BOOST = 3.0;          // JS: a float
+ *     `float b = 1.0 + ${GRADE_SAT_BOOST} * vib;`   // emits "1.0 + 3 * vib"
+ *
+ * ...which fails to compile with "no operation '*' exists that takes a left-hand
+ * operand of type 'const int'". The pass then never links, its draw is silently
+ * dropped, and every frame comes out unexposed — a whole-repo outage produced by
+ * a value that looks like a float in every editor.
+ *
+ * It is also a LATENT trap: the constant above is safe at 1.42 and breaks the
+ * moment someone tunes it to 2.0. Grading constants get retuned constantly.
+ *
+ * This rule resolves each file's own numeric `const` declarations and flags any
+ * that are interpolated bare into a GLSL literal while holding a whole value.
+ * Route them through `.toFixed(n)`.
+ */
+function checkGlslNumericLiterals(rel, raw) {
+  const out = [];
+  // Whole-valued numeric consts declared in this file.
+  const whole = new Map();
+  for (const m of raw.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*number\s*)?=\s*(-?\d+(?:\.\d+)?)\s*[;,\n]/g)) {
+    const v = Number(m[2]);
+    if (Number.isFinite(v) && Number.isInteger(v)) whole.set(m[1], v);
+  }
+
+  // Walk GLSL template literals only; interpolation elsewhere is ordinary JS.
+  const lines = raw.split('\n');
+  let inGlsl = false;
+  lines.forEach((line, i) => {
+    if (!inGlsl) {
+      // The opener line carries the literal's own backtick; never inspect it.
+      if (/\/\*\s*glsl\s*\*\/\s*`/.test(line)) inGlsl = true;
+      return;
+    }
+    if (/^\s*`\s*[;,)]?\s*$/.test(line)) {
+      // Likewise the closer.
+      inGlsl = false;
+      return;
+    }
+
+    // An UNESCAPED BACKTICK inside a GLSL literal silently terminates the
+    // template string, after which the rest of the shader is parsed as
+    // TypeScript. It has bitten this repo three times, always the same way:
+    // someone writes a GLSL COMMENT quoting an expression in prose —
+    //     // The previous form was `1 - clamp(F1 * 1.9, 0, 1)`.
+    // — and the file stops compiling somewhere far below, with an error that
+    // points at the prose rather than at the quote. Escape them: \\`.
+    //
+    // Scoped to comment lines ONLY, and deliberately so. Backticks in GLSL CODE
+    // are almost always a nested template literal inside a `${...}` (a ternary
+    // choosing between two shader bodies, say), which is legitimate and which a
+    // line-based scanner cannot tell from the real thing without a parser.
+    // Every real instance of this bug has been prose. A checker that cries wolf
+    // gets switched off, so this one only speaks when it is sure.
+    const commentAt = line.indexOf('//');
+    if (commentAt >= 0 && /(^|[^\\])`/.test(line.slice(commentAt))) {
+      out.push({
+        rule: 'glsl-unescaped-backtick',
+        file: `src/${rel}`,
+        line: i + 1,
+        text: line.trim().slice(0, 120),
+        message:
+          'Unescaped ` inside a GLSL template literal terminates the string and the rest of the ' +
+          'shader is parsed as TypeScript. Escape it as \\` (common in prose quoting an expression).',
+      });
+    }
+    for (const m of line.matchAll(/\$\{([^}]+)\}/g)) {
+      const expr = m[1].trim();
+      if (/toFixed|toPrecision|glslFloat|glslInt|\.join|String\(/.test(expr)) continue;
+      // An array SIZE or SUBSCRIPT must be an integer — `ironVec[${V_ATLAS}]`,
+      // `mat4 m[${COUNT}]`, and `ironMatrix[${M_CASCADE0} + cascade]` are all
+      // correct as ints and are the overwhelming majority of legitimate
+      // interpolation. Only flag values landing in float arithmetic.
+      //
+      // Adjacency is not enough (`[${A} + i]` has an operand between the value
+      // and the closing bracket), so track unclosed subscript depth instead.
+      const before = line.slice(0, m.index);
+      let depth = 0;
+      for (const ch of before) {
+        if (ch === '[') depth++;
+        else if (ch === ']') depth--;
+      }
+      if (depth > 0) continue;
+      // Preprocessor and layout qualifiers are integer contexts too.
+      if (/^\s*#(define|if|elif)\b/.test(line) || /location\s*=\s*$/.test(before)) continue;
+      // A bare whole-valued constant, or a bare whole-number literal.
+      const bare = whole.has(expr) ? `${expr} = ${whole.get(expr)}` : null;
+      const lit = /^-?\d+$/.test(expr) ? `literal ${expr}` : null;
+      if (bare || lit) {
+        out.push({
+          rule: 'glsl-int-literal',
+          file: `src/${rel}`,
+          line: i + 1,
+          text: line.trim().slice(0, 120),
+          message:
+            `\${${expr}} emits an INT into GLSL (${bare ?? lit}); GLSL ES 3.00 has no implicit ` +
+            `int->float conversion, so the shader will fail to compile. Use \${${expr}.toFixed(3)}.`,
+        });
+      }
+    }
+  });
+  return out;
+}
+
 /** Lines that are pure comment or inside a block comment are exempt. */
 function stripComments(source) {
   return source
@@ -185,6 +292,8 @@ for (const abs of files) {
       }
     });
   }
+
+  violations.push(...checkGlslNumericLiterals(rel, raw));
 
   // ---- cross-lane imports -------------------------------------------------
   const mine = laneOf(rel);

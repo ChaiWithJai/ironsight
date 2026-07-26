@@ -88,3 +88,22 @@ registerShot({
     ctx.poseCamera([250, eyeAt(250, 20), 20], [-100, 1.0, 40], 72);
   },
 });
+
+registerShot({
+  name: 'terrain_nearfield',
+  description:
+    'Eye-height open ground on the inland terrace, pitched 7° down so the sand runs continuously from 1.8 m to the horizon — the framing every gameplay frame actually has, and therefore the only honest test for texture repeat, for a lattice in the procedural relief, and for whether the surface gains micro detail or loses it as it approaches the lens.',
+  frames: 32,
+  setup(ctx) {
+    ctx.seed(0x7e47);
+    ctx.setTimeOfDay(17.4);
+    ctx.setWeather(0, { wind: 0.4 });
+    ctx.setOverlays({ viewmodel: false, hud: false });
+    // 7° of pitch, not 30°: LOOK_SPEC §7.2 is explicit that tilting the camera
+    // down to show off the ground is the demo-camera tell. This is a player's
+    // own eyeline, which is also the worst case — the near field fills the
+    // bottom third of the frame at grazing incidence under an 11° sun, where a
+    // 0.29 m lattice in the relief is ~55 px across and impossible to miss.
+    ctx.poseCamera([150, eyeAt(150, 58), 58], [120, eyeAt(150, 58) - 6, 98], 72);
+  },
+});

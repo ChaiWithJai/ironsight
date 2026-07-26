@@ -360,6 +360,21 @@ vec2 ironOcclusion() {
   vec2 ao = texture2D( ironAoTex, uv ).rg;
   return mix( vec2( 1.0 ), ao, ironVec[${V_SCREEN}].z );
 }
+
+/**
+ * The SUN's screen-space contact occlusion (see gtao.ts), in B of the same
+ * buffer. It multiplies the cascade rather than the ambient, because it is not
+ * an ambient term at all: it is the half metre of the sun's own shadow that a
+ * 1.5 cm shadow texel filtered through a multi-tap PCSS kernel cannot hold.
+ * Applying occlusion to direct light is normally the "dirty grey shadow"
+ * mistake LOOK_SPEC §2.5 names; this is the one case where it is correct,
+ * because the quantity really is sun visibility and not sky visibility.
+ */
+float ironContactSun() {
+  if ( ironVec[${V_SCREEN}].z < 0.001 ) return 1.0;
+  vec2 uv = gl_FragCoord.xy * ironVec[${V_SCREEN}].xy;
+  return mix( 1.0, texture2D( ironAoTex, uv ).b, ironVec[${V_SCREEN}].z );
+}
 // ------------------------------------------------------------ /IRONSIGHT
 `;
 }
@@ -479,7 +494,8 @@ export function installShadingModel(quality: Readonly<QualitySettings>): void {
 		{
 			vec3 ironWp = ironWorldPos( geometryPosition );
 			vec3 ironWn = normalize( ironWorldDir( geometryNormal ) );
-			directLight.color *= ironSunShadow( ironWp, ironWn, -geometryPosition.z, dot( ironWn, ironVec[${V_SUN}].xyz ) );
+			directLight.color *= ironSunShadow( ironWp, ironWn, -geometryPosition.z, dot( ironWn, ironVec[${V_SUN}].xyz ) )
+				* ironContactSun();
 		}
 		#else
 ${dirShadow}		#endif

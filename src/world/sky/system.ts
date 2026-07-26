@@ -153,13 +153,24 @@ class IronSky implements SkyService, RenderSystem {
     // than it looks: the coverage test bails after ONE texture fetch outside
     // cloud, which is most of the sky.
     //
-    // 0.68 rather than the 0.8 the first pass at this used: at 38 samples
-    // `sky_golden` timed out in-page under the software rasteriser, which is a
-    // hard capture failure and therefore a hard budget. 32 holds the silhouette
-    // and costs about a fifth less, because the adaptive stride inside the
-    // medium means the samples that carry a light march are the expensive ones.
+    // ROUND 3: the number went up again, and it is affordable because the march
+    // no longer spends it on empty sky. `ironCloudMarch` now runs a 22-tap
+    // occupancy scan first and only then integrates, so a ray with no cloud in
+    // it — two thirds of the sky at §3.1's coverage — costs 22 cheap fetches
+    // instead of 32 full density evaluations, and a ray that does hit cloud
+    // spends its whole budget inside the cloud rather than reaching it — the
+    // loop counts only samples that FOUND MEDIUM, so an empty one is free.
+    //
+    // The multiplier is nonetheless DOWN from 0.68, to 0.60, and the reason is a
+    // hard limit rather than a taste: `tools/capture.mjs` gives a shot 240 s
+    // in-page and `sky_clouds` is a full-frame deck under a software rasteriser.
+    // At 0.78 it blew that budget and the capture failed outright. What buys the
+    // quality back at 0.60 is that every one of those samples now lands inside
+    // cloud instead of a third of them landing in front of it, and that a lit
+    // sample costs nine texture fetches rather than thirteen (see the band limit
+    // on the shape octave in clouds.ts).
     const cloudSteps = quality.clouds.enabled
-      ? Math.min(40, Math.max(18, Math.round(quality.clouds.steps * 0.68)))
+      ? Math.min(34, Math.max(18, Math.round(quality.clouds.steps * 0.60)))
       : 0;
     createDome(scene, ctx.services.materials, this.domeUniforms, cloudSteps);
 
@@ -307,7 +318,7 @@ class IronSky implements SkyService, RenderSystem {
     // `fogDensity` is the shot-facing knob; 0.0032 is the roster default and
     // must map to a σ multiplier of 1.0 so the fitted §3.2 curve is unmodified.
     //
-    // THE FLOOR IS 0.60 AND IT IS A LANE GUARANTEE, NOT A CLAMP FOR SAFETY.
+    // THE FLOOR IS 0.85 AND IT IS A LANE GUARANTEE, NOT A CLAMP FOR SAFETY.
     // AAA_RUBRIC's first calibration note is "there is no clear air, ever", and
     // round 1 found a frame with none: `light_cascades` sets fog 0.0012, which
     // used to map to σ × 0.375, and the review returned "the street from the
@@ -315,10 +326,17 @@ class IronSky implements SkyService, RenderSystem {
     // the rubric ranks this defect #1 because it does more work than anything
     // else, and the frame has zero of it." A lane dialling its own shot's haze
     // down is legitimate; a lane dialling it to nothing is not, and the medium's
-    // owner is the right place to hold that line — 0.60 still lets a shot be
-    // visibly clearer than the roster default while leaving 38 % blend at 400 m
-    // and 21 % at 60 m. The ceiling stops the reverse mistake.
-    u.uSkySigma.value = Math.min(2.4, Math.max(0.6, this.mutable.fogDensity / 0.0032));
+    // owner is the right place to hold that line. The ceiling stops the reverse
+    // mistake.
+    //
+    // ROUND 3 RAISED IT FROM 0.60 TO 0.85. Round 2 scored `light_cascades` — the
+    // shot that sets 0.0012 and therefore sits on this floor — at severity 8 for
+    // "zero depth separation … foreground, midground and background are not
+    // separable by value or saturation alone". At 0.60 that shot's 150 m
+    // buildings were 26 % blended; at 0.85 with the §3.2 fit restored they are
+    // 44 %, and its 400 m hill goes from 39 % to 64 %. A shot may still be a
+    // third clearer than the roster default, which is all the knob was ever for.
+    u.uSkySigma.value = Math.min(2.4, Math.max(0.85, this.mutable.fogDensity / 0.0032));
     // Coverage 0.25–0.35 for GOLDEN (§3.1), rising toward full cover with the
     // overcast term so `setWeather` genuinely changes the sky.
     u.uSkyCloudCoverage.value = Math.min(0.92, 0.3 + this.mutable.overcast * 0.55);

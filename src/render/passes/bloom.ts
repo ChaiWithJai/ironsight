@@ -31,13 +31,25 @@ import {
   type RenderGraph,
   type RenderPass,
 } from '@/engine/types';
-import { EXPOSURE_PRESET_EV, GLSL_COLOR_COMMON, exposureScaleFromEv } from '@/render/color';
+import {
+  BLOOM_THRESHOLD_LINEAR,
+  EXPOSURE_PRESET_EV,
+  GLSL_COLOR_COMMON,
+  exposureScaleFromEv,
+} from '@/render/color';
 import { ut, uf, uv2 } from '@/render/fullscreen';
 import { BLOOM_MIP_WEIGHTS, bloomLevels, bloomMipId, bloomUpId } from '@/render/targets';
 import type { PostChainState } from '@/render/passes/chain';
 
-/** Scene-linear, post-exposure. ≈ display 0.90 before the grade. LOOK_SPEC §6.1. */
-const THRESHOLD = 1.05;
+/**
+ * Scene-linear, post-exposure. LOOK_SPEC §6.1 states this threshold twice — as
+ * "1.05" and as "≈ display 0.90" — and the two only agree under a curve whose
+ * white point is scene-linear 1. Ours is AgX, whose white point is 16.3, so the
+ * literal number thresholded the SKY into the pyramid and produced the global
+ * veil §6.1 exists to forbid. It is therefore derived from the curve, in
+ * `color.ts`, where the curve lives.
+ */
+const THRESHOLD = BLOOM_THRESHOLD_LINEAR;
 /** Soft knee, 0.55 EV wide, centred on the threshold. */
 const KNEE = THRESHOLD * (Math.pow(2, 0.275) - Math.pow(2, -0.275)) * 0.5;
 /**

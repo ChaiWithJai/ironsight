@@ -365,12 +365,30 @@ export class ShadowCascades {
     const debug = scene.group(SceneGroup.Debug);
     const debugVisible = debug.visible;
     debug.visible = false;
+    // AND THE SKY GROUP, WHICH IS THE SUBTLE ONE. `sky.dome` is a 2 m box on
+    // `RenderLayer.WorldOpaque` whose own vertex shader forces z = w so it sits
+    // at infinity; under an override material that shader is gone and what
+    // rasterises instead is a literal 2 m cube at the WORLD ORIGIN, one metre
+    // from the light plane, casting a hard cube of shadow onto whatever the
+    // origin happens to sit on. RCORE's `drawLayers` has a `hideGroups` option
+    // for exactly this hazard and documents it; `drawScene` does not, so the
+    // suppression has to happen here.
+    const sky = scene.group(SceneGroup.Sky);
+    const skyVisible = sky.visible;
+    sky.visible = false;
+    // A `Scene.background` overrides the clear colour we just set — three's
+    // background renderer calls `setClear` with it — and the atlas reads any
+    // non-zero clear as "occluder at that many metres". Suspend it.
+    const previousBackground = scene.root.background;
+    scene.root.background = null;
     scene.root.overrideMaterial = this.depthMaterial;
     // `clear` is true for every tile: the scissor rect confines it, so each tile
     // is cleared exactly once per frame it is re-rendered and the tiles that are
     // amortised out keep last frame's content.
     graph.drawScene(ctx, scene.root, cam, this.target, true);
     debug.visible = debugVisible;
+    sky.visible = skyVisible;
+    scene.root.background = previousBackground;
     void first;
   }
 

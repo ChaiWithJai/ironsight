@@ -280,11 +280,50 @@ const CLOUD_NOISE_FS = /* glsl */ `
   // the whole cloud deck.
   float weather = ironFbm2Tiled(vUv * 3.0, 3, 3, 0.55, 11u) * 0.5 + 0.5;
   float shape = ironFbm2Tiled(vUv * 5.0, 5, 5, 0.52, 173u) * 0.5 + 0.5;
-  float worley = 1.0 - clamp(ironWorley2Tiled(vUv * 9.0, 9, 311u) * 1.9, 0.0, 1.0);
+  // ── THE HARD CLAMP WAS A VORONOI-SHAPED CREASE, AND IT PRINTED ─────────────
+  // The previous form was \`1 - clamp(F1 * 1.9, 0, 1)\`. F1 is the distance to
+  // the nearest feature point, so the set where that clamp engages —
+  // F1 = 0.526 — is a CLOSED LOOP around every feature point, and a clamp is a
+  // gradient discontinuity. The cloud march reads this channel through
+  // \`d -= erode * 0.46 * (1 - smoothstep(...))\`, which amplifies a gradient
+  // discontinuity into a visible line, so once round 3's march stopped
+  // scrambling the field with per-pixel schedule noise the deck came back with
+  // a network of thin bright closed loops running through every cloud body —
+  // a few units high, unmistakable at 1:1, and shaped exactly like a Voronoi
+  // diagram. (Round 2 saw the same defect one layer up and treated it by
+  // halving the channel's weight; that reduced the amplitude without removing
+  // the crease.)
+  //
+  // A Hermite ramp has zero derivative at BOTH ends, so there is no crease left
+  // to amplify. The knee is unchanged at 0.526, so the cauliflower keeps the
+  // silhouette scale it was tuned for.
+  float wd = clamp(ironWorley2Tiled(vUv * 9.0, 9, 311u) * 1.9, 0.0, 1.0);
+  float worley = 1.0 - wd * wd * (3.0 - 2.0 * wd);
   float wisp = ironFbm2Tiled(vUv * 13.0, 13, 4, 0.5, 523u) * 0.5 + 0.5;
+  // ── THE CONTRAST STRETCH IS A SIGMOID, NOT A CLAMPED LINE, AND THAT IS THE
+  //    WHOLE OF ROUND 3'S LAST CLOUD ARTEFACT ──────────────────────────────
+  //
   // Contrast the weather field so coverage is a threshold on real structure
-  // rather than on a mush centred at 0.5.
-  weather = clamp((weather - 0.5) * 1.7 + 0.5, 0.0, 1.0);
+  // rather than on a mush centred at 0.5. The gain is unchanged at 1.7.
+  //
+  // What changed is the saturation. "clamp((w-0.5)*1.7+0.5, 0, 1)" reaches its
+  // upper knee at w = 0.794, and the coverage threshold that reads this channel
+  // is "smoothstep(1-1.5c, 1-0.42c, w)" — at GOLDEN's c = 0.30 that is
+  // smoothstep(0.55, 0.874, ·). The knee therefore lands INSIDE the ramp, at the
+  // point where the ramp's slope is near its maximum, and a clamp is a gradient
+  // discontinuity. An fBm's level sets are closed loops, so the deck came out
+  // with a network of thin bright closed contours running through every cloud
+  // body, a couple of dozen levels high and unmistakable at 1:1. Three separate
+  // suspects in the march were eliminated before the arithmetic pointed here:
+  // the artefact is invariant under step count, under the integration schedule
+  // and under the erosion octave, because it is baked into the texture.
+  //
+  // The algebraic sigmoid e/sqrt(a²+e²) has the same slope at the centre — a is
+  // set to 0.5 so f'(0) = 1 and the 1.7 gain carries through unchanged — and it
+  // is C∞ everywhere, with no knee to differentiate. It also never reaches 0 or
+  // 1, so the RGBA8 store cannot reintroduce a clamp of its own.
+  float we = (weather - 0.5) * 1.7;
+  weather = 0.5 + 0.5 * we / sqrt(0.25 + we * we);
   outColor = vec4(weather, shape, worley, wisp);
 `;
 
@@ -368,7 +407,9 @@ export function declareSkyBakes(assets: AssetRegistry, quality: Readonly<Quality
 
   const cloudNoise = assets.define<THREE.Texture>('sky.noise.cloud', AssetKind.Texture, {
     kind: BakeKind.GpuTexture,
-    version: 1,
+    // 4: RGBA8 -> RGBA16F, Worley clamp -> Hermite ramp, weather contrast clamp
+    // -> algebraic sigmoid. All three printed contours into the deck.
+    version: 4,
     cost: 6,
     run: (ctx) => {
       // 512 requested rather than 256. The weather channel is read over an
@@ -381,7 +422,25 @@ export function declareSkyBakes(assets: AssetRegistry, quality: Readonly<Quality
         name: 'sky.noise.cloud',
         width: size,
         height: size,
-        format: RTFormat.RGBA8,
+        // ── HALF-FLOAT, AND THE REASON IS AN AMPLIFICATION FACTOR OF FIFTY ────
+        // The weather channel is read through
+        // `smoothstep(1 - 1.5c, 1 - 0.42c, w)`, whose slope at GOLDEN's
+        // c = 0.30 is 4.6 per unit, and the density that comes out of it is
+        // then integrated along a ray to an optical depth of ~5. One RGBA8 LSB
+        // is 1/255 of the channel, so it moves cov by 1.8 % of full scale and
+        // the ray's total τ by ~0.2 — an 18 % swing in transmittance through
+        // any semi-transparent part of the deck. The level sets of an fBm are
+        // closed loops, so that quantisation staircase printed as a network of
+        // thin bright closed contours running through every cloud body, a
+        // couple of dozen levels high at 1:1, and INVARIANT under every change
+        // to the march: step count, schedule, budget accounting and erosion
+        // octave were each eliminated in turn before the arithmetic pointed
+        // here. 16F carries ~11 bits of mantissa over this range, which puts
+        // the same staircase four hundred times below the noise floor.
+        //
+        // The cost is 2 MB at 512² instead of 1 MB, on a texture that is baked
+        // once and read with one fetch per march sample.
+        format: RTFormat.RGBA16F,
         wrap: 'repeat',
         filter: 'linear',
         mips: MipMode.None,

@@ -33,6 +33,7 @@ import {
   picatinny,
   place,
   polyShape,
+  ringZ,
   roundedRect,
   slattedShell,
   stud,
@@ -313,33 +314,143 @@ export function buildWeaponModel(id: WeaponId, rng: Rng): WeaponModel {
       add('reticle', 'reticle', 'body', place(bevelBox(0.0011, 0.0075, 0.0006, 0.0002), [0, sightY, opticZ + 0.0498]));
       add('reticleH', 'reticle', 'body', place(bevelBox(0.0075, 0.0011, 0.0006, 0.0002), [0, sightY, opticZ + 0.0498]));
     } else {
-      // A holographic/reflex sight: an open square housing with a canted window.
+      /* A REFLEX SIGHT, AND IN ROUND 3 IT BECAME A TUBE.
+       *
+       * The round-2 critique of `weapon_ads` was "the optic is a card, not a
+       * sight: a rectangle with an identical corner radius on all four corners,
+       * no lens ring, no tube vignette". It is a fair reading of what was there,
+       * because what an ADS frame actually shows is the APERTURE — 15 % of the
+       * frame's height, dead centre, and the only thing the eye is looking at.
+       * A square aperture is not a thing that exists on any optic ever built:
+       * every combiner, tube and iron aperture in `reference/gameplay/` is a
+       * CIRCLE, because the element inside it is ground on a lathe.
+       *
+       * Two intermediate rounds are worth recording because they are the reason
+       * this is now one lathed part instead of five boxes:
+       *
+       *   3b  Four flat walls with a circular shroud dropped inside them. The
+       *       inside of the downsun WALL is a flat plane whose normal points
+       *       across the housing and straight at the sun, and the viewmodel
+       *       casts no shadow onto itself, so the key lit the inside of the hood
+       *       into a blown pale wedge where a real sight has its darkest cavity.
+       *   3c  Corner blocks to fill the void between circle and square. They
+       *       reached inside the bore and read as a black CROSS over the sight
+       *       picture — strictly worse than the wedge.
+       *
+       * A tube has neither failure available to it. There is no flat interior
+       * plane for the sun to find (the bore curves away from every direction
+       * light can arrive from, so it grades from a thin lit crescent to black,
+       * which is exactly what the inside of an optic looks like) and there is no
+       * void to fill. It is also the housing in `reference/gameplay/bf6_gp_032`,
+       * which is the closest frame in the corpus to this shot.
+       */
       const hood = s.optic === 'holo' ? 0.049 : 0.036;
-      const wallT = 0.0042;
-      const inner = hood - wallT * 2;
-      add('opticTop', 'receiver', 'body', place(bevelBox(hood, wallT, 0.068, 0.0006), [0, sightY + inner * 0.5 + wallT * 0.5, opticZ]));
-      add('opticL', 'receiver', 'body', place(bevelBox(wallT, inner, 0.068, 0.0006), [-inner * 0.5 - wallT * 0.5, sightY, opticZ]));
-      add('opticR', 'receiver', 'body', place(bevelBox(wallT, inner, 0.068, 0.0006), [inner * 0.5 + wallT * 0.5, sightY, opticZ]));
+      // 3.4 mm of wall: enough that the rim reads as a machined part at ADS
+      // scale and not so much that the bore closes down into a peephole.
+      const rOut = hood * 0.5;
+      const rIn = rOut - 0.0034;
+      const tubeLen = 0.062;
+      const hoodTop = sightY + rOut;
+      const hoodSide = rOut;
+      add('opticTube', 'receiver', 'body', place(ringZ(rIn, rOut, tubeLen, 26), [0, sightY, opticZ]));
+
+      /* The rims, proud of the tube by a millimetre at each end, and they are
+       * 'steel' rather than 'receiver' deliberately. A bezel is a turned part,
+       * not a sprayed one, so it is bare phosphated metal — base 0.118 linear
+       * against the cerakote's 0.055 and `metalness` 1.0 against 0.10. That is a
+       * 2.1x albedo step and a coloured specular landing exactly where the eye
+       * is already looking, which is what makes the objective ring the brightest
+       * thing on the weapon in `bf6_gp_032`. A bezel in the housing's own colour
+       * is a bezel nobody sees. The rear rim is a little tighter than the front:
+       * that difference IS the eye box.
+       */
+      add(
+        'opticBezelF',
+        'steel',
+        'body',
+        place(ringZ(rIn, rOut + 0.0011, 0.0038, 26), [0, sightY, opticZ - tubeLen * 0.5 + 0.0019]),
+      );
+      add(
+        'opticBezelR',
+        'steel',
+        'body',
+        place(ringZ(rIn + 0.0016, rOut + 0.0009, 0.0032, 26), [0, sightY, opticZ + tubeLen * 0.5 - 0.0016]),
+      );
+      // A sunshade collar past the objective rim: 12 mm of larger-diameter tube
+      // that breaks the silhouette's constant width and shades the front element
+      // the way every shipped optic's flip-cap or killflash does.
+      add(
+        'opticShade',
+        'receiver',
+        'body',
+        place(ringZ(rOut + 0.0011, rOut + 0.0036, 0.0130, 26), [0, sightY, opticZ - tubeLen * 0.5 - 0.0058]),
+      );
+
+      /* Elevation and windage turrets. Two knurled cylinders on perpendicular
+       * axes, and they are the single most recognisable "this is a sight and not
+       * a block" cue at a glance — every LPVO, red dot and holo in the corpus has
+       * them and none of them are subtle. Each is a shaft plus a proud cap, so
+       * the silhouette has a step in it rather than being one smooth peg. */
+      add('opticTurretE', 'receiver', 'body', place(stud(0.0072, 0.0100), [0, hoodTop + 0.0050, opticZ + 0.011], [Math.PI * 0.5, 0, 0]));
+      add('opticTurretECap', 'steel', 'body', place(stud(0.0090, 0.0034), [0, hoodTop + 0.0102, opticZ + 0.011], [Math.PI * 0.5, 0, 0]));
+      add('opticTurretW', 'receiver', 'body', place(stud(0.0066, 0.0092), [hoodSide + 0.0046, sightY, opticZ + 0.011], [0, Math.PI * 0.5, 0]));
+      add('opticTurretWCap', 'steel', 'body', place(stud(0.0082, 0.0030), [hoodSide + 0.0104, sightY, opticZ + 0.011], [0, Math.PI * 0.5, 0]));
+      // Battery compartment on the support side — the asymmetry that stops the
+      // housing reading as a mirrored extrusion.
+      add('opticBattery', 'receiver', 'body', place(stud(0.0088, 0.0072), [-(hoodSide + 0.0036), sightY - 0.0045, opticZ + 0.003], [0, Math.PI * 0.5, 0]));
+
+      // A flat boss along the top of the tube: the machined pad an optic's
+      // turret housing and its markings actually sit on, and the one thing that
+      // keeps the silhouette from being a perfect cylinder. It is deliberately
+      // shorter than the tube so the round profile still reads at both ends.
+      add('opticBoss', 'receiver', 'body', place(bevelBox(0.0135, 0.0052, 0.030, 0.0005), [0, hoodTop - 0.0012, opticZ + 0.010]));
+
+      /* THE MOUNT. A sight floating above a rail on a featureless pillar is the
+       * other half of the "card" read: real optics are clamped, and the clamp is
+       * a visibly separate assembly with a throw lever hanging off one side. */
       add(
         'opticBase',
         'receiver',
         'body',
-        place(bevelBox(hood * 0.86, sightY - inner * 0.5 - receiverTop - 0.004, 0.052, 0.0008), [
+        place(bevelBox(hood * 0.66, sightY - rIn - receiverTop - 0.004, 0.048, 0.0008), [
           0,
-          (receiverTop + sightY - inner * 0.5) * 0.5,
+          (receiverTop + sightY - rIn) * 0.5,
           opticZ + 0.006,
         ]),
       );
+      const clampY = receiverTop + 0.0072;
+      add('opticClamp', 'receiver', 'body', place(bevelBox(hood * 0.94, 0.0128, 0.030, 0.0007), [0, clampY, opticZ + 0.008]));
+      // The QD throw lever: a flat paddle lying along the support side, rotated
+      // a few degrees off the receiver's axes so it catches the key separately
+      // from every other face on the weapon.
+      add(
+        'opticLever',
+        'steel',
+        'body',
+        place(bevelBox(0.0038, 0.0125, 0.0270, 0.0005), [-(hood * 0.47 + 0.0022), clampY - 0.0012, opticZ + 0.008], [0, 0.06, 0.20]),
+      );
+      add('opticLeverPin', 'steel', 'body', place(stud(0.0030, 0.0075), [-(hood * 0.47), clampY + 0.0030, opticZ + 0.019], [0, Math.PI * 0.5, 0]));
+      add('opticClampNut', 'steel', 'body', place(stud(0.0036, 0.0055), [hood * 0.47 + 0.0018, clampY, opticZ + 0.008], [0, Math.PI * 0.5, 0]));
       // The combiner: a shallow spherical section, leaning back ~8° so the
       // reflection is thrown down and away from the eye instead of straight
       // into it. Curved, not flat — see `domePane`; a flat pane has one normal
       // and therefore no Fresnel gradient, which is what made the aperture read
       // as an opaque plate rather than as glass.
+      //
+      // SIZED TO THE SHROUD'S BORE, not to the square hood. A pane whose corners
+      // reach past the tube's inner wall is a transparent, depth-write-off
+      // surface buried inside opaque geometry: it still composites wherever it
+      // happens to sort in front, so it lays a faint glassy sheen across the
+      // inside of the housing. 1.40 x the bore RADIUS puts the pane's
+      // half-diagonal at exactly that radius, so the combiner fills the
+      // circular aperture and stops. That also makes `opticLensChunk`'s radial
+      // eye-box term land its rim darkening exactly on the bezel rather than
+      // somewhere out in the corners nobody can see.
       add(
         'window',
         'glass',
         'body',
-        place(domePane(inner, inner, 0.0026, 12), [0, sightY, opticZ - 0.028], [-0.14, 0, 0]),
+        place(domePane(rIn * 1.40, rIn * 1.40, 0.0012, 12), [0, sightY, opticZ - 0.026], [-0.14, 0, 0]),
       );
       // In FRONT of the combiner's apex (which now bulges 2.6 mm toward the
       // eye), so the dot composites over the glass rather than under it.
@@ -351,7 +462,7 @@ export function buildWeaponModel(id: WeaponId, rng: Rng): WeaponModel {
         'body',
         place(normaliseTorus(0.0092, 0.00070), [0, sightY, reticleZ]),
       );
-      add('emitter', 'receiver', 'body', place(bevelBox(0.012, 0.010, 0.014, 0.0005), [0, sightY - inner * 0.5 + 0.004, opticZ + 0.028]));
+      add('emitter', 'receiver', 'body', place(bevelBox(0.011, 0.009, 0.013, 0.0005), [0, sightY - rIn + 0.0045, opticZ + 0.024]));
     }
   }
 
@@ -642,14 +753,29 @@ export function buildWeaponModel(id: WeaponId, rng: Rng): WeaponModel {
     magazine: new THREE.Vector3(0, magTopY, magZ),
     charging: new THREE.Vector3(0, 0, rearZ),
     trigger: new THREE.Vector3(0, receiverBottom - 0.004, gripZ - 0.030),
-    // The support hand sits slightly to the SUPPORT side of the bore and a
-    // couple of centimetres back from the handguard's front lip, not squarely
-    // underneath it. Two reasons, and the second is the one that matters: a
-    // thumb-forward grip really does put the palm on the corner of the rail
-    // rather than the bottom of it — and a hand centred directly under the
-    // handguard is completely occluded BY the handguard from an eye that sits
-    // above the bore, so the viewmodel ends up with no visible hands at all.
-    handL: new THREE.Vector3(-0.013, -(s.handguardRadius + 0.034), s.supportGrip + 0.022),
+    // The support hand sits to the SUPPORT side of the bore and a couple of
+    // centimetres back from the handguard's front lip, not squarely underneath
+    // it. Two reasons, and the second is the one that matters: a thumb-forward
+    // grip really does put the palm on the corner of the rail rather than the
+    // bottom of it — and a hand centred directly under the handguard is
+    // completely occluded BY the handguard from an eye that sits above the bore,
+    // so the viewmodel ends up with no visible hands at all.
+    //
+    // ROUND 3 MOVED IT 19 mm FURTHER OUTBOARD, and the number is solved rather
+    // than nudged. At full ADS the eye is on the sight axis, so the handguard
+    // presents its silhouette as a disc of radius `handguardRadius + shell`
+    // = 33.5 mm about the bore. The glove is 52 mm across the palm, so a hand
+    // whose centre is 13 mm off the bore has its outermost point at 39 mm and
+    // clears the handguard by SIX millimetres — three pixels at ADS scale, i.e.
+    // nothing, which is why round 2 recorded "no hands, forearms or sleeves
+    // anywhere in frame, which no shipped FPS ADS frame omits". At 32 mm out the
+    // knuckles clear by 25 mm and the glove reads at the lower left of the
+    // weapon column exactly where `reference/gameplay/bf2042_gp_000` puts it.
+    // The polar RADIUS from the bore is held at 61 mm against the old 62 — the
+    // hand has rotated 32° AROUND the handguard, it has not slid off it, so the
+    // grip is the same distance from the rail it is holding and the existing
+    // `HAND_L_EULER` still points the knuckles up and out.
+    handL: new THREE.Vector3(-0.032, -(s.handguardRadius + 0.024), s.supportGrip + 0.022),
     handR: new THREE.Vector3(0.004, receiverBottom - 0.048, gripZ - 0.004),
   };
 

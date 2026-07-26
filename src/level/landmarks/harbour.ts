@@ -18,8 +18,8 @@ import * as THREE from 'three';
 import { CollisionGroup, SurfaceId, type Rng } from '@/engine/types';
 import type { LevelBuild } from '@/level/build';
 import { railing, stairs } from '@/level/kit/detail';
-import { blockChip, groundSkirt, rock, rubblePile } from '@/level/kit/ground';
-import { barrel, bollard, container, crateStack, sandbagWall, tyreStack } from '@/level/dressing';
+import { blockChip, groundSkirt, rock, spillTongues } from '@/level/kit/ground';
+import { barrel, bollard, container, crateStack, palletStack, ropeCoil, sandbagWall, tyreStack } from '@/level/dressing';
 import { BREAKWATER, CRANES, QUAY } from '@/level/layout';
 import type { MatKey } from '@/level/materials';
 
@@ -262,7 +262,10 @@ export function buildQuay(b: LevelBuild, ground: Ground, rng: Rng): void {
       const px = a.x + (c.x - a.x) * t - nx * rng.range(0.6, 3.4);
       const pz = a.z + (c.z - a.z) * t - nz * rng.range(0.6, 3.4);
       const s = rng.range(0.5, 1.3);
-      rock(b, 'sandstone', px, rng.range(-1.2, 0.9), pz, s, s * 0.8, s * 1.1, rng, 5);
+      // Weed-dark broken stone, not the town's coursed ashlar: `sandstone`'s
+      // texture set is masonry and a masonry boulder in the water is the read
+      // round 2 objected to on the freighter's reef.
+      rock(b, rng.bool(0.72) ? 'rubble' : 'sandstone', px, rng.range(-1.2, 0.55), pz, s, s * 0.8, s * 1.1, rng, 7);
     }
   }
 
@@ -274,6 +277,18 @@ export function buildQuay(b: LevelBuild, ground: Ground, rng: Rng): void {
     return { x: p.x - (q.z - r.z) / len * QUAY.depth, z: p.z + (q.x - r.x) / len * QUAY.depth };
   });
   groundSkirt(b, [...inland].reverse(), ground, rng, { amount: 0.9, noScatter: false });
+  // Sand drifted the other way, out onto the concrete apron, so the apron's
+  // inland edge is not a straight material change. See `spillTongues`.
+  for (let i = 0; i < inland.length - 1; i++) {
+    const a = inland[i];
+    const c = inland[i + 1];
+    const l = Math.hypot(c.x - a.x, c.z - a.z);
+    if (l < 1) continue;
+    // Inward = back toward the quay edge, i.e. the paved side.
+    const ix = (edge[i].x - a.x) / QUAY.depth;
+    const iz = (edge[i].z - a.z) / QUAY.depth;
+    spillTongues(b, a.x, a.z, c.x, c.z, ix, iz, () => QUAY.deckY, rng, 2.4);
+  }
 }
 
 /** One ship-to-shore gantry crane. */
@@ -729,6 +744,7 @@ export function buildContainerYard(
           long,
           rng.pick(palette),
           rng,
+          k === 0,
         );
       }
     }
@@ -883,6 +899,52 @@ export function buildBreakwater(b: LevelBuild, ground: Ground, rng: Rng): void {
       b.m('concrete').boxAt(0, 1.28, 0, 0.6, 0.06, len / steps / 2, 1, 0x3f);
       b.xf.pop();
     }
+    /**
+     * DECK WEAR. With the near-field placeholder gone, the breakwater deck is
+     * the single largest surface in `level_bravo` — roughly the bottom third of
+     * the frame — and it was one flat concrete quad per 4 m station. The quay
+     * apron already carries this treatment (see `buildQuay`); the arm did not,
+     * and it is the more visible of the two.
+     *
+     * A cast-in-situ arm is poured in bays: a construction joint across it every
+     * few metres, the bays weathering to slightly different tones, sand and
+     * grit blown into the joints and banked against the parapet. All three are
+     * geometry here, because a joint that is a recessed strip catches the 11°
+     * sun as a hard shadow line and a joint that is a texture does not.
+     */
+    {
+      const jx = (p0x + p1x) / 2;
+      const jz = (p0z + p1z) / 2;
+      const jyaw = Math.atan2(p1x - p0x, p1z - p0z);
+      const jm = new THREE.Matrix4().makeTranslation(jx, deckY + 0.01, jz)
+        .multiply(new THREE.Matrix4().makeRotationY(jyaw));
+      b.xf.pushAbsolute(jm);
+      const wHalf = (w0 + w1) / 2;
+      const segHalf = len / steps / 2;
+      // Construction joint at the station's leading edge.
+      b.m('rubble').boxAt(0, -0.006, -segHalf, wHalf - 0.15, 0.01, 0.04, 1, 0x3f);
+      // One bay in three has been patched with a different mix.
+      if (rng.bool(0.34)) {
+        b.m('sandstone').setUvShift(rng.range(0, 30), rng.range(0, 30));
+        b.m('sandstone').chamferBox(
+          rng.range(-wHalf + 1.2, wHalf - 1.2), 0.004, rng.range(-segHalf, segHalf),
+          rng.range(0.5, 1.5), 0.012, rng.range(0.5, 1.4), 0.01, 0.6, rng, 0.15,
+        );
+        b.m('sandstone').clearUvShift();
+      }
+      // Grit, densest against the parapet on the seaward side.
+      for (let s2 = 0; s2 < 9; s2++) {
+        const u = rng.next();
+        const across = wHalf - (1 - Math.sqrt(u)) * wHalf * 1.5 - 0.2;
+        const along = rng.range(-segHalf, segHalf);
+        if (rng.bool(0.45)) blockChip(b, rng.bool(0.5) ? 'rubble' : 'sand', across, -0.004, along, rng.range(0.05, 0.17), rng);
+        else {
+          const s3 = rng.range(0.04, 0.12);
+          rock(b, 'sand', across, -0.002 + s3 * 0.3, along, s3, s3 * 0.4, s3 * 1.2, rng, 5);
+        }
+      }
+      b.xf.pop();
+    }
     // Armour stone tumbled along both flanks.
     for (let k = 0; k < 4; k++) {
       const t = t0 + (t1 - t0) * rng.next();
@@ -935,5 +997,85 @@ export function buildBreakwater(b: LevelBuild, ground: Ground, rng: Rng): void {
     else if (rng.bool(0.5)) barrel(b, px, deckY, pz, rng);
     else sandbagWall(b, px, deckY, pz, Math.atan2(dx, dz) + Math.PI / 2, 3.2, 4, rng, 0.4);
   }
-  rubblePile(b, root.x + dx * len * 0.42, root.z + dz * len * 0.42, deckY, 3.2, 1.4, rng);
+
+  /**
+   * THE WORKING END OF THE ARM, at 42 % of its length — and the near-field mass
+   * of `level_bravo`, which is this lane's atmosphere hero frame.
+   *
+   * What was here was `rubblePile(…, 3.2, 1.4)`, and round 2 destroyed it: *"a
+   * row of ~9 flat-shaded octahedra… the same mesh instanced with no rotation or
+   * shape variation."* The bipyramid that caused that is fixed at source in
+   * `kit/ground.ts`, but a heap of loose stone was the wrong ANSWER as well as
+   * the wrong mesh. A breakwater arm is a working surface: it carries mooring
+   * gear, dunnage and a fighting position, and every one of those has a
+   * silhouette a scatter of boulders cannot buy —
+   *
+   *   sandbag revetment   the only cover shape a player recognises at 80 m, and
+   *                       here it runs ALONG the arm so it enters the frame as a
+   *                       receding diagonal out of the corner rather than as a
+   *                       wall across the middle (the same reasoning that put
+   *                       the camera on the centreline in `shots/level.ts`);
+   *   pallet stack        a comb silhouette — air between nine timbers;
+   *   coiled hawser       non-convex everywhere, self-occluding, rim-lit round
+   *                       its whole section;
+   *   bollard + drums     hard cylindrical verticals to break the run;
+   *   armour stone        still here, but a handful spilled against the parapet
+   *                       foot rather than a pile in the middle of the deck.
+   *
+   * Everything is placed in the arm's own (along, across) frame so the cluster
+   * follows the arm if the layout moves. Local +X of a `yaw` frame maps to
+   * `(cos yaw, −sin yaw)`, so running a prop ALONG the arm needs
+   * `atan2(−dz, dx)` and running it ACROSS needs `atan2(−nz, nx)`.
+   */
+  {
+    const t = 0.42;
+    const bx = root.x + dx * len * t;
+    const bz = root.z + dz * len * t;
+    const px = (a: number, c: number): number => bx + dx * a + nx * c;
+    const pz = (a: number, c: number): number => bz + dz * a + nz * c;
+    const alongYaw = Math.atan2(-dz, dx);
+
+    /**
+     * WHICH SIDE EVERYTHING GOES ON, and why it is not symmetric.
+     *
+     * The arm's seaward parapet is on +across, and `shots/level.ts` already
+     * spends that side of the frame on it — the parapet enters the lower right
+     * as a receding diagonal and is the shot's right-hand anchor. So the gear
+     * goes on −across: the two masses then sit in opposite bottom corners with
+     * the harbour open between them, which is the composition the shot file
+     * describes, instead of a ring of props around the lens.
+     *
+     * DEPTH. At this station the eye is 1.62 m over the deck on a 38° lens, so
+     * the bottom of the frame crosses the deck at 4.7 m — anything nearer and
+     * shorter than half a metre is simply not in shot, and anything nearer than
+     * ~3.5 m and taller than a metre becomes a bright slab across the corner
+     * (which is what a crate stack at 3.3 m did on the first take of this
+     * cluster). The tall pieces therefore start at 4.5 m and the flat ones — the
+     * rope coils, which are 25 cm high — sit at 8–10 m where the deck is still
+     * inside the frame.
+     */
+    sandbagWall(b, px(0.3, -2.7), deckY, pz(0.3, -2.7), alongYaw, 5.4, 6, rng, 0.45);
+    sandbagWall(b, px(-6.0, -1.4), deckY, pz(-6.0, -1.4), alongYaw + 0.9, 3.0, 4, rng, 0.35);
+
+    crateStack(b, px(-0.6, -1.5), deckY, pz(-0.6, -1.5), rng);
+    barrel(b, px(-1.8, -0.6), deckY, pz(-1.8, -0.6), rng);
+    barrel(b, px(-2.4, -1.1), deckY, pz(-2.4, -1.1), rng, 'paint');
+    palletStack(b, px(-2.6, -2.2), deckY, pz(-2.6, -2.2), alongYaw + 0.35, rng);
+    tyreStack(b, px(-4.6, -3.0), deckY, pz(-4.6, -3.0), rng);
+
+    // Flat gear out on the open deck, where the deck is still in frame.
+    ropeCoil(b, px(-3.6, -0.2), deckY, pz(-3.6, -0.2), 0.78, rng, 3.6);
+    ropeCoil(b, px(-5.0, 1.6), deckY, pz(-5.0, 1.6), 0.55, rng, 2.8);
+    bollard(b, px(-4.0, 2.6), deckY, pz(-4.0, 2.6), rng);
+
+    // Armour stone spilled over the parapet, half on the deck and half over the
+    // seaward edge, so the cover run has broken ground at its foot.
+    for (let i = 0; i < 7; i++) {
+      const a = rng.range(-4.0, 3.6);
+      const c = rng.range(3.1, 4.6);
+      const s = rng.range(0.34, 0.78);
+      rock(b, rng.bool(0.5) ? 'rubble' : 'sandstone', px(a, c), deckY + rng.range(-0.2, 0.1), pz(a, c), s, s * 0.72, s * 1.2, rng, 7);
+    }
+    b.blocker(px(0.4, -2.35), pz(0.4, -2.35), 3.0, 1.0, alongYaw, deckY, deckY + 1.2);
+  }
 }

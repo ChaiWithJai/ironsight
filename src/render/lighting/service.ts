@@ -276,7 +276,12 @@ class IronLighting implements LightingService {
     u.vectors[V_SCREEN * 4 + 2] = quality.gtao.enabled ? 1 : 0;
     u.vectors[V_SCREEN * 4 + 3] = Math.min(4, quality.shadows.cascadeCount);
 
-    u.vectors[V_MISC * 4 + 1] = 0.7; // how much of the short-radius AO to add on top
+    // How much of the short-radius AO rides on top of the sky term. 0.9, up
+    // from 0.7: the contact band is the single most-cited absence in the round-2
+    // reviews ("no darkening gradient at all" at pier bases, stall legs, kerbs
+    // and arch reveals), and at 0.7 a 0.55-visibility joint only lost 15 % of
+    // its indirect light — below the threshold at which an eye reads a contact.
+    u.vectors[V_MISC * 4 + 1] = 0.9;
     u.vectors[V_MISC * 4 + 2] = quality.shadows.maxDistance * 0.82; // cascade fade start
 
     // ---- buffers ------------------------------------------------------------
@@ -285,7 +290,14 @@ class IronLighting implements LightingService {
       this.cascades.update(ctx, graph, this.services.scene, this.renderer, this.dir, quality);
     }
     if (quality.gtao.enabled) {
-      this.gtao.update(ctx, graph, this.services.scene, this.renderer, quality);
+      this.gtao.update(
+        ctx,
+        graph,
+        this.services.scene,
+        this.renderer,
+        quality,
+        this.light.visible ? this.dir : null,
+      );
     }
 
     // ---- samplers -----------------------------------------------------------

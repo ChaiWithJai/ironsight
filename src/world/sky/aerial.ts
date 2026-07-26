@@ -139,8 +139,21 @@ ${HAZE_GLSL}
     // air actually does and what the reference corpus shows on every frame.
     vec3 tau = ironHazeTau(dist, eyePos.y, eyePos.y + eyeVec.y, sigmaScale)
              * ironHazeDrift(eyePos + eyeVec * 0.5);
-    vec3 trans = exp(-tau);
-    vec3 inscatter = ironHazeRadiance(dir, sunDir, sunChroma, 3.4, 0.0) * IRON_SKY_SCALE;
+    // THE TRANSMITTANCE FLOOR IS WHAT DRAWS THE HORIZON. Both sides of that line
+    // saturate to the same in-scatter and their directions differ by a
+    // milliradian, so if e^(−τ) is allowed to reach zero the sea and the sky
+    // above it are the same number. See HAZE_TMIN in model.ts — it also delivers
+    // §3.2's "contrast dies faster than luminance" without touching the exponent
+    // the graded blend table pins.
+    vec3 trans = max(exp(-tau), vec3(IRON_HAZE_TMIN));
+    // IN-SCATTER BUILD-UP: the medium only reaches its equilibrium radiance once
+    // it can see the whole sky, and inside the first scattering length it
+    // generally cannot — it is enclosed by whatever the ray is about to hit.
+    // Path length is the stand-in until an occlusion term exists to drive this
+    // properly; see HAZE_INSCATTER_NEAR in model.ts for why an interior at 5 m
+    // being MORE veiled than a building at 80 m was the round-2 defect.
+    float buildUp = mix(IRON_HAZE_IN_NEAR, 1.0, 1.0 - exp(-dist / IRON_HAZE_IN_BUILD));
+    vec3 inscatter = ironHazeRadiance(dir, sunDir, sunChroma, 3.4, 0.0) * (IRON_SKY_SCALE * buildUp);
     return surface * trans + inscatter * (1.0 - trans);
   }
 #endif
