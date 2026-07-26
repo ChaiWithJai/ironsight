@@ -245,9 +245,12 @@ export class ShadowCascades {
       u.vectors[(V_TILE0 + i) * 4 + 2] = t.w;
       u.vectors[(V_TILE0 + i) * 4 + 3] = t.h;
     }
-    u.vectors[V_BIAS * 4 + 0] = 1.15; // depth bias, cascade texels
-    u.vectors[V_BIAS * 4 + 1] = 1.6; // normal-offset bias, cascade texels
-    u.vectors[V_BIAS * 4 + 2] = 0.9; // blocker search radius, metres
+    u.vectors[V_BIAS * 4 + 0] = 1.15; // depth bias, cascade texels (capped in metres by the shader)
+    u.vectors[V_BIAS * 4 + 1] = 1.6; // normal-offset bias, cascade texels (likewise capped)
+    // Blocker search radius in cascade TEXELS, not metres: ten texels is ~0.15 m
+    // in cascade 0 and ~1 m in cascade 3, which is the range over which an
+    // occluder can physically widen this cascade's penumbra. See `ironCascade`.
+    u.vectors[V_BIAS * 4 + 2] = 10.0;
     u.vectors[V_BIAS * 4 + 3] = 0.14; // cascade cross-fade band
     u.vectors[V_TEXEL_WORLD * 4 + 3] = this.cascades[this.count - 1].texelWorld;
   }

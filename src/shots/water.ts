@@ -81,10 +81,16 @@ registerShot({
     ctx.setTimeOfDay(17.4);
     ctx.setWeather(0.06, { wind: 4.5, fog: 0.0032 });
     ctx.setOverlays({ viewmodel: false, hud: false });
-    // Five metres over the water inside the harbour mouth, 16 m off the wreck's
-    // starboard quarter with the low sun beyond her. Close, deliberately: at
-    // 35 m the map's aerial perspective already has her at 60 % blend and her
-    // waterline stops being readable. Pitch 2.8°, horizon at 0.54 H.
-    ctx.poseCamera([74, 5.0, -78], [66, 4.2, -92], 50);
+    // Forty metres off the wreck's starboard quarter, five metres over the
+    // water, with the low sun beyond her.
+    //
+    // This was 16 m, on the reasoning that aerial perspective eats her waterline
+    // by 35 m. It does not any more: the hull grew, and from 16 m the frame was
+    // ninety percent red steel plate with a two-metre strip of sea along the
+    // bottom edge — a shot that proves the LEVEL lane's plating and nothing at
+    // all about water. The subject of this shot is the INTERSECTION, so the
+    // camera has to be far enough back that the hull is a silhouette standing in
+    // a sea rather than a wall standing in front of one.
+    ctx.poseCamera([78, 5.6, -71], [66, 1.8, -93], 58);
   },
 });

@@ -59,7 +59,8 @@ uniform float uSkyOvercast;
 uniform float uSkySigma;
 uniform float uSkyCameraY;
 uniform float uSkyCloudDensity;
-/** Sun irradiance above the cloud deck, divided by 4π so the phase carries it. */
+/** Sun illuminance normal to the sun, above the cloud deck, in LUX. Not divided
+ *  by 4pi — ironCloudPhase is a real sr^-1 phase and carries the solid angle. */
 uniform vec3 uSkyCloudSun;
 
 /**
@@ -74,11 +75,6 @@ uniform vec3 uSkyCloudSun;
  */
 const float IRON_BL_H = 80.0;
 const float IRON_BL_SIGMA = 1.32e-3;
-
-/** Interleaved gradient noise — a fine, film-like dither rather than banding. */
-float ironIgn(vec2 p) {
-  return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
-}
 
 /** Optical depth of the boundary layer looking out along 'dir' to infinity. */
 float ironBoundaryTau(vec3 dir) {
@@ -135,13 +131,16 @@ const DOME_FRAGMENT = /* glsl */ `
   #if IRON_CLOUD_STEPS > 0
   if (dir.y > 0.006 && uSkyCloudDensity > 0.001) {
     vec3 origin = vec3(0.0, max(uSkyCameraY, 1.0), 0.0);
-    // Ambient on the cloud is the sky ABOVE it, not a grey constant: a cloud
-    // shaded against a constant ambient is the flat-lit failure the brief names.
-    vec3 ambient = ironSkyViewLut(uSkyViewLut, vec3(0.0, 1.0, 0.0),
-                                  uSkySunDirection, uSkySunElevationDeg, uSkySunChroma) * 1.6;
-    float jitter = ironIgn(gl_FragCoord.xy);
-    vec4 cl = ironCloudMarch(origin, dir, uSkySunDirection, uSkyCloudSun, ambient,
-                             IRON_CLOUD_STEPS, jitter, uSkyCloudDensity);
+    // The sky fill on the cloud is the sky ABOVE it, not a grey constant: a
+    // cloud shaded against a constant ambient is the flat-lit failure the brief
+    // names. Handed over UNSCALED — the march applies its own depth-dependent
+    // occlusion to it. It used to be multiplied by 1.6 here, which put the fill
+    // above the sun term at every sample and is the reason the deck rendered as
+    // white paint with no interior.
+    vec3 skyAbove = ironSkyViewLut(uSkyViewLut, vec3(0.0, 1.0, 0.0),
+                                   uSkySunDirection, uSkySunElevationDeg, uSkySunChroma);
+    vec4 cl = ironCloudMarch(origin, dir, uSkySunDirection, uSkyCloudSun, skyAbove,
+                             IRON_CLOUD_STEPS, uSkyCloudDensity);
     cloudScatter = cl.rgb;
     cloudT = cl.a;
   }
@@ -200,7 +199,7 @@ export function createDomeUniforms(): DomeUniforms {
     uSkySigma: { value: 1 },
     uSkyCameraY: { value: 2 },
     uSkyCloudDensity: { value: 1 },
-    uSkyCloudSun: { value: new THREE.Vector3(4400, 3100, 2100) },
+    uSkyCloudSun: { value: new THREE.Vector3(55200, 39300, 26400) },
     uSkyCloudNoise: { value: null },
     uSkyCloudCoverage: { value: 0.3 },
     uSkyCloudDrift: { value: new THREE.Vector2() },

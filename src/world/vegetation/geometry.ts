@@ -111,47 +111,112 @@ export interface StripSample {
   readonly nz: number;
 }
 
+interface Station extends StripSample {
+  readonly t: number;
+  readonly tip: boolean;
+}
+
+/**
+ * Emit one sheet of a strip. `sign` selects which face: +1 is the sheet whose
+ * geometric winding matches the supplied shading normal, −1 its mirror, offset
+ * back along the normal by `half` and wound the other way so it is a genuine
+ * back face with a genuinely opposite normal.
+ */
+function sheet(b: MeshBuilder, stations: readonly Station[], sign: number, half: number): void {
+  let prevL = -1;
+  let prevR = -1;
+  for (const s of stations) {
+    const ox = s.nx * sign * half;
+    const oy = s.ny * sign * half;
+    const oz = s.nz * sign * half;
+    const nx = s.nx * sign;
+    const ny = s.ny * sign;
+    const nz = s.nz * sign;
+    if (s.tip) {
+      const c = b.vertex(s.px + ox, s.py + oy, s.pz + oz, nx, ny, nz, 0.5, s.t);
+      // Winding puts the GEOMETRIC front face on the same side as the supplied
+      // shading normal. It matters even on double-sided foliage: three flips the
+      // normal by `gl_FrontFacing`, so a reversed winding lights the visible
+      // face with the back face's normal and the whole plant renders black.
+      if (prevL >= 0) {
+        if (sign > 0) b.tri(prevL, c, prevR);
+        else b.tri(prevL, prevR, c);
+      }
+      break;
+    }
+    const l = b.vertex(
+      s.px - s.wx * s.halfWidth + ox, s.py - s.wy * s.halfWidth + oy, s.pz - s.wz * s.halfWidth + oz,
+      nx, ny, nz, 0, s.t,
+    );
+    const r = b.vertex(
+      s.px + s.wx * s.halfWidth + ox, s.py + s.wy * s.halfWidth + oy, s.pz + s.wz * s.halfWidth + oz,
+      nx, ny, nz, 1, s.t,
+    );
+    if (prevL >= 0) {
+      if (sign > 0) b.quad(prevL, l, r, prevR);
+      else b.quad(prevR, r, l, prevL);
+    }
+    prevL = l;
+    prevR = r;
+  }
+}
+
 /**
  * Emit a strip through `segments + 1` stations. When `pointed`, the last station
  * collapses to a single vertex so the tip is a true point rather than a
  * chopped-off rectangle — foliage silhouettes live and die on their tips.
+ *
+ * WHY `thickness` EXISTS, AND WHY GRASS IS NOT DRAWN DOUBLE-SIDED
+ * --------------------------------------------------------------
+ * A zero-thickness strip has to be rendered with `side: DoubleSide`, and three
+ * then multiplies the shading normal by `gl_FrontFacing` so that it always
+ * points into the CAMERA's hemisphere. On a flat leaf that is the right answer;
+ * on a field of ten thousand blades it is catastrophic, because it means every
+ * visible grass pixel in the frame has a normal within 90° of the view vector.
+ * The instant the camera is not looking down-sun — which is every golden-hour
+ * hero framing in this game — N·L goes negative on the ENTIRE field at once, the
+ * sun term evaluates to zero everywhere, and the grass shades to flat ambient:
+ * the "black slashes" defect.
+ *
+ * Giving the blade a real (sub-millimetre) thickness fixes it at the source. The
+ * strip becomes a closed two-sheet solid, each sheet carries its own true
+ * outward normal, the material is drawn `FrontSide`, and nothing flips anything:
+ * the sunward half of every tuft lights and the far half falls to sky light,
+ * which is the two-lobe read a real meadow has. The cost is 2× triangles on
+ * geometry that is 5 triangles a blade.
+ *
+ * The offset must stay well under a pixel at the distance the geometry is read
+ * at, and well over the depth buffer's resolution there, or the two sheets
+ * z-fight. 1 mm satisfies both from 1 m to 60 m.
  */
 export function stripe(
   b: MeshBuilder,
   segments: number,
   pointed: boolean,
   sample: (t: number, out: Mutable<StripSample>) => void,
+  thickness = 0,
 ): void {
   const s: Mutable<StripSample> = {
     px: 0, py: 0, pz: 0, halfWidth: 0, wx: 1, wy: 0, wz: 0, nx: 0, ny: 1, nz: 0,
   };
-  let prevL = -1;
-  let prevR = -1;
+  const stations: Station[] = [];
   for (let i = 0; i <= segments; i++) {
     const t = i / segments;
     sample(t, s);
-    const tip = pointed && i === segments;
-    if (tip) {
-      const c = b.vertex(s.px, s.py, s.pz, s.nx, s.ny, s.nz, 0.5, t);
-      // Winding puts the GEOMETRIC front face on the same side as the supplied
-      // shading normal. It matters even on double-sided foliage: three flips the
-      // normal by `gl_FrontFacing`, so a reversed winding lights the visible
-      // face with the back face's normal and the whole plant renders black.
-      if (prevL >= 0) b.tri(prevL, c, prevR);
-      break;
-    }
-    const l = b.vertex(
-      s.px - s.wx * s.halfWidth, s.py - s.wy * s.halfWidth, s.pz - s.wz * s.halfWidth,
-      s.nx, s.ny, s.nz, 0, t,
-    );
-    const r = b.vertex(
-      s.px + s.wx * s.halfWidth, s.py + s.wy * s.halfWidth, s.pz + s.wz * s.halfWidth,
-      s.nx, s.ny, s.nz, 1, t,
-    );
-    if (prevL >= 0) b.quad(prevL, l, r, prevR);
-    prevL = l;
-    prevR = r;
+    // The sample callback owns one mutable struct, so each station is snapshotted.
+    const len = Math.hypot(s.nx, s.ny, s.nz) || 1;
+    stations.push({
+      px: s.px, py: s.py, pz: s.pz,
+      halfWidth: s.halfWidth,
+      wx: s.wx, wy: s.wy, wz: s.wz,
+      nx: s.nx / len, ny: s.ny / len, nz: s.nz / len,
+      t,
+      tip: pointed && i === segments,
+    });
   }
+  const half = thickness * 0.5;
+  sheet(b, stations, 1, half);
+  if (thickness > 0) sheet(b, stations, -1, half);
 }
 
 export type Mutable<T> = { -readonly [K in keyof T]: T[K] };

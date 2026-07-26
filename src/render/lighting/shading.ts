@@ -71,7 +71,7 @@ export const V_CASCADE_RADIUS = 2; // ortho half-extent in metres, per cascade
 export const V_ATLAS = 3; // [unused, 1/atlasSize, tan(sunAngularRadius), minPenumbraTexels]
 export const V_SCREEN = 4; // [1/width, 1/height, aoStrength, cascadeCount]
 export const V_SUN = 5; // [sunDir.xyz (toward sun, world), shadowEnabled]
-export const V_BIAS = 6; // [depthBiasTexels, normalBiasTexels, blockerSearchMetres, blendBand]
+export const V_BIAS = 6; // [depthBiasTexels, normalBiasTexels, blockerSearchTexels, blendBand]
 export const V_MISC = 7; // [localLightCount, contactAoStrength, cascadeFadeStart, unused]
 /** Four tile rects in the atlas: [offsetU, offsetV, scaleU, scaleV]. */
 export const V_TILE0 = 8;
@@ -118,6 +118,9 @@ uniform sampler2D ironAoTex;
 
 #define IRON_BLOCKER_TAPS ${blockerTaps}
 #define IRON_PCF_TAPS ${filterTaps}
+/** Hard ceilings, in METRES, on how far a bias may walk a sample. See ironCascade. */
+#define IRON_MAX_NORMAL_OFFSET 0.22
+#define IRON_MAX_DEPTH_BIAS 0.13
 #define IRON_MAX_LOCAL_LIGHTS ${IRON_MAX_LOCAL_LIGHTS}
 #define IRON_LIGHT_BASE ${V_LIGHT_BASE}
 
@@ -178,20 +181,43 @@ float ironCascade( const in int cascade, const in vec3 worldPos, const in vec3 w
   // distinction LOOK_SPEC §2.6 insists on. At golden hour almost every lit
   // surface is a raking wall, and a bias big enough to stop acne there in world
   // units peter-pans the crate sitting on the ground two metres away.
+  //
+  // BOTH TERMS ARE CAPPED IN METRES, AND THAT CAP IS THE POINT. 'slope' is
+  // tan(angle between the surface and the light), and at an 11° sun EVERY
+  // horizontal surface in the game sits at the clamp (tan 79° = 5.1), so the
+  // texel-proportional bias is at its maximum everywhere at once. Uncapped that
+  // is 1.7 m of normal offset and 2.2 m of depth bias in cascade 2 — and both
+  // detach the shadow from its object by very nearly their own length along a
+  // grazing receiver, so a 1 m crate past 38 m lost its entire 5 m shadow. The
+  // caps hold the total detachment under ~0.35 m at every distance, which is
+  // sub-pixel past 30 m; the residual acne that buys is 200 m away, inside the
+  // aerial-perspective veil, and is the correct side of that trade
+  // (LOOK_SPEC §2.6: "distant terrain carries no resolvable shadow detail").
   float slope = sqrt( max( 1.0 - ndl * ndl, 0.0 ) ) / max( abs( ndl ), 0.12 );
-  vec3 offsetPos = worldPos + worldNormal * ( texelWorld * bias.y * ( 1.0 + min( slope, 4.0 ) ) );
+  float normalOffset = min( texelWorld * bias.y * ( 1.0 + min( slope, 4.0 ) ), IRON_MAX_NORMAL_OFFSET );
+  vec3 offsetPos = worldPos + worldNormal * normalOffset;
 
   vec3 coord = ( ironMatrix[${M_CASCADE0} + cascade] * vec4( offsetPos, 1.0 ) ).xyz;
   if ( coord.x < 0.0 || coord.x > 1.0 || coord.y < 0.0 || coord.y > 1.0 ) return -1.0;
 
-  // Slope-scaled depth bias, also in texels of THIS cascade.
-  float receiver = coord.z - texelWorld * bias.x * ( 1.0 + min( slope, 4.0 ) * 2.0 );
+  // Slope-scaled depth bias, also in texels of THIS cascade. The normal offset
+  // above already walks the sample a texel off a raking surface, so this only
+  // has to cover the residual, and it is capped hard for the same reason.
+  float receiver = coord.z - min( texelWorld * bias.x * ( 1.0 + min( slope, 4.0 ) ), IRON_MAX_DEPTH_BIAS );
 
   float phi = ironDitherAngle();
   float uvPerMetre = 1.0 / ( 2.0 * radius );
 
   // ---- blocker search ----------------------------------------------------
-  float searchUv = bias.z * uvPerMetre;
+  // THE SEARCH RADIUS IS PER-CASCADE, AND THAT IS WHAT MAKES CONTACT HARDENING
+  // REAL. A blocker sitting r metres to the side can only widen the penumbra
+  // at this receiver if the occluder-receiver gap is at least r / tan(0.265°) —
+  // so a fixed 0.9 m search in cascade 0 was averaging in occluders 190 m up-sun
+  // that cannot physically shade this pixel, inflating the gap and giving the
+  // crate that touches the paving the same soft edge as the roofline behind it.
+  // Sizing it in cascade texels ties the search to the resolution that cascade
+  // can actually resolve: ~0.15 m in cascade 0, ~1 m in cascade 3.
+  float searchUv = clamp( texelWorld * bias.z, 0.05, 1.0 ) * uvPerMetre;
   float blockerSum = 0.0;
   float blockerCount = 0.0;
   for ( int i = 0; i < IRON_BLOCKER_TAPS; i ++ ) {

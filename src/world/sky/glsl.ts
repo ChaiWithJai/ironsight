@@ -21,6 +21,7 @@ import {
   HAZE_FLOOR,
   HAZE_K,
   HAZE_P,
+  HAZE_ROLLIN,
   HAZE_SCALE_HEIGHT,
   SKY_SCALE,
 } from '@/world/sky/model';
@@ -183,6 +184,7 @@ void ironTransmittanceParams(vec2 uv, out float r, out float mu) {
 export const HAZE_GLSL = /* glsl */ `
 const float IRON_HAZE_K = ${f(HAZE_K)};
 const float IRON_HAZE_P = ${f(HAZE_P)};
+const float IRON_HAZE_D0 = ${f(HAZE_ROLLIN)};
 const float IRON_HAZE_HS = ${f(HAZE_SCALE_HEIGHT)};
 const float IRON_HAZE_FLOOR = ${f(HAZE_FLOOR)};
 const vec3  IRON_HAZE_CH = ${v3(HAZE_CHANNEL)};
@@ -194,13 +196,17 @@ const float IRON_SKY_SCALE = ${f(SKY_SCALE)};
 
 /**
  * Optical depth of the boundary-layer haze over 'dist' metres of a ray running
- * from height 'y0' to height 'y1'. See 'model.ts' for the fit and for why the
- * exponent is 0.61 rather than the spec's two-term σ.
+ * from height 'y0' to height 'y1'. See 'model.ts' for the fit, for why the
+ * exponent is 0.61 rather than the spec's two-term σ, and for why the roll-in
+ * factor exists (short answer: k·d^p asserts an INFINITE σ at d = 0, and that
+ * is what puts a veil on a wall five metres from the lens).
  */
 vec3 ironHazeTau(float dist, float y0, float y1, float sigmaScale) {
   float yMid = 0.5 * (y0 + y1);
   float hf = IRON_HAZE_FLOOR + (1.0 - IRON_HAZE_FLOOR) * exp(-max(0.0, yMid) / IRON_HAZE_HS);
-  float base = IRON_HAZE_K * pow(max(dist, 0.01), IRON_HAZE_P) * hf * sigmaScale;
+  float d = max(dist, 0.01);
+  float rollIn = pow(d / (d + IRON_HAZE_D0), 1.0 - IRON_HAZE_P);
+  float base = IRON_HAZE_K * pow(d, IRON_HAZE_P) * rollIn * hf * sigmaScale;
   return base * IRON_HAZE_CH;
 }
 
@@ -219,7 +225,19 @@ vec3 ironHazeRadiance(vec3 dir, vec3 sunDir, vec3 sunChroma, float turbidity, fl
   // its value 11° up, which drags the whole lower sky toward the sunward
   // anchor and costs the dome its blue. 2.2 has it at 57 % and lets the
   // Rayleigh table own everything above ~25°.
-  float g = pow(max(0.0, 1.0 - up), 2.2);
+  //
+  // THE min() IS LOAD-BEARING AND ITS ABSENCE WAS THE MILKY-FOREGROUND BUG.
+  // This function is called by the aerial-perspective chunk with the WORLD
+  // SURFACE's view direction, and every surface below the eyeline — which is
+  // the whole lower half of a first-person frame, i.e. all the near geometry —
+  // has dir.y < 0, so (1 - up) exceeds 1. mix() does not clamp: it happily
+  // EXTRAPOLATES past the horizon anchor. At the bottom of a 55° frame
+  // (dir.y ≈ −0.46) g reached 2.30 and the 9 000 cd/m² sunward anchor was
+  // handed out as 18 500; looking down at your own feet it reached 3.43 and
+  // 27 700. Against 2 200 cd/m² sunlit sandstone that is a 4× in-scatter, so
+  // even the correct 13 % blend at 15 m whited the foreground out. The saturation
+  // radiance of the medium cannot exceed its horizon value — clamp it there.
+  float g = min(1.0, pow(max(0.0, 1.0 - up), 2.2));
 
   vec2 dh = dir.xz;
   vec2 sh = sunDir.xz;

@@ -44,8 +44,14 @@ import { WIND_POSE_TIME, WindField, type WindSample } from '@/world/vegetation/w
 const UP = new THREE.Vector3(0, 1, 0);
 const GRASS_TILE = 8;
 const MAT_TILE = 16;
-/** Clusters per m² at densityScale 1. Dry coastal ground, not a lawn. */
-const CLUSTERS_PER_M2 = 6.0;
+/**
+ * Clusters per m² at densityScale 1. Dry coastal ground, not a lawn — but the
+ * first review round came back with "bare sand between every tuft", and a real
+ * dry meadow at 2 m is a continuous mat with soil showing only in patches. The
+ * near ring is capacity-bound long before this number is, so raising it mostly
+ * fills the ground the camera is actually reading.
+ */
+const CLUSTERS_PER_M2 = 8.0;
 const MATS_PER_TILE = 14;
 /** Candidate ground samples per grass tile edge. 5×5 over 8 m = 2 m resolution. */
 const GROUND_GRID = 5;
@@ -190,17 +196,26 @@ export class VegetationField {
       Math.min(18_000, Math.max(2_400, this.settings.vegetation.grassInstances / 5)) *
         this.settings.vegetation.densityScale,
     );
-    // 12 / 30 / 58 %. That split falls out of area: the near ring is a small
-    // disc of the field and the far ring is most of it, so the expensive LOD is
-    // only ever paid for a few hundred tufts.
-    const split = [0.12, 0.30, 0.58];
+    // 17 / 30 / 53 %. The split mostly falls out of area — the near ring is a
+    // small disc of the field and the far ring is most of it — but the near
+    // ring's share is deliberately above its area share, because an InstanceSet
+    // that overflows DROPS instances in tile order, which shows up as a quadrant
+    // of the field simply missing. The near ring is the one that can overflow at
+    // full mask density, so it is the one that gets the headroom.
+    const split = [0.17, 0.30, 0.53];
     for (let lod = 0; lod < 3; lod++) {
       const set = new InstanceSet(
         this.grass.cluster[lod],
         this.materials.material.grass,
         Math.ceil(budget * split[lod] * 1.25),
         `veg.grass.lod${lod}`,
-        lod < 2,
+        // LOD0 only. A tuft's cast shadow is individually readable inside ~15 m
+        // and is a texel-wide smear past that, and a field this dense shadows
+        // ITSELF into mud when every ring casts: at an 11° sun each tuft throws
+        // 2.5 m of shadow across the four behind it, which is how a lit meadow
+        // turns into a uniformly dark one. Near-field contact shadows are what
+        // sell the field; the far ring's are pure aliasing and pure cost.
+        lod < 1,
       );
       this.grassSets.push(set);
       this.attach(scene, set.mesh, RenderLayer.Vegetation);
@@ -531,7 +546,7 @@ export class VegetationField {
     const t1 = Math.floor((cam.x + radius) / GRASS_TILE);
     const u0 = Math.floor((cam.z - radius) / GRASS_TILE);
     const u1 = Math.floor((cam.z + radius) / GRASS_TILE);
-    const lod0End = radius * 0.30;
+    const lod0End = radius * 0.26;
     const lod1End = radius * 0.62;
     const fadeStart = radius * 0.80;
     let placed = 0;
@@ -575,15 +590,31 @@ export class VegetationField {
           // THE CARPET. Bare soil between tufts is the difference between our
           // field and the reference's; the near field gets two thatch mats per
           // tuft, crossed, so the ground under the blades is itself vegetation.
+          // SCALE. The thatch mesh is authored at litter size — 17-32 cm blades
+          // 11 mm wide — and must go out at close to 1:1. The old 2.1×/1.7×
+          // multipliers, compounded with a per-tuft scale that reaches 1.4, put
+          // metre-long 5 cm straps flat on the ground: at an 11° sun those
+          // present their edge to the beam and rasterise as black planks, which
+          // is most of what the first review round was looking at.
           if (d < radius * 0.55 && this.thatchSet.count < this.thatchSet.capacity) {
-            this.scl.setScalar(p.scale * 2.1);
+            this.scl.setScalar(p.scale * 1.25);
             this.qYaw.setFromAxisAngle(UP, p.yaw + 1.1);
             this.m.compose(this.pos.set(p.x, p.y - 0.02, p.z), this.qYaw, this.scl);
             this.thatchSet.push(this.m, this.colour);
             if (d < radius * 0.3 && this.thatchSet.count < this.thatchSet.capacity) {
-              this.scl.setScalar(p.scale * 1.7);
+              this.scl.setScalar(p.scale * 1.0);
               this.qYaw.setFromAxisAngle(UP, p.yaw + 2.7);
-              this.m.compose(this.pos.set(p.x + 0.18, p.y - 0.025, p.z - 0.14), this.qYaw, this.scl);
+              this.m.compose(this.pos.set(p.x + 0.14, p.y - 0.025, p.z - 0.11), this.qYaw, this.scl);
+              this.thatchSet.push(this.m, this.colour);
+            }
+            // A third mat inside the ring the camera actually reads blade-by-
+            // blade. Litter-size thatch covers a third of the ground a
+            // metre-long strap did, and bare soil between tufts is the
+            // difference between our field and the reference's.
+            if (d < radius * 0.18 && this.thatchSet.count < this.thatchSet.capacity) {
+              this.scl.setScalar(p.scale * 1.1);
+              this.qYaw.setFromAxisAngle(UP, p.yaw + 4.4);
+              this.m.compose(this.pos.set(p.x - 0.13, p.y - 0.022, p.z + 0.15), this.qYaw, this.scl);
               this.thatchSet.push(this.m, this.colour);
             }
           }
@@ -648,14 +679,21 @@ export class VegetationField {
   }
 
   private tintGrass(p: Placed): void {
-    // Damp ground grows greener grass; dry ground bleaches to straw. ±12 % of
+    // Damp ground grows greener grass; dry ground bleaches to straw. ±14 % of
     // value on top, so no two tufts are the same colour.
-    const green = 0.55 + p.tint * 0.55;
+    //
+    // THE SWING IS SMALL AND IT NEVER REACHES GREEN. Harbour Reach is August on
+    // a Mediterranean coast: the whole field is straw and the moisture mask only
+    // decides how MUCH straw, never whether it is a lawn. The previous curve
+    // pushed damp ground to G > R, which multiplied against the blade's own
+    // warm ramp and turned the near field into grey-green sedge — the second
+    // most-reported thing about the round-0 grass after its value.
+    const damp = p.tint;
     const value = 0.86 + p.rand * 0.28;
     this.colour.setRGB(
-      value * (1.18 - green * 0.30),
-      value * (0.94 + green * 0.14),
-      value * (0.62 + green * 0.30),
+      value * (1.12 - damp * 0.16),
+      value * (1.00 + damp * 0.06),
+      value * (0.76 + damp * 0.20),
     );
   }
 

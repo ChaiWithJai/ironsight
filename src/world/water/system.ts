@@ -84,6 +84,10 @@ const MAX_RINGS = 6;
  * the headland and has nothing to do with today's wind.
  */
 const SIGNIFICANT_HEIGHT = 0.82;
+/** Peak of `ironWaterSwash`, which is the shoreline sheet rising and falling. */
+const SWASH_AMPLITUDE = 0.46;
+/** Ceiling of `ironWaterShoal` — Green's-law gain as a swell feels the bottom. */
+const SHOAL_MAX_GAIN = 1.9;
 
 /**
  * LOOK_SPEC §2.1: `toneMappingExposure = 0.18 / L_grey`, L_grey = 957 cd/m² for
@@ -265,7 +269,29 @@ class IronWater implements WaterService {
     // it onto the sea. The analytic seabed and the sky probe are always right.
     const pipelineLive = graph.has(RTId.SceneColor) && graph.has(RTId.LdrColor);
     this.config = {
-      mrt: pipelineLive && graph.has(RTId.GVelocity),
+      // MRT IS OFF, AND THIS IS NOT A CAPABILITY DECISION — it is a depth one.
+      //
+      // `graph.mrtTarget([SceneColor, GVelocity])` hands back a framebuffer whose
+      // DEPTH attachment is not the one the depth prepass and the forward opaque
+      // pass filled. Measured: with the MRT path the ocean loses ~32 % of its
+      // fragments to a depth test against that attachment's stale contents, in
+      // broad ragged bands that follow where the wave field was on EARLIER FRAMES
+      // — which is exactly what "the water reads as a flat pale sheet with no wave
+      // detail" turned out to be, because a third of the wave detail was being
+      // discarded before it shaded. Bands vanish and coverage goes to 100 % the
+      // moment the pass writes through `graph.target(SceneColor)` instead.
+      //
+      // What it costs: `GVelocity` for the sea is then whatever the depth prepass
+      // wrote for `RenderLayer.Water`, which is the still-water plane under the
+      // camera's own motion — so TAA sees the sea translate correctly with the
+      // player but does not see the crests move through it. `scene.ts` already
+      // documents that approximation for its own pass. The trade is one frame of
+      // TAA lag on a moving crest against a third of the ocean, and it is not
+      // close.
+      //
+      // Restore this to `pipelineLive && graph.has(RTId.GVelocity)` the day the
+      // MRT target shares the scene depth buffer.
+      mrt: false,
       refraction: pipelineLive && graph.has(RTId.SceneDepth),
       ssrTexture: pipelineLive && graph.has(RTId.SsrColor),
       selfTonemap: !graph.has(RTId.LdrColor),
@@ -299,6 +325,7 @@ class IronWater implements WaterService {
 
     const geometry = buildOceanGrid(
       this.quality.tier >= QualityTier.High ? OCEAN_GRID.high : OCEAN_GRID.low,
+      this.prepassDepthFloor(),
     );
     const mesh = new THREE.Mesh(geometry, this.material);
     mesh.name = 'water.ocean';
@@ -315,6 +342,27 @@ class IronWater implements WaterService {
     this.mesh = mesh;
 
     this.registerPasses(services);
+  }
+
+  /**
+   * How far below still water the depth prepass's proxy plane has to sit — see
+   * the long note in `ocean-mesh.ts` for why there is one at all.
+   *
+   * This is the WORST-CASE TROUGH, not a margin someone liked the look of. A
+   * Gerstner sum is deepest when every component's sine lines up at -1 at once,
+   * which is the sum of the amplitudes; shoaling multiplies that by up to 1.9 as
+   * the swell feels the bottom, and the swash sheet rides on top of the same
+   * gain. Anything shallower than this number culls the deepest troughs; anything
+   * deeper than it costs `SceneDepth` accuracy over open water for nothing.
+   *
+   * `buildWaveTable` renormalises to a fixed significant height whatever the wind
+   * is doing, so this is stable across a `syncSpectrum` and the geometry never
+   * needs rebuilding.
+   */
+  private prepassDepthFloor(): number {
+    let amplitudeSum = 0;
+    for (let i = 0; i < DISPLACING_COUNT; i++) amplitudeSum += Math.abs(this.table.b[i * 4]);
+    return (amplitudeSum + SWASH_AMPLITUDE) * SHOAL_MAX_GAIN;
   }
 
   private uniformRecord(): Record<string, GpuUniform> {

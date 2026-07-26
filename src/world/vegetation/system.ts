@@ -28,6 +28,7 @@
  *    leaf is solid geometry, so there is no hashed-alpha edge for a bilateral
  *    upsample to smear and no dithered coverage for TAA to boil.
  */
+import * as THREE from 'three';
 import {
   RenderStage,
   type AssetRegistry,
@@ -57,6 +58,9 @@ import { WindField, type WindSample } from '@/world/vegetation/wind';
  */
 const NOMINAL_WIND = 4.5;
 
+/** Straight up, for the sky-chromaticity probe. */
+const UP = new THREE.Vector3(0, 1, 0);
+
 class IronVegetation implements VegetationService {
   private readonly wind = new WindField();
   private readonly exclusions = new ExclusionField();
@@ -66,6 +70,7 @@ class IronVegetation implements VegetationService {
   private readonly services: Services;
   private readonly rng: Rng;
   private readonly sample: WindSample = { x: 0, z: 0, speed: 0 };
+  private readonly skyColour = new THREE.Color();
   private initialised = false;
 
   constructor(ctx: BootContext) {
@@ -169,10 +174,51 @@ class IronVegetation implements VegetationService {
       update: (ctx: FrameCtx): void => {
         this.wind.strength = Math.max(0.15, ctx.services.sky.state.windSpeed / NOMINAL_WIND);
         const factory = ctx.services.materials;
+        // THE PHOTOMETRIC HALF OF THE GRASS FIX. The blade chunk needs three
+        // things the uber material does not hand it: where the sun is, how much
+        // beam it is delivering, and how much sky irradiance an unoccluded
+        // upward face is receiving. All three are read from LightingService and
+        // SkyService rather than re-derived here, so the grass tracks the time
+        // of day and the weather and cannot disagree with any other lit surface
+        // in the frame about the state of the sky. See `materials.ts` for what
+        // the chunk does with them and why the shared occlusion chain gets these
+        // two terms wrong for one-centimetre geometry.
+        const lighting = ctx.services.lighting;
+        const sun = lighting.sun;
+        const lit = sun.illuminanceLux > 1 ? 1 : 0;
+        // Chromaticity from the sky's own radiance straight up, magnitude from
+        // the lane that owns the photometry. Normalised so the two cannot
+        // double-count each other's units.
+        ctx.services.sky.radianceTowards(UP, this.skyColour);
+        const skyNorm = Math.max(1e-4, (this.skyColour.r + this.skyColour.g + this.skyColour.b) / 3);
+        const skyLux = lighting.skyIlluminanceLux;
         for (const [key, cells] of Object.entries(this.materials.cells)) {
-          if (!cells.strength) continue;
           const material = this.materials.material[key as keyof VegMaterials['material']];
-          factory.setUniform(material, `uVegStrength_${key}`, this.wind.strength);
+          if (cells.strength) {
+            factory.setUniform(material, `uVegStrength_${key}`, this.wind.strength);
+          }
+          if (cells.sun) {
+            cells.sun.value.set(sun.direction.x, sun.direction.y, sun.direction.z, lit);
+            factory.setUniform(material, `uVegSun_${key}`, cells.sun.value);
+          }
+          if (cells.sky) {
+            cells.sky.value.set(
+              (this.skyColour.r / skyNorm) * skyLux,
+              (this.skyColour.g / skyNorm) * skyLux,
+              (this.skyColour.b / skyNorm) * skyLux,
+              0,
+            );
+            factory.setUniform(material, `uVegSky_${key}`, cells.sky.value);
+          }
+          if (cells.beam) {
+            cells.beam.value.set(
+              sun.color.r * sun.illuminanceLux,
+              sun.color.g * sun.illuminanceLux,
+              sun.color.b * sun.illuminanceLux,
+              0,
+            );
+            factory.setUniform(material, `uVegBeam_${key}`, cells.beam.value);
+          }
         }
       },
     };

@@ -173,6 +173,25 @@ export const ANCHOR = {
  */
 export const HAZE_K = 0.0264;
 export const HAZE_P = 0.6084;
+/**
+ * Near-field roll-in distance, metres.
+ *
+ * `k·d^p` with p < 1 has σ_eff = k·p·d^(p−1), which DIVERGES as d → 0. That is
+ * not a rounding detail: it is the reason a wall at 5 m came back already
+ * veiled. The fit is only meaningful over the range it was fitted on (15 m and
+ * out), and below that it is asserting an infinite extinction coefficient a
+ * metre in front of the lens.
+ *
+ * `(d/(d+d0))^(1−p)` restores a FINITE, constant σ inside d0 while leaving the
+ * fitted power law intact outside it, because the factor → 1 as d ≫ d0. The
+ * far end of the ladder — the whole point of this lane, and the part that
+ * already reads correctly — is untouched: 400 m moves 63.6 % → 63.0 %, 1.4 km
+ * moves 88.5 % → 88.4 %. The near field is where it pays: 5 m goes 6.8 % → 3.8 %
+ * and 2 m goes 3.9 % → 1.6 %, so the first 30 m is genuinely clear air.
+ *
+ * 18 m is the largest roll-in that still leaves 150 m inside 4 % of the fit.
+ */
+export const HAZE_ROLLIN = 18;
 /** Height over which the haze thins, metres. Keeps the headland clearer than the quay. */
 export const HAZE_SCALE_HEIGHT = 260;
 /** Residual fraction of σ that survives above the boundary layer. */
@@ -190,7 +209,9 @@ export const HAZE_CHANNEL = [0.8, 1.0, 1.2] as const;
 export function hazeTau(distance: number, yStart: number, yEnd: number, sigmaScale: number): number {
   const yMid = 0.5 * (yStart + yEnd);
   const heightFactor = HAZE_FLOOR + (1 - HAZE_FLOOR) * Math.exp(-Math.max(0, yMid) / HAZE_SCALE_HEIGHT);
-  return HAZE_K * Math.pow(Math.max(distance, 0.01), HAZE_P) * heightFactor * sigmaScale;
+  const d = Math.max(distance, 0.01);
+  const rollIn = Math.pow(d / (d + HAZE_ROLLIN), 1 - HAZE_P);
+  return HAZE_K * Math.pow(d, HAZE_P) * rollIn * heightFactor * sigmaScale;
 }
 
 /* -------------------------------------------------- analytic sky radiance -- */
@@ -215,7 +236,11 @@ export function analyticSkyRadiance(
   const up = Math.min(1, Math.max(-1, dir.y));
   // 1 at the horizon, 0 at the zenith, weighted toward the horizon the way a
   // Mie-loaded lower atmosphere actually is.
-  const g = Math.pow(Math.max(0, 1 - up), 2.2);
+  //
+  // THE CLAMP IS LOAD-BEARING — see `ironHazeRadiance` in glsl.ts for the
+  // failure it fixes. Below the horizon `1 - up` exceeds 1, and the three
+  // `lerp`s below then EXTRAPOLATE past their horizon anchors.
+  const g = Math.min(1, Math.pow(Math.max(0, 1 - up), 2.2));
 
   const sh = tmpSunH.set(sunDirection.x, 0, sunDirection.z);
   const dh = Math.hypot(dir.x, dir.z);

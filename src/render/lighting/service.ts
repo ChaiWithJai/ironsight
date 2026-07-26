@@ -76,11 +76,17 @@ import {
 const REBAKE_DEGREES = 0.15;
 
 /**
- * Minimum penumbra, in cascade texels. Below roughly one and a half texels a
- * contact shadow aliases into a staircase, which is more visible than the
- * physically-correct hardness it is trying to preserve.
+ * Minimum penumbra, in cascade texels — an anti-aliasing floor and nothing more.
+ *
+ * It has to stay at ONE texel. The physical penumbra half-width is
+ * `gap · tan(0.265°)`, so a 100 m architectural gap is 0.46 m; cascade 2's texel
+ * is 0.21 m and cascade 3's is 0.45 m, and at the old floor of 1.5 texels those
+ * cascades clamped to 0.32 m and 0.68 m — i.e. the floor, not the physics, set
+ * the width of every shadow past 38 m, which is exactly the "one blur radius for
+ * everything" the rubric fails a frame for. At one texel the floor only ever
+ * catches sub-texel penumbrae, which is all it is for.
  */
-const MIN_PENUMBRA_TEXELS = 1.5;
+const MIN_PENUMBRA_TEXELS = 1.0;
 
 class IronLighting implements LightingService {
   private readonly light = new THREE.DirectionalLight(0xffffff, 0);

@@ -127,6 +127,19 @@ uniform vec4 uIronVary;
 uniform vec4 uIronMat;
 /** x soft-particle fade distance (m) · y enable (0/1) · z camera near · w camera far */
 uniform vec4 uIronSoft;
+/**
+ * The BLOCK LATTICE, which is how this material stops repeating.
+ *
+ *   x  cells across one texture repeat   (4 for the ashlar bake's 4×8 courses)
+ *   y  cells down one texture repeat     (8)
+ *   z  running-bond offset in cells      (0.5 for masonry, 0 for a stack bond)
+ *   w  per-cell tonal amplitude, 0 disables the layer
+ *
+ * Both a quantiser and a cell size: the stochastic tile offset is rounded to
+ * whole cells so every phase of the tile lands its mortar courses on the same
+ * global grid, and the per-stone tonal field uses the same cell in world metres.
+ */
+uniform vec4 uIronBlock;
 uniform vec2 uIronScreen;         // 1 / render target size
 uniform sampler2D uIronSceneDepth;
 uniform vec3 uIronCamPos;
@@ -157,6 +170,40 @@ float ironNoise2( vec2 p ) {
   return mix( mix( n00, n10, f.x ), mix( n01, n11, f.x ), f.y );
 }
 
+/**
+ * Value noise AND its analytic gradient, from the same four hashes.
+ *
+ * This is what the detail and micro normal bands are built from, and the reason
+ * they are not a re-tiled fetch of the baked normal map any more. That map
+ * carries the material's STRUCTURE — for sandstone, a 4 × 8 ashlar grid — and
+ * re-tiling it at twenty repeats per metre lays a two-centimetre brick lattice
+ * over every surface in the game. On a wall it hides inside the real coursing;
+ * on a flat sand plaza seen at a grazing angle it is a perfectly regular
+ * diagonal cross-hatch running to the horizon, and it is the single most
+ * findable repeat in the frame.
+ *
+ * What those bands are supposed to carry is GRAIN — pitting, sand, tool marks —
+ * which has no structure at all. Four hashes per octave is also cheaper than the
+ * dependent texture fetch it replaces.
+ */
+vec3 ironNoiseD2( vec2 p ) {
+  vec2 i = floor( p );
+  vec2 f = fract( p );
+  vec2 u = f * f * ( 3.0 - 2.0 * f );
+  vec2 du = 6.0 * f * ( 1.0 - f );
+  float a = ironHash13( vec3( i, 0.0 ) );
+  float b = ironHash13( vec3( i + vec2( 1.0, 0.0 ), 0.0 ) );
+  float c = ironHash13( vec3( i + vec2( 0.0, 1.0 ), 0.0 ) );
+  float d = ironHash13( vec3( i + vec2( 1.0, 1.0 ), 0.0 ) );
+  float k1 = b - a;
+  float k2 = c - a;
+  float k3 = a - b - c + d;
+  return vec3(
+    a + k1 * u.x + k2 * u.y + k3 * u.x * u.y,
+    du.x * ( k1 + k3 * u.y ),
+    du.y * ( k2 + k3 * u.x ) );
+}
+
 /** Value noise. One octave, trilinear — for the terms that need real volume. */
 float ironNoise3( vec3 p ) {
   vec3 i = floor( p );
@@ -174,6 +221,62 @@ float ironNoise3( vec3 p ) {
     mix( mix( n000, n100, f.x ), mix( n010, n110, f.x ), f.y ),
     mix( mix( n001, n101, f.x ), mix( n011, n111, f.x ), f.y ),
     f.z );
+}
+
+/** Two decorrelated hashes of one lattice point. */
+vec2 ironHash22( vec2 p, float s ) {
+  return vec2( ironHash13( vec3( p, s ) ), ironHash13( vec3( p.yx, s + 19.73 ) ) );
+}
+
+/* --------------------------------------------------- stochastic tiling --- */
+
+/**
+ * Triangle-lattice decomposition (Heitz & Neyret, "High-Performance By-Example
+ * Noise using a Histogram-Preserving Blending Operator", 2018). Every point
+ * lies inside one triangle of a skewed unit grid; the three corners and their
+ * barycentric weights are what the stochastic sampler blends between.
+ *
+ * A TRIANGLE lattice, not a square one: three taps is the minimum that can
+ * cover the plane with a partition of unity, and a square grid needs four —
+ * which on this shader is two more dependent fetches per map for no extra
+ * decorrelation.
+ */
+void ironTriGrid( vec2 p, out vec2 v1, out vec2 v2, out vec2 v3, out vec3 w ) {
+  mat2 ironSkew = mat2( 1.0, 0.0, -0.57735027, 1.15470054 );
+  vec2 s = ironSkew * p;
+  vec2 base = floor( s );
+  vec2 f = fract( s );
+  float z = 1.0 - f.x - f.y;
+  if ( z > 0.0 ) {
+    w = vec3( z, f.y, f.x );
+    v1 = base;
+    v2 = base + vec2( 0.0, 1.0 );
+    v3 = base + vec2( 1.0, 0.0 );
+  } else {
+    w = vec3( - z, 1.0 - f.y, 1.0 - f.x );
+    v1 = base + vec2( 1.0, 1.0 );
+    v2 = base + vec2( 1.0, 0.0 );
+    v3 = base + vec2( 0.0, 1.0 );
+  }
+}
+
+/**
+ * The per-vertex UV offset that decorrelates one tap from the next.
+ *
+ * On a material with a block lattice the offset is QUANTISED to whole cells.
+ * That is the whole trick: an arbitrary offset slides the mortar courses by a
+ * fraction of a block, so the blend boundary between two taps shows up as a
+ * step in the coursing — a worse and more obviously synthetic artefact than the
+ * repeat it was removing. Quantised, every tap puts its courses on the same
+ * global grid and only the block CONTENT permutes, which is what a real wall
+ * built from one quarry actually looks like.
+ */
+vec2 ironTileOffset( vec2 v ) {
+  vec2 o = ironHash22( v, 1.0 + uIronVary.w );
+  #ifdef IRON_TILE_LATTICE
+    o = floor( o * uIronBlock.xy ) / uIronBlock.xy;
+  #endif
+  return o;
 }
 
 /* ------------------------------------------------------------- triplanar --- */
@@ -275,11 +378,58 @@ export const IRON_SURFACE = /* glsl */ `
 
   // Metres per texture repeat → repeats per metre.
   float ironScale = 1.0 / max( uIronTiling.x, 1e-3 );
-  vec3 ironTriP = vIronWorld * ironScale;
   vec2 ironUv = vIronUv * ironScale;
+  // Derivatives of the UNSHIFTED uv, captured before parallax and before the
+  // stochastic offsets move it. Every base fetch below uses them explicitly:
+  // an offset that jumps at a lattice edge makes the implicit derivative there
+  // enormous, and the hardware answers with mip 8 — a blurred line along every
+  // cell boundary, which is precisely the lattice the offsets exist to hide.
+  vec2 ironDdx = dFdx( ironUv );
+  vec2 ironDdy = dFdy( ironUv );
+
+  // ---- the dominant world plane, needed by everything below -----------------
+  float ironUp = clamp( dot( ironGeoN, vec3( 0.0, 1.0, 0.0 ) ), 0.0, 1.0 );
+  vec3 ironAbsN = abs( ironGeoN );
+  vec2 ironPlane = ironAbsN.y > max( ironAbsN.x, ironAbsN.z )
+    ? vIronWorld.xz : ( ironAbsN.x > ironAbsN.z ? vIronWorld.zy : vIronWorld.xy );
+
+  // ---- 3 the low-frequency field set, LOOK_SPEC §4.1 ------------------------
+  // Three octaves at the spec's non-harmonic ratios 1.00 / 3.70 / 13.90 on an
+  // 11.1 m base — 11.1 m, 3.0 m, 0.80 m — plus the 0.03 m⁻¹ (33 m) mask the
+  // spec requires to modulate them.
+  //
+  // Every one of those wavelengths is IRRATIONAL against every tiling rate the
+  // bake ships (1.4-2.6 m). That is not decoration: a break-up layer whose
+  // wavelength is commensurate with the tile beats against it and produces a
+  // second, COARSER lattice — which is worse than the repeat it was hiding,
+  // because a 2.4 m repeat is at least small enough to read as masonry and a
+  // 12 m beat reads as nothing at all.
+  float ironLf0 = ironNoise2( ironPlane * 0.0901 );                              // 11.1 m
+  float ironLf1 = ironNoise2( ironPlane * 0.3333 + vec2( 17.31, 5.77 ) );        //  3.0 m
+  float ironLf2 = ironNoise2( ironPlane * 1.2524 + vec2( 3.19, 41.70 ) );        //  0.8 m
+  float ironLfMask = 0.45 + 1.10 * ironNoise2( ironPlane * 0.0303 + vec2( 61.3, 8.9 ) );
 
   #ifdef IRON_TRIPLANAR
     vec3 ironTriW = ironTriWeights( ironGeoN, uIronTiling.w );
+    // DOMAIN WARP, the triplanar answer to visible tiling.
+    //
+    // Triplanar cannot take the stochastic path: three projections × three taps
+    // is nine dependent fetches per map on the heaviest fragment in the frame
+    // (the terrain covers most of a grazing shot). It does not need to. Sand,
+    // rock and rubble have no straight structure to protect, so bending the
+    // sample position with the low-frequency field already computed above
+    // destroys the lattice for the cost of two multiply-adds — and a warp
+    // cannot produce a seam, because it is continuous everywhere.
+    //
+    // Amplitude is expressed in TILES so it scales with whatever tiling rate
+    // the bake ships: ±0.53 tiles of coarse bend plus ±0.16 of fine, which is
+    // enough to break the alignment of two neighbouring repeats completely.
+    vec2 ironWarpM = ( vec2( ironLf0, ironLf1 ) - 0.5 ) * ( uIronTiling.x * 1.05 )
+                   + ( vec2( ironLf1, ironLf2 ) - 0.5 ) * ( uIronTiling.x * 0.32 );
+    vec3 ironTriP = ( vIronWorld
+      + vec3( ironWarpM.x, ( ironLf2 - 0.5 ) * uIronTiling.x * 0.55, ironWarpM.y ) ) * ironScale;
+  #else
+    vec3 ironTriP = vIronWorld * ironScale;
   #endif
 
   // ---- 4.5 wetness mask, needed early: it fills the height field's low points
@@ -321,12 +471,62 @@ export const IRON_SURFACE = /* glsl */ `
   #endif
 
   // ---- 1+2 base albedo and the baked mesoscale layer ------------------------
+  // ironWearUv is the offset the wear map is fetched at further down, so the
+  // wear stack stays registered with whichever phase of the tile won here.
+  vec2 ironWearUv = vec2( 0.0 );
   #ifdef IRON_TRIPLANAR
     vec4 ironTexA = ironTriSample( uIronAlbedoHeight, ironTriP, ironTriW );
     vec4 ironTexN = ironTriSample( uIronNormalRoughAo, ironTriP, ironTriW );
+  #elif defined( IRON_STOCHASTIC )
+    vec4 ironTexA;
+    vec4 ironTexN;
+    {
+      // The lattice is ~1.2 tiles across, and its input is warped by the 0.8 m
+      // and 3.0 m bands so the cell boundaries are irregular curves. A straight
+      // cell edge is itself a lattice, and the eye finds a straight line far
+      // faster than it finds a repeated texture.
+      vec2 sv1, sv2, sv3;
+      vec3 sw;
+      ironTriGrid( ironUv * 0.85 + vec2( ironLf2 - 0.5, ironLf1 - 0.5 ) * 0.42,
+                   sv1, sv2, sv3, sw );
+      vec2 o1 = ironTileOffset( sv1 );
+      vec2 o2 = ironTileOffset( sv2 );
+      vec2 o3 = ironTileOffset( sv3 );
+      // Two taps, not three, wherever the third corner contributes less than 4 %.
+      // That is roughly a fifth of the plane and it is two dependent fetches
+      // saved on every one of those pixels; the result is continuous because the
+      // weight being dropped is already going to zero. Legal inside non-uniform
+      // control flow only because every fetch here carries explicit gradients.
+      float ironTap3 = step( 0.04, sw.z );
+      vec4 a1 = texture2DGradEXT( uIronAlbedoHeight, ironUv + o1, ironDdx, ironDdy );
+      vec4 a2 = texture2DGradEXT( uIronAlbedoHeight, ironUv + o2, ironDdx, ironDdy );
+      vec4 a3 = vec4( 0.0 );
+      if ( ironTap3 > 0.5 ) a3 = texture2DGradEXT( uIronAlbedoHeight, ironUv + o3, ironDdx, ironDdy );
+
+      // HEIGHT-WEIGHTED, not barycentric. A linear blend of three phases of the
+      // same masonry is three walls superimposed — every block ghosted, every
+      // course half-strength, and a flatter histogram than the source. Biasing
+      // the weights by the height channel makes the PROUDEST sample win almost
+      // everywhere, so each patch of wall shows one phase at full contrast and
+      // the crossings run down the mortar, which is where a real wall's
+      // discontinuities are anyway.
+      vec3 hw = sw * exp2( vec3( a1.a, a2.a, a3.a ) * 8.0 ) * vec3( 1.0, 1.0, ironTap3 );
+      hw /= max( hw.x + hw.y + hw.z, 1e-5 );
+      ironTexA = a1 * hw.x + a2 * hw.y + a3 * hw.z;
+      ironTexN = texture2DGradEXT( uIronNormalRoughAo, ironUv + o1, ironDdx, ironDdy ) * hw.x
+               + texture2DGradEXT( uIronNormalRoughAo, ironUv + o2, ironDdx, ironDdy ) * hw.y;
+      if ( ironTap3 > 0.5 ) {
+        ironTexN += texture2DGradEXT( uIronNormalRoughAo, ironUv + o3, ironDdx, ironDdy ) * hw.z;
+      }
+      // One tap for the wear map, at the winning phase. Wear is a mask that the
+      // macro band modulates before anything sees it, so a hard switch inside it
+      // is invisible — and a fourth, fifth and sixth fetch to soften something
+      // nobody can see is not a trade worth making.
+      ironWearUv = hw.x > max( hw.y, hw.z ) ? o1 : ( hw.y > hw.z ? o2 : o3 );
+    }
   #else
-    vec4 ironTexA = texture2D( uIronAlbedoHeight, ironUv );
-    vec4 ironTexN = texture2D( uIronNormalRoughAo, ironUv );
+    vec4 ironTexA = texture2DGradEXT( uIronAlbedoHeight, ironUv, ironDdx, ironDdy );
+    vec4 ironTexN = texture2DGradEXT( uIronNormalRoughAo, ironUv, ironDdx, ironDdy );
   #endif
 
   vec3 ironAlbedo = ironTexA.rgb;
@@ -341,10 +541,10 @@ export const IRON_SURFACE = /* glsl */ `
   float ironMetalness = clamp( uIronMat.y, 0.0, 1.0 );
 
   // ---- 7+8 detail and micro normal -----------------------------------------
-  // Both are the SAME normal map re-tiled at a much higher frequency. A second
-  // baked map would cost a third sampler for information the eye cannot tell
-  // apart from this at 2 cm; what matters is that the surface keeps resolving
-  // as the camera closes, which is item two on the brief's defect list.
+  // Procedural grain, two bands, from ironNoiseD2's analytic gradient. What
+  // matters is that the surface keeps resolving as the camera closes — item two
+  // on the brief's defect list — WITHOUT importing the base map's block pattern
+  // into a band where a block pattern has no business being.
   float ironDetailFreq = max( uIronTiling.y, 0.25 );
   float ironDetailFade = 1.0 - smoothstep( uIronDetail.z * 0.45, uIronDetail.z, ironDist );
   float ironMicroFade = 1.0 - smoothstep( uIronDetail.w * 0.4, uIronDetail.w, ironDist );
@@ -357,16 +557,43 @@ export const IRON_SURFACE = /* glsl */ `
   ironMicroFade *= 1.0 - smoothstep( 0.35, 0.9, ironFootprint * ironDetailFreq * uIronTiling.z );
 
   // ---- 3 macro variation, and per-instance variation ------------------------
-  // Evaluated on the surface's dominant world plane. The macro band exists to
-  // break up a large FACE, so plane noise is what it wants; using volume noise
-  // here doubles the hash count and changes nothing anyone can see.
-  float ironUp = clamp( dot( ironGeoN, vec3( 0.0, 1.0, 0.0 ) ), 0.0, 1.0 );
-  vec3 ironAbsN = abs( ironGeoN );
-  vec2 ironPlane = ironAbsN.y > max( ironAbsN.x, ironAbsN.z )
-    ? vIronWorld.xz : ( ironAbsN.x > ironAbsN.z ? vIronWorld.zy : vIronWorld.xy );
-  float ironMacro = ironNoise2( ironPlane * 0.28 );          // ≈ 3.5 m
-  float ironMacroBig = ironNoise2( ironPlane * 0.075 );      // ≈ 13 m
+  // Composed from the octave set built at the top of the shader, so the wear
+  // stack, the tile warp and the albedo band all ride the SAME field — a
+  // grimier zone is also a paler zone is also a rougher zone, which is what
+  // weathering does and what three independent noise fields never look like.
+  float ironMacro = ironLf0 * 0.54 + ironLf1 * 0.31 + ironLf2 * 0.15;
+  float ironMacroBig = ironLf0;
   float ironInstance = ironHash13( floor( vIronOrigin * 3.7 ) + uIronVary.w );
+
+  // ---- 2 the per-stone tonal field, LOOK_SPEC §4.1 layer 2 ------------------
+  // "Two bricks in a wall are never the same colour." The bake carries a
+  // per-block colour jitter, but it is INSIDE a 2.4 m tile, so a 20 m facade is
+  // the same thirty-two stones eight times over and the eye finds that grid in
+  // about a second. This lattice is in WORLD metres and therefore never recurs.
+  //
+  // Cell size and running bond come from the bake pattern's own geometry
+  // (uIronBlock), so the tonal units are block-sized and block-shaped. Their
+  // PHASE cannot be matched — the bake's per-course jitter is not exposed and
+  // LEVEL's uvs restart at every quad — so the field is feathered to neutral
+  // over the outer fifth of each cell instead of being cut hard at the edge. A
+  // soft-edged tonal patch that misses the joint by 10 cm reads as weathering;
+  // a hard-edged one reads as a bug.
+  float ironStone = 0.0;
+  #ifdef IRON_STONE
+  {
+    vec2 cellM = uIronTiling.x / max( uIronBlock.xy, vec2( 0.25 ) );
+    vec2 g = ironPlane / cellM;
+    float course = floor( g.y );
+    g.x += mod( course, 2.0 ) * uIronBlock.z + ironHash13( vec3( 0.0, course, 3.17 ) ) * 0.37;
+    vec2 fc = fract( vec2( g.x, g.y ) );
+    float rnd = ironHash13( vec3( floor( g.x ), course, 7.31 + uIronVary.w ) );
+    float face = smoothstep( 0.0, 0.20, min( fc.x, 1.0 - fc.x ) )
+               * smoothstep( 0.0, 0.20, min( fc.y, 1.0 - fc.y ) );
+    // ±1, zero on the joints. Modulated by the 33 m mask so whole quarters of
+    // the town are more varied than others, which is what a real street does.
+    ironStone = ( rnd - 0.5 ) * 2.0 * face * uIronBlock.w * clamp( ironLfMask, 0.35, 1.4 );
+  }
+  #endif
 
   // ---- the wear stack, LOOK_SPEC §4.4 --------------------------------------
   #ifdef IRON_WEAR
@@ -374,7 +601,7 @@ export const IRON_SURFACE = /* glsl */ `
       vec4 ironTexW = texture2D( uIronWearMap, ironTriP.xz * ironTriW.y
                                + ironTriP.zy * ironTriW.x + ironTriP.xy * ironTriW.z );
     #else
-      vec4 ironTexW = texture2D( uIronWearMap, ironUv );
+      vec4 ironTexW = texture2DGradEXT( uIronWearMap, ironUv + ironWearUv, ironDdx, ironDdy );
     #endif
     float ironConvex = ironTexW.a;
     float ironBakedWear = ironTexW.r;
@@ -405,11 +632,42 @@ export const IRON_SURFACE = /* glsl */ `
   // N·up → dust. 40-70 % coverage on horizontals, nothing on verticals.
   float ironDust = smoothstep( 0.30, 0.86, ironUp ) * uIronWearP.z * ( 0.45 + 0.75 * ironMacro );
 
+  // SILT — dust that has FILLED rather than coated.
+  //
+  // Wind-blown dust does not settle evenly: it drops out of the air into the low
+  // points first and only coats the high ones once the low ones are level. A
+  // paved square is therefore a field of block faces with silted-up joints, and
+  // the joints that are still legible are the ones the wind scours — never all
+  // of them, and never on a grid.
+  //
+  // Without this term the dust is a flat wash laid over relief still at full
+  // strength, and a horizontal ashlar surface keeps a razor-sharp joint grid
+  // running unbroken to the horizon. That grid is a texture repeat by any other
+  // name and it is the first thing the rubric's material test looks for. The
+  // fill is driven by the height channel and gated by the same macro field the
+  // dust is, so it varies over 3-11 m and never reads as a uniform blur.
+  // 1.7, not 2.4. At 2.4 the joint grid went, and so did LOOK_SPEC §4.1's
+  // acceptance floor: the paving measured a display-luminance σ of 8.8 in a
+  // nominally uniform patch against a floor of 12, i.e. it had crossed from
+  // "silted" into "untextured", which is the defect on the other side of the
+  // one this term exists to fix. The fill has to remove the GRID without
+  // removing the relief that is not on a grid.
+  float ironSilt = clamp( ironDust * ( 1.0 - ironTexA.a ) * 1.7, 0.0, 1.0 );
+
   // ---- apply, in the spec's order ------------------------------------------
-  // Chip: a lighter, less weathered substrate, rougher-to-0.35 and metallic if
-  // the material is painted metal.
+  // Chip: a lighter, less weathered substrate, and metallic if the material is
+  // painted metal.
+  //
+  // The 0.35 roughness LOOK_SPEC §4.4 gives for a chip is a PAINT-to-METAL
+  // number — its evidence is a chipped MG receiver. A chip in sandstone exposes
+  // fresh mineral, which is a little smoother than the weathered face it broke
+  // out of and nothing like satin. Applying 0.35 to stone puts a specular
+  // highlight on every arris in the town, and under an 11° raking sun a wall of
+  // those reads as white speckle rather than as stone — so the substrate
+  // gloss follows the substrate, which is what the material's metalness says.
+  float ironChipRough = mix( 0.72, 0.35, step( 0.05, uIronMat.y ) );
   ironAlbedo = mix( ironAlbedo, ironAlbedo * 1.30 + vec3( 0.05, 0.047, 0.042 ), ironChip );
-  ironRoughness = mix( ironRoughness, 0.35, ironChip * 0.75 );
+  ironRoughness = mix( ironRoughness, ironChipRough, ironChip * 0.75 );
   ironMetalness = mix( ironMetalness, min( 1.0, ironMetalness + 0.6 ), ironChip * step( 0.05, uIronMat.y ) );
 
   // Grime: darken 30-35 %, desaturate toward brown, roughen to 0.85.
@@ -417,23 +675,16 @@ export const IRON_SURFACE = /* glsl */ `
   ironAlbedo *= mix( vec3( 1.0 ), ironGrimeCol, ironDirt );
   ironRoughness = mix( ironRoughness, 0.85, ironDirt * 0.65 );
 
-  // Dust: pale ochre, flat, matte.
-  ironAlbedo = mix( ironAlbedo, mix( ironAlbedo, vec3( 0.44, 0.37, 0.26 ), 0.62 ), ironDust );
-  ironRoughness = mix( ironRoughness, 0.88, ironDust * 0.8 );
-
-  // Macro break-up — the term that stops a 70 m wall reading as one surface at
-  // silhouette distance. LOOK_SPEC §4.1 puts the albedo band at ±8 %; the
-  // roughness moves with it, because real weathering zones are both paler AND
-  // rougher than the sheltered stone beside them, and a value-only break-up
-  // reads as a lighting artefact rather than as weather.
-  ironAlbedo *= 1.0 + 0.08 * ( ironMacroBig * 2.0 - 1.0 ) + 0.04 * ( ironMacro * 2.0 - 1.0 );
-  ironRoughness = clamp( ironRoughness + 0.07 * ( ironMacroBig - 0.5 ), 0.045, 1.0 );
-
-  // Per-instance: value, a small chroma rotation, and roughness. Two crates
-  // from the same spec must not be the same crate.
-  ironAlbedo *= 1.0 + uIronVary.y * ( ironInstance * 2.0 - 1.0 );
-  ironAlbedo *= 1.0 + uIronVary.x * vec3( ironInstance - 0.5, 0.0, 0.5 - ironInstance );
-  ironRoughness = clamp( ironRoughness + uIronVary.z * ( ironInstance - 0.5 ), 0.045, 1.0 );
+  // Dust: pale ochre, flat, matte. Coverage is the coat plus the fill, so a
+  // silted joint takes the dust's colour fully while the block face beside it
+  // only takes the wash.
+  float ironDustCover = clamp( ironDust + ironSilt * 0.75, 0.0, 1.0 );
+  ironAlbedo = mix( ironAlbedo, mix( ironAlbedo, vec3( 0.44, 0.37, 0.26 ), 0.62 ), ironDustCover );
+  ironRoughness = mix( ironRoughness, 0.88, ironDustCover * 0.8 );
+  // A silted groove is no longer a groove: it has stopped occluding. Leaving the
+  // baked cavity AO at full strength under a filled joint is what keeps the grid
+  // legible even after the albedo has stopped showing it.
+  ironAo = mix( ironAo, 1.0, ironSilt * 0.58 );
 
   // ---- tint toward the lane's authored colour ------------------------------
   // Luminance-preserving: the baked albedo's VALUE and all of its variation
@@ -453,6 +704,35 @@ export const IRON_SURFACE = /* glsl */ `
     ironAlbedo = mix( ironAlbedo, ironTinted, uIronTint.a );
   }
 
+  // ---- the variation bands, applied AFTER the tint -------------------------
+  // Order matters and this is the one place it was wrong. The tint pulls the
+  // albedo 35 % of the way to one authored luminance; anything applied before
+  // it therefore comes out at ~72 % strength, which is most of the reason a
+  // twenty-metre facade of thirty-two individually-jittered blocks was reading
+  // as one flat colour. Weathering sits ON a material, not under its paint.
+
+  // Per-stone (mesoscale, 0.15-0.6 m). Value, a small chroma rotation and
+  // roughness on the same field: real stone that has weathered paler has also
+  // weathered rougher, and a value-only jitter reads as a lighting artefact.
+  ironAlbedo *= 1.0 + 0.115 * ironStone;
+  ironAlbedo *= 1.0 + 0.05 * ironStone * vec3( 1.0, 0.12, -0.85 );
+  ironRoughness = clamp( ironRoughness + 0.085 * ironStone, 0.045, 1.0 );
+
+  // Macro break-up (3-12 m) — the term that stops a 70 m wall reading as one
+  // surface at silhouette distance. LOOK_SPEC §4.1 puts the albedo band at
+  // ±8 %, modulated by the 0.03 m⁻¹ mask; the roughness moves with it, because
+  // weathering zones are both paler AND rougher than the sheltered stone beside
+  // them.
+  ironAlbedo *= 1.0 + 0.08 * ironLfMask * ( ironMacroBig * 2.0 - 1.0 )
+                    + 0.035 * ( ironMacro * 2.0 - 1.0 );
+  ironRoughness = clamp( ironRoughness + 0.07 * ( ironMacroBig - 0.5 ), 0.045, 1.0 );
+
+  // Per-instance: value, a small chroma rotation, and roughness. Two crates
+  // from the same spec must not be the same crate.
+  ironAlbedo *= 1.0 + uIronVary.y * ( ironInstance * 2.0 - 1.0 );
+  ironAlbedo *= 1.0 + uIronVary.x * vec3( ironInstance - 0.5, 0.0, 0.5 - ironInstance );
+  ironRoughness = clamp( ironRoughness + uIronVary.z * ( ironInstance - 0.5 ), 0.045, 1.0 );
+
   // ---- 4.5 wet ------------------------------------------------------------
   ironAlbedo *= mix( 1.0, 0.60, ironWet );
   ironRoughness = mix( ironRoughness, 0.15, ironWet );
@@ -466,7 +746,9 @@ export const IRON_SURFACE = /* glsl */ `
   // costs four screen-space derivatives and two cross products each, and the
   // frames only differ in their z axis — so the slopes are accumulated in the
   // geometric frame and transformed once, which is what UDN blending is anyway.
-  float ironNStr = ( 1.0 - 0.45 * ironDust ) * ( 1.0 - 0.8 * ironWet );
+  // Silt flattens harder than a dust coat does, because it has physically
+  // removed the relief rather than powdered it.
+  float ironNStr = ( 1.0 - 0.42 * ironDust ) * ( 1.0 - 0.44 * ironSilt ) * ( 1.0 - 0.8 * ironWet );
 
   #ifdef IRON_TRIPLANAR
     // Detail on the DOMINANT axis only — the same plane the macro band used.
@@ -478,23 +760,27 @@ export const IRON_SURFACE = /* glsl */ `
   #endif
 
   // Machined and turned metal carries its scratch band ALONG the direction of
-  // use, never isotropically (LOOK_SPEC §4.2). Stretching the detail lookup
-  // 6:1 turns the same normal map into directional scratches for free.
+  // use, never isotropically (LOOK_SPEC §4.2). Stretching the grain lookup 6:1
+  // turns isotropic pitting into directional scratches for free.
   #ifdef IRON_ANISO
     ironDetUv *= vec2( 0.17, 1.0 );
   #endif
 
   mat3 ironTbn = ironTangentFrame( ironGeoN, vIronWorld, ironDetUv );
 
+  // One grain octave per band, from an analytic noise gradient. No texture fetch
+  // and — the point — no structure: the band carries pitting, not a shrunken
+  // copy of the material's own masonry. One octave rather than two because the
+  // micro band already sits a further 6× up and covers what a second octave here
+  // would have, at half the hashes.
   vec2 ironSlope = vec2( 0.0 );
   if ( ironDetailFade > 0.002 ) {
-    ironSlope += ( texture2D( uIronNormalRoughAo, ironDetUv * ironDetailFreq ).rg * 2.0 - 1.0 )
+    ironSlope += ironNoiseD2( ironDetUv * ironDetailFreq ).yz
       * uIronDetail.x * ironDetailFade * ironNStr;
   }
   if ( ironMicroFade > 0.002 ) {
-    ironSlope += ( texture2D( uIronNormalRoughAo,
-      ironDetUv * ironDetailFreq * uIronTiling.z + vec2( 0.37, 0.11 ) ).rg * 2.0 - 1.0 )
-      * uIronDetail.y * ironMicroFade * ironNStr;
+    vec3 gm = ironNoiseD2( ironDetUv * ironDetailFreq * uIronTiling.z + vec2( 0.37, 0.11 ) );
+    ironSlope += gm.yz * uIronDetail.y * ironMicroFade * ironNStr;
   }
 
   vec3 ironNormalW;
@@ -502,11 +788,30 @@ export const IRON_SURFACE = /* glsl */ `
     ironNormalW = ironTriNormal( uIronNormalRoughAo, ironTriP, ironTriW, ironGeoN, ironNStr );
     ironNormalW = normalize( ironNormalW + ironTbn[ 0 ] * ironSlope.x + ironTbn[ 1 ] * ironSlope.y );
   #else
-    // 0.8, not 1.0. The bake authors its normal strength against a flat review
-    // chart lit head-on; on a real facade at a raking 11° sun the same relief
-    // reads embossed, because every block edge is catching a terminator. This
-    // is the one place the bake's own number is deliberately not believed.
-    ironSlope += ( ironTexN.rg * 2.0 - 1.0 ) * ironNStr * 0.7;
+    // 0.46, not 1.0, and down from 0.7 after seeing it at 79° incidence.
+    //
+    // The bake authors its normal strength (3.2 for sandstone) against a flat
+    // review chart lit head-on. On a real facade at an 11° sun the light is
+    // within 11° of the surface PLANE, so any slope past that angle flips N·L
+    // through zero: the wall stops being shaded and becomes a two-tone mask of
+    // blown highlight and black self-shadow. Summed with the two grain bands the
+    // old numbers reached ~1.6 of slope — 58° of tilt — and a sandstone arcade
+    // rendered as white speckle. This is the one place the bake's own number is
+    // deliberately not believed.
+    //
+    // FOOTPRINT GUARD, the same one the grain bands get. The bake's finest
+    // octave is ~4 cm; on a facade seen at 79° incidence the pixel footprint
+    // ALONG the surface is five times its footprint across, and an isotropic mip
+    // chain cannot represent that — so what arrives is a sub-pixel normal
+    // DISTRIBUTION being drawn as though it were shape. At a raking sun every
+    // one of those normals lands on one side or the other of the terminator and
+    // the result is speckle, not stone. Past the guard the relief is handed to
+    // roughness, which is what a filtered normal distribution physically is;
+    // 0.30 rather than 0 keeps the silhouette-scale relief that stops a distant
+    // wall going to paper.
+    float ironBaseSharp = 1.0 - smoothstep( 0.020, 0.075, ironFootprint );
+    ironSlope += ( ironTexN.rg * 2.0 - 1.0 ) * ironNStr * 0.46 * mix( 0.30, 1.0, ironBaseSharp );
+    ironRoughness = clamp( ironRoughness + 0.15 * ( 1.0 - ironBaseSharp ), 0.045, 1.0 );
     ironNormalW = normalize( ironTbn * vec3( ironSlope, 1.0 ) );
   #endif
 

@@ -261,9 +261,18 @@ class IronSky implements SkyService, RenderSystem {
     // overcast term so `setWeather` genuinely changes the sky.
     u.uSkyCloudCoverage.value = Math.min(0.92, 0.3 + this.mutable.overcast * 0.55);
     u.uSkyCloudDensity.value = this.cloudsAvailable ? 0.85 + this.mutable.overcast * 0.5 : 0;
-    // Sun irradiance above the deck, divided by 4π because the cloud phase
-    // function carries the solid angle.
-    const cloudE = (sunIlluminanceLux(Math.max(4, this.sunElevationDeg)) * 1.15) / (4 * Math.PI);
+    // Sun illuminance normal to the sun ABOVE the deck, in lux. 1.15× the
+    // ground-level figure because a 900 m base is above most of the marine
+    // aerosol the §1 curve was fitted through.
+    //
+    // NOT divided by 4π. It used to be, and the march then multiplied its phase
+    // by 4π to undo it — a round trip that left the cloud at exactly its
+    // single-scattering radiance with no multiple-scattering orders, i.e. about
+    // a third of what a real cumulus returns outside the forward lobe. The
+    // deficit was being papered over by an oversized ambient term, and that is
+    // what made the deck flat. `ironCloudPhase` is a genuine sr⁻¹ phase now, so
+    // this is a genuine illuminance.
+    const cloudE = sunIlluminanceLux(Math.max(4, this.sunElevationDeg)) * 1.15;
     u.uSkyCloudSun.value.set(
       cloudE * this.sunChromaColor.r,
       cloudE * this.sunChromaColor.g,

@@ -23,15 +23,34 @@
  * NOT up. At an 11° sun a field of up-facing normals receives sin(11°) = 0.19 of
  * the direct beam and goes dead; a field of outward-facing normals lights on its
  * sunward side and falls into shadow on the other, which is what every low-sun
- * meadow in the reference corpus actually does. Because the blades are
- * double-sided, the far side of each tuft flips to the anti-sun normal and picks
- * up the sky term instead — the two-lobe read that makes a field look deep.
+ * meadow in the reference corpus actually does.
+ *
+ * EVERY BLADE IS A SOLID, NOT A ZERO-THICKNESS CARD. See the long note on
+ * `stripe()` in `geometry.ts`: a double-sided card has its normal flipped into
+ * the camera's hemisphere by `gl_FrontFacing`, which zeroes the sun term across
+ * the whole field on any framing that is not looking straight down-sun. A 1 mm
+ * solid blade keeps its true outward normal on both faces, is drawn FrontSide,
+ * and gets the sunward/skyward two-lobe read a real meadow has.
+ *
+ * BLADES STAND UP. Dry Mediterranean grass in August is a stiff straw sheaf that
+ * nods at the tip, not a splayed rosette. The `lean` numbers below are
+ * deliberately small; the travelling gust in the wind deform supplies the rest
+ * of the motion. Large static lean is what turned this field into a carpet of
+ * radiating spikes in the first review round.
  */
 import * as THREE from 'three';
 import type { Rng } from '@/engine/types';
 import { MeshBuilder, stripe } from '@/world/vegetation/geometry';
 
 const TAU = Math.PI * 2;
+
+/**
+ * Blade thickness, metres. A real grass blade is 0.2–0.5 mm; 1 mm is the
+ * smallest offset that stays clear of depth-buffer resolution out at the far end
+ * of `grassRadius` (55 m on the High tier) and is still under a tenth of a pixel
+ * at 1 m. See the `stripe()` header for why the blade is a solid at all.
+ */
+const BLADE_THICKNESS = 0.0007;
 
 export interface GrassAssets {
   /** Cluster LOD ladder, coarsest last. */
@@ -68,19 +87,26 @@ function blade(
   const nz = dirZ * 0.80;
 
   stripe(b, segments, true, (t, s) => {
-    // Quadratic droop in arc length: a cantilever under its own weight, and the
-    // reason a blade tips over near the top instead of describing a circle.
+    // Quartic droop in arc length: the blade is stiff over its lower half and
+    // nods only near the tip, which is what dry standing grass actually does.
+    // A quadratic bends from the root and reads as a rosette of spikes.
     const arc = t * length;
-    s.px = ox + dirX * lean * arc * arc;
-    s.py = arc * (1 - lean * lean * arc * 0.35);
-    s.pz = oz + dirZ * lean * arc * arc;
+    const nod = lean * arc * arc * arc;
+    s.px = ox + dirX * nod;
+    // Arc-length preservation: a blade that swings out must lose height. Floored
+    // so a heavily-laid-over thatch blade cannot invert through the ground.
+    s.py = arc * Math.max(0.20, 1 - lean * lean * arc * arc * 0.45);
+    s.pz = oz + dirZ * nod;
     // Blades taper from a shoulder at ~15%, not from the base: the base is the
     // sheath and is nearly parallel-sided.
     const taper = t < 0.15 ? 1 : 1 - Math.pow((t - 0.15) / 0.85, 1.35);
-    s.halfWidth = width * 0.5 * Math.max(0.04, taper);
+    // Floored at 12 %, not 4 %: a blade is a flat ribbon, and letting the width
+    // collapse below its own thickness turns the last centimetre into a square
+    // rod with a blunt end, which reads as a stalk rather than a blade.
+    s.halfWidth = width * 0.5 * Math.max(0.12, taper);
     s.wx = wx; s.wy = 0; s.wz = wz;
     s.nx = nx; s.ny = ny; s.nz = nz;
-  });
+  }, BLADE_THICKNESS);
 }
 
 /** A nodding seed head — the silhouette element that says "dry grass, late summer". */
@@ -96,7 +122,7 @@ function seedStalk(b: MeshBuilder, ox: number, oz: number, yaw: number, height: 
     s.halfWidth = 0.0035 * (1 - t * 0.4);
     s.wx = -dirZ; s.wy = 0; s.wz = dirX;
     s.nx = dirX * 0.7; s.ny = 0.7; s.nz = dirZ * 0.7;
-  });
+  }, BLADE_THICKNESS);
   // The head: five short awns fanning off the tip.
   const tx = ox + dirX * lean * height * height;
   const ty = height;
@@ -112,7 +138,7 @@ function seedStalk(b: MeshBuilder, ox: number, oz: number, yaw: number, height: 
       s.halfWidth = 0.006 * (1 - t);
       s.wx = -Math.sin(a); s.wy = 0; s.wz = Math.cos(a);
       s.nx = Math.cos(a) * 0.6; s.ny = 0.8; s.nz = Math.sin(a) * 0.6;
-    });
+    }, BLADE_THICKNESS);
   }
 }
 
@@ -122,42 +148,61 @@ function buildCluster(blades: number, segments: number, stalks: number, rng: Rng
     // Golden angle round the tuft, jittered, with the blade root offset from
     // centre — a tuft whose blades all start at one point reads as a shuttlecock.
     const yaw = i * 2.39996 + rng.range(-0.35, 0.35);
-    const r = 0.02 + 0.105 * rng.next();
-    const length = 0.22 + 0.32 * rng.next();
+    // The roots sit inside a 7 cm disc, not a 12 cm one: a tuft is a sheaf that
+    // shares one crown, and spreading the roots turns it into a starfish.
+    const r = 0.012 + 0.058 * rng.next();
+    // Wide length spread on purpose: a tuft whose blades are all the same length
+    // has a machined silhouette, and the eye reads the outline of a grass clump
+    // long before it reads any individual blade.
+    const length = 0.22 + 0.44 * rng.next();
     blade(
       b,
       Math.cos(yaw) * r,
       Math.sin(yaw) * r,
+      // Azimuth jitter, but the blade's own bend direction stays close to its
+      // root azimuth so the sheaf opens outward instead of tangling.
       yaw + rng.range(-0.5, 0.5),
       length,
-      0.011 + 0.007 * rng.next(),
-      0.55 + 0.75 * rng.next(),
+      // 5–9 mm. A real blade of dry coastal grass is 3–6 mm and this is already
+      // generous; the previous 11–18 mm rendered ten pixels across at two metres
+      // and read as chives.
+      0.005 + 0.004 * rng.next(),
+      0.40 + 1.05 * rng.next(),
       segments,
     );
   }
   for (let i = 0; i < stalks; i++) {
     const yaw = rng.range(0, TAU);
-    seedStalk(b, Math.cos(yaw) * 0.03, Math.sin(yaw) * 0.03, yaw, 0.46 + 0.22 * rng.next(), rng);
+    seedStalk(b, Math.cos(yaw) * 0.03, Math.sin(yaw) * 0.03, yaw, 0.52 + 0.26 * rng.next(), rng);
   }
   return b;
 }
 
-/** Low splayed blades that carpet the gaps between tufts. */
+/**
+ * Low blades that carpet the gaps between tufts. They lie over further than a
+ * standing blade does — that is their job, they are the litter layer — but not
+ * flat: a prone blade at an 11° sun presents its edge to the light and reads as
+ * a black stroke on bright soil, which is exactly the artefact this pass is
+ * removing. 45–60° off vertical keeps them covering ground while still catching
+ * the beam.
+ */
 function buildThatch(rng: Rng): MeshBuilder {
   const b = new MeshBuilder();
-  const count = 16;
+  const count = 9;
   for (let i = 0; i < count; i++) {
     const yaw = i * 2.39996 + rng.range(-0.4, 0.4);
-    const r = 0.05 + 0.30 * rng.next();
-    // Long, low and nearly prone: `lean` well above 1 lays the blade over.
+    const r = 0.04 + 0.16 * rng.next();
     blade(
       b,
       Math.cos(yaw) * r * 0.4,
       Math.sin(yaw) * r * 0.4,
       yaw,
-      0.20 + 0.20 * rng.next(),
-      0.021,
-      2.3 + 1.5 * rng.next(),
+      0.19 + 0.19 * rng.next(),
+      // 9 mm, not 21 mm. The old thatch went out at up to 2.9× instance scale,
+      // so a "blade" landed on the ground 5 cm wide and a metre long — a plank,
+      // and the single most literal source of the black-slash read.
+      0.009,
+      1.8 + 1.2 * rng.next(),
       2,
     );
   }
@@ -194,13 +239,17 @@ export function buildGrassAssets(rng: Rng): GrassAssets {
   // triangle count. Coverage AND blade fineness are both what the eye measures
   // in a grass field; blade curvature is not. The reference (bfv_gp_001) shows
   // near-field grass as a CONTINUOUS mat of FINE blades, almost no soil showing.
-  const l0 = buildCluster(15, 3, 2, rng.fork('grass.l0'));
-  const l1 = buildCluster(7, 3, 1, rng.fork('grass.l1'));
+  // Blade counts are down ~15 % from the pre-solid-blade version because every
+  // blade now costs two sheets instead of one; the tuft still reads denser than
+  // it did, because the roots are packed into half the radius and the blades no
+  // longer splay out of the sheaf.
+  const l0 = buildCluster(17, 3, 2, rng.fork('grass.l0'));
+  const l1 = buildCluster(8, 3, 1, rng.fork('grass.l1'));
   const l2 = buildCluster(3, 2, 0, rng.fork('grass.l2'));
   return {
     cluster: [l0.toGeometry('grass.l0'), l1.toGeometry('grass.l1'), l2.toGeometry('grass.l2')],
     thatch: buildThatch(rng.fork('grass.thatch')).toGeometry('grass.thatch'),
     mat: buildMat(rng.fork('grass.mat')).toGeometry('grass.mat'),
-    height: 0.5,
+    height: 0.55,
   };
 }

@@ -36,17 +36,33 @@ export const OCEAN_GRID: Readonly<Record<'low' | 'high', OceanGridSpec>> = Objec
 });
 
 /**
- * `position` is the LOCAL radial offset with **y = 0**, and the ring radius rides
- * in `uv.x`.
+ * `position` is the LOCAL radial offset with **y = −`depthFloor`**, and the ring
+ * radius rides in `uv.x`.
  *
- * The y = 0 is not cosmetic. This mesh's world position comes from a uniform, not
- * from its model matrix, so any pass that draws it with a material OTHER than
- * ours — RCORE's depth prepass draws `RenderLayer.Water` for depth — sees only
- * the raw attribute. With the radius in `position.y` that pass writes a 32 km
- * CONE into the depth buffer; with y = 0 it writes the still-water plane, which
- * is within a wave height of the truth and harmless.
+ * THE Y VALUE IS THE MOST LOAD-BEARING NUMBER IN THIS FILE, and getting it wrong
+ * deletes half the sea. This mesh's world position comes from a uniform, not from
+ * its model matrix, so any pass that draws it with a material OTHER than ours —
+ * `src/render/passes/scene.ts`'s depth prepass draws `RenderLayer.Water` under an
+ * override — sees only the raw attribute.
+ *
+ * It was 0, i.e. the still-water plane, on the reasoning that "wave height is the
+ * only error". It is not: the prepass writes that plane into the depth buffer
+ * the forward water pass then depth-TESTS against, so every part of the displaced
+ * surface that sits BELOW still water — every trough, half the sea by area — is
+ * rejected before it shades. The frame's whole mid-field came out as horizontal
+ * bands of water alternating with bands of whatever was behind it, which reads
+ * exactly like a flat pale sheet with no wave detail, because half the wave
+ * detail is the half that got culled.
+ *
+ * So the plane goes to the bottom of the wave envelope instead of its middle:
+ * every fragment of the real surface is then strictly in front of it and the
+ * depth test does the one job it is here for, which is letting the freighter and
+ * the breakwater occlude the sea. The cost is that `SceneDepth` over open water
+ * reports the sea `depthFloor` metres lower than it is — the same class of error
+ * as before and about twice the size, on a surface every consumer of that buffer
+ * already treats as distant.
  */
-export function buildOceanGrid(spec: OceanGridSpec): THREE.BufferGeometry {
+export function buildOceanGrid(spec: OceanGridSpec, depthFloor: number): THREE.BufferGeometry {
   const { rings, segments, innerRadius, outerRadius } = spec;
   const vertexCount = 1 + rings * segments;
   const position = new Float32Array(vertexCount * 3);
@@ -56,6 +72,9 @@ export function buildOceanGrid(spec: OceanGridSpec): THREE.BufferGeometry {
   const radii = new Float32Array(rings);
   for (let r = 0; r < rings; r++) radii[r] = innerRadius * Math.pow(growth, r);
 
+  const floorY = -Math.max(depthFloor, 0);
+  position[1] = floorY;
+
   // Vertex 0 is the centre of the fan.
   let p = 3;
   let q = 2;
@@ -64,7 +83,7 @@ export function buildOceanGrid(spec: OceanGridSpec): THREE.BufferGeometry {
     for (let s = 0; s < segments; s++) {
       const theta = (s / segments) * Math.PI * 2;
       position[p] = Math.cos(theta) * radius;
-      position[p + 1] = 0;
+      position[p + 1] = floorY;
       position[p + 2] = Math.sin(theta) * radius;
       uv[q] = radius;
       p += 3;
