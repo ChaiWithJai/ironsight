@@ -143,6 +143,49 @@ export class IronGpuBakeDevice implements GpuBakeDevice {
   }
 
   /**
+   * MRT with a PER-ATTACHMENT format and mip policy.
+   *
+   * `renderMrt` gives every attachment the desc's single format, which is wrong
+   * for the one case that matters most: a PBR set wants albedo+height at RGBA8
+   * with a colour mip chain, a packed normal at RG16F with a Toksvig chain that
+   * folds roughness into the mips, and a wear mask at R8 with plain box mips.
+   * Forcing all three to the widest format triples the bake's VRAM and loses the
+   * roughness/normal coupling that stops distant surfaces looking oversharpened.
+   *
+   * `formats.length` sets the attachment count; `mips` may be shorter, in which
+   * case remaining attachments fall back to `desc.mips`.
+   */
+  renderMrtTyped(desc: GpuBakeDesc, formats: readonly RTFormat[], mips?: readonly MipMode[]): THREE.Texture[] {
+    if (formats.length === 0) throw new Error(`renderMrtTyped("${desc.name}") needs at least one format`);
+    const targets = formats.map((format, i) =>
+      this.allocate({ ...desc, mips: mips?.[i] ?? desc.mips }, format),
+    );
+    this.drawOnce(desc, targets, 0);
+    targets.forEach((t, i) => buildMipChain(this.gl, t, mips?.[i] ?? desc.mips ?? MipMode.None));
+    this.gl.finish();
+    return targets.map((t) => t.texture);
+  }
+
+  /**
+   * Free one texture produced by this device.
+   *
+   * Multi-pass bakes routinely produce intermediates — a height/flow field that
+   * only exists to feed the pass that derives albedo and normals from it. Those
+   * are full-resolution float targets; holding them until `dispose()` means a
+   * dozen material bakes each keep two dead RGBA16F surfaces alive and the bake
+   * peaks at several hundred MB of VRAM it never needed.
+   *
+   * Releasing a texture the device does not own is a no-op, not an error, so a
+   * caller may release defensively without tracking provenance.
+   */
+  release(texture: THREE.Texture): void {
+    const owned = this.owned.get(texture);
+    if (!owned) return;
+    this.owned.delete(texture);
+    this.gl.destroyTexture(owned);
+  }
+
+  /**
    * Ping-pong a shader over its own previous output. `uPass` carries the
    * iteration index so a shader can branch on the first pass (seed the field)
    * without a second desc. Erosion, flow, jump-flood, blur, relaxation.

@@ -36,6 +36,7 @@ import {
   type QualitySettings,
 } from '@/engine/types';
 import { createNullPlayer, trackNull, type NullPlayerService } from '@/bootstrap/nulls';
+import { ActorTable } from '@/game/registry';
 
 /**
  * Module-scoped so `resetPlayer` can reach the instance. `registerPlayerBakes`
@@ -45,9 +46,29 @@ import { createNullPlayer, trackNull, type NullPlayerService } from '@/bootstrap
  */
 let instance: NullPlayerService | null = null;
 
+/**
+ * The lane-local actor table, for the two GAME files that need per-entity state
+ * the `PlayerService` contract deliberately does not expose — `conquest.ts`
+ * reads `assistCredit` off a victim at the moment of a kill, because the sim bus
+ * is deferred and the damage ledger it came from is already cleared by the time
+ * the event is delivered.
+ *
+ * Module-scoped rather than a contract method on purpose: no OTHER lane may
+ * reach a `GameActor`. Anything cross-lane goes through `PlayerService`.
+ *
+ * Returns null until the service is constructed, which is a real state — `reset`
+ * and `registerBakes` both run before `create`.
+ */
+export function laneActors(): ActorTable | null {
+  return actorTable;
+}
+
+let actorTable: ActorTable | null = null;
+
 export function createPlayerService(ctx: BootContext): PlayerService {
   const player = trackNull(createNullPlayer(ctx.services.input.source));
   instance = player;
+  actorTable = new ActorTable();
 
   ctx.addTick({
     name: 'game.intent',
@@ -80,5 +101,6 @@ export function registerPlayerBakes(_assets: AssetRegistry, _quality: Readonly<Q
  * during the previous capture, or bots leak across shots as invisible movers.
  */
 export function resetPlayer(_seed: number): void {
+  actorTable?.clear?.();
   instance?.resetTransient();
 }

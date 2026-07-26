@@ -389,6 +389,22 @@ export class BakeGl {
     this.renderer.resetState();
   }
 
+  /**
+   * Destroy one texture early and reclaim its budget.
+   *
+   * Multi-pass bakes leave large float intermediates behind that are dead the
+   * moment the derived set is written; without this they survive until
+   * `dispose()` and the bake's peak VRAM is several times its steady state.
+   * Idempotent — destroying an already-destroyed texture does nothing.
+   */
+  destroyTexture(tex: BakeTexture): void {
+    const i = this.owned.indexOf(tex);
+    if (i < 0) return;
+    this.owned.splice(i, 1);
+    this.residentBytes = Math.max(0, this.residentBytes - tex.bytes);
+    this.gl.deleteTexture(tex.handle);
+  }
+
   dispose(): void {
     const gl = this.gl;
     for (const t of this.owned) gl.deleteTexture(t.handle);

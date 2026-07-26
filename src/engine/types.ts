@@ -76,6 +76,18 @@ export interface AssetKey<T> {
   readonly __payload?: (t: T) => void;
 }
 
+/**
+ * An asset key with its payload type erased, for positions that only need the
+ * key's IDENTITY — dependency lists, cache invalidation, debug tables.
+ *
+ * The phantom above is a function *parameter*, which makes `AssetKey<T>`
+ * contravariant in `T`: `AssetKey<WeaponModel>` is therefore NOT assignable to
+ * `AssetKey<unknown>`, and a `dependsOn: readonly AssetKey<unknown>[]` rejects
+ * every concrete key anyone actually has. `never` is the bottom type, so it is
+ * assignable *from* every payload and is the correct erasure here.
+ */
+export type AnyAssetKey = AssetKey<never>;
+
 /** Simulation constants. Shared by every lane; changing these is a CORE call. */
 export const Sim = {
   /**
@@ -1149,7 +1161,7 @@ export interface BakeStep<T = unknown> {
   readonly kind: BakeKind;
   /** Bump to invalidate the IndexedDB cache entry. */
   readonly version: number;
-  readonly dependsOn?: readonly AssetKey<unknown>[];
+  readonly dependsOn?: readonly AnyAssetKey[];
   /**
    * Relative cost in bake units. When Σcost exceeds `BakeProfile.unitCeiling`
    * the scheduler DEGRADES RESOLUTION on the lowest-priority steps rather than
@@ -1863,6 +1875,14 @@ export enum PassOrder {
   Tonemap = 860,
   LensFx = 880,
   Hud = 900,
+  /**
+   * Developer readouts drawn over the finished frame: the audio voice table, the
+   * frame-graph inspector, physics wireframes. After `Hud` so an overlay is never
+   * hidden behind gameplay UI, and after `Tonemap` so its colours are literal
+   * rather than graded — a debug readout whose contrast changes with exposure is
+   * unreadable exactly when you need it.
+   */
+  DebugOverlay = 950,
   Present = 1000,
 }
 

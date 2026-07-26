@@ -320,7 +320,7 @@ float ironWorleyEdge(vec2 p, uint seed, int period){
   return f.y - f.x;
 }
 /**
- * Voronoi with a SMOOTH minimum. A hard `min` puts a first-derivative
+ * Voronoi with a SMOOTH minimum. A hard \`min\` puts a first-derivative
  * discontinuity along every cell boundary, which shows up as a hairline crease
  * in any normal map derived from it; the exponential blend removes it.
  */
@@ -475,7 +475,7 @@ export const GLSL_RIDGED = /* glsl */ `
 /**
  * Ridged MULTIFRACTAL (Musgrave): each octave is weighted by the previous one,
  * so ridges reinforce along their length instead of being modulated uniformly.
- * `offset` sets the ridge height, `gain` how strongly a high octave feeds the
+ * \`offset\` sets the ridge height, \`gain\` how strongly a high octave feeds the
  * next. This is the cliff-strata and cracked-render generator.
  */
 float ironRidgedMulti2(vec2 p, int octaves, float lacunarity, float gain, float offset, uint seed){
@@ -589,7 +589,7 @@ float ironGabor(vec2 p, float freq, float angle){
   return exp(-dot(p, p) * 2.0) * cos(6.2831853 * freq * dot(p, d));
 }
 /**
- * Anisotropic streak noise: bands stretched along `angle`, jittered per band.
+ * Anisotropic streak noise: bands stretched along \`angle\`, jittered per band.
  * Wood grain, brushed metal, rain streaking down stucco, sand ripple.
  */
 float ironStreak2(vec2 p, float angle, float stretch, int period, uint seed){
@@ -748,7 +748,7 @@ vec3 ironOctDecode(vec2 e){
   return normalize(n);
 }
 /**
- * Tangent-space normal from an ANALYTIC height gradient. `strength` is metres of
+ * Tangent-space normal from an ANALYTIC height gradient. \`strength\` is metres of
  * height per UV unit; feeding a finite difference here instead is what makes
  * procedural normal maps look faceted at high zoom.
  */

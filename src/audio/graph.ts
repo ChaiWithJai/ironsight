@@ -149,7 +149,12 @@ export class AudioGraph {
     const channels = Math.max(1, asset.channels.length);
     const frames = asset.channels[0]?.length ?? 1;
     buf = this.ctx.createBuffer(channels, frames, asset.sampleRate);
-    for (let c = 0; c < channels; c++) buf.copyToChannel(asset.channels[c], c, 0);
+    // `copyToChannel` demands Float32Array<ArrayBuffer>; a baked channel may be a
+    // view over a SharedArrayBuffer (worker-produced PCM), which is the same
+    // bytes but a different TS type. The copy is one-time, at first playback.
+    for (let c = 0; c < channels; c++) {
+      buf.copyToChannel(new Float32Array(asset.channels[c]!), c, 0);
+    }
     this.buffers.set(key, buf);
     return buf;
   }
@@ -176,8 +181,10 @@ export class AudioGraph {
     const rising = next === 'a' ? pair.ga : pair.gb;
     const falling = next === 'a' ? pair.gb : pair.ga;
     const buf = this.ctx.createBuffer(2, ir.left.length, ir.sampleRate);
-    buf.copyToChannel(ir.left, 0, 0);
-    buf.copyToChannel(ir.right, 1, 0);
+    // Same buffer-provenance widening as `buffer()` above: IRs are baked in a
+    // worker and arrive as views the WebAudio typings will not accept directly.
+    buf.copyToChannel(new Float32Array(ir.left), 0, 0);
+    buf.copyToChannel(new Float32Array(ir.right), 1, 0);
     node.buffer = buf;
     const t = this.ctx.currentTime;
     // Equal-power would be ideal but the two IRs are correlated only in the

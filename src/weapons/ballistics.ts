@@ -95,7 +95,16 @@ class IronBallistics implements BallisticsService, TickSystem {
   private readonly tmpTo = new THREE.Vector3();
   private readonly whizbyPoint = new THREE.Vector3();
   private whizbyDistance = -1;
-  private readonly filter: QueryFilter = { groups: LAYER_SHOOTABLE, solid: true };
+  /**
+   * Reused across every projectile sweep this tick — one allocation, not one per
+   * bullet per frame. `excludeEntity` is rewritten per shot so a round cannot hit
+   * the rifle that fired it, which means the local view must be mutable even
+   * though the contract hands it out readonly.
+   */
+  private readonly filter: { -readonly [K in keyof QueryFilter]: QueryFilter[K] } = {
+    groups: LAYER_SHOOTABLE,
+    solid: true,
+  };
 
   constructor(private readonly ctx: BootContext) {}
 

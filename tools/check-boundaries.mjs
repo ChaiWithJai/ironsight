@@ -53,6 +53,10 @@ const SHARED = [
   'engine/units',
   'engine/clock',
   'engine/macro',
+  // Shared ECS component declarations (Health, Transform, …). These are data
+  // definitions every gameplay lane reads and writes through the ComponentStore;
+  // routing them via a service would be indirection for its own sake.
+  'engine/components',
   'bootstrap/nulls',
   // engine.ts reads the descriptor table to drive the boot topological sort.
   // Mildly inverted — the core knowing the concrete table — but the table names
