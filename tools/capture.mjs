@@ -122,16 +122,32 @@ const BASE = `http://127.0.0.1:${PORT}/`;
 log(`serving dist/ at ${BASE}`);
 
 // ------------------------------------------------------------------- browser
-// macOS headless has no usable GPU path, so we force ANGLE→SwiftShader. It is a
-// complete, conformant WebGL2 implementation: slow, but pixel-accurate, which is
-// exactly the tradeoff a screenshot harness wants. Frame budget is expressed in
-// frames rendered (see harness.capture), never in wall-clock, so the software
-// rasteriser cannot change what a shot looks like.
+// GPU SELECTION — this is worth understanding before changing it.
+//
+// This harness originally forced ANGLE→SwiftShader on the assumption that
+// headless Chromium on macOS has no usable GPU path. THAT WAS WRONG. Chromium's
+// new headless mode reaches ANGLE's Metal backend directly:
+//
+//   headless + swiftshader flags  →  "SwiftShader Device (LLVM)"
+//   headless, no swiftshader flag →  "ANGLE Metal Renderer: Apple M1 Ultra"
+//
+// The cost of getting that wrong was severe: a single 1080p shot of the full
+// pipeline (sky LUTs, GTAO, volumetrics, TAA, water) took ~11.6 minutes under
+// SwiftShader, which made a critic-loop round take hours and throttled the
+// entire project's iteration rate.
+//
+// Set IRONSIGHT_SOFTWARE_GL=1 to force SwiftShader back on — useful if a machine
+// has no GPU, or to check whether an artefact is a driver bug rather than ours.
+// Determinism does not depend on this: the frame budget is counted in FRAMES
+// (see harness.capture), never wall-clock, so the rasteriser cannot change what
+// a shot contains — only how fast it arrives. Pixel values CAN differ slightly
+// between backends, so do not mix backends within one comparison set.
+const SOFTWARE_GL = process.env.IRONSIGHT_SOFTWARE_GL === '1';
 const browser = await chromium.launch({
   args: [
-    '--use-gl=angle',
-    '--use-angle=swiftshader',
-    '--enable-unsafe-swiftshader',
+    ...(SOFTWARE_GL
+      ? ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']
+      : ['--use-angle=metal', '--enable-gpu']),
     '--enable-webgl',
     '--enable-webgl2-compute-context',
     '--ignore-gpu-blocklist',
