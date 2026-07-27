@@ -26,7 +26,7 @@ import { createServer } from 'node:http';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { extname, join, resolve, normalize } from 'node:path';
+import { extname, join, relative, resolve, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(fileURLToPath(new URL('../', import.meta.url)));
@@ -119,7 +119,11 @@ const server = createServer(async (req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const PORT = server.address().port;
 const BASE = `http://127.0.0.1:${PORT}/`;
-log(`serving dist/ at ${BASE}`);
+// Name the directory actually being served, not the literal string "dist/".
+// With IRONSIGHT_DIST set — which every parallel lane sets — a hardcoded "dist/"
+// reads as "your override was ignored and you are shooting a stale tree", and
+// verifying that it was NOT ignored costs a detour every time.
+log(`serving ${relative(ROOT, DIST) || '.'}/ at ${BASE}`);
 
 // ------------------------------------------------------------------- browser
 // GPU SELECTION — this is worth understanding before changing it.

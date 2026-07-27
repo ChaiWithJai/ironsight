@@ -584,7 +584,17 @@ export function ropeCoil(
   turns = 3.4,
 ): void {
   const r0 = 0.075;
-  const g = b.m('fabric');
+  /**
+   * `wood`, not `fabric`. `fabric` is the TARP entry — a pale, double-sided,
+   * 0.55-albedo canvas that is lit on both faces, and a coil built out of it
+   * resolved in `level_bravo` as a single flat blob at 197/160/129 against a
+   * deck at 40: the brightest object in the lower half of the frame, with no
+   * internal form at all, at 8 m from the lens. Hemp cordage is a mid-brown
+   * closer to `wood` (0x6b4f33), it is not translucent, and at that albedo the
+   * individual turns finally separate into light and shade instead of merging
+   * into one value.
+   */
+  const g = b.m('wood');
   const phase = rng.range(0, Math.PI * 2);
   for (let layer = 0; layer < 2; layer++) {
     const pts: THREE.Vector3[] = [];
@@ -601,7 +611,7 @@ export function ropeCoil(
       ));
     }
     g.setUvShift(rng.range(0, 20), rng.range(0, 20));
-    g.tube(pts, r0, 5, 1);
+    g.tube(pts, r0, 6, 1);
     g.clearUvShift();
   }
   // The standing part running off out of the coil and dying on the deck.

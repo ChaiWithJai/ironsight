@@ -141,14 +141,14 @@ function archSpandrels(
     const yTop = Math.max(ay, by);
     const yBot = Math.min(ay, by);
     if (o.y1 - yTop > 1e-4) facePanel(b, mat, ax, yTop, bx, o.y1, z, dir, uvScale);
-    if (false && yTop - yBot > 1e-5 && bx - ax > 1e-5) { // ZZDEBUG
+    if (yTop - yBot > 1e-5 && bx - ax > 1e-5) {
       // The wedge under the rectangle. Third vertex on the side whose chord end
       // is LOWER, so the triangle is the region between chord and rectangle.
       const cx = by > ay ? ax : bx;
       if (dir > 0) {
-        m.triangle(_p[0].set(ax, ay, z), _p[1].set(bx, by, z), _p[2].set(cx, yTop, z), uvScale);
+        m.triangleOrtho(_p[0].set(ax, ay, z), _p[1].set(bx, by, z), _p[2].set(cx, yTop, z), uvScale);
       } else {
-        m.triangle(_p[0].set(ax, ay, z), _p[1].set(cx, yTop, z), _p[2].set(bx, by, z), uvScale);
+        m.triangleOrtho(_p[0].set(ax, ay, z), _p[1].set(cx, yTop, z), _p[2].set(bx, by, z), uvScale);
       }
     }
   }
@@ -171,7 +171,7 @@ function archIntrados(b: LevelBuild, mat: MatKey, o: Opening, zFront: number, zB
     const ay = ys + Math.sin(a0) * r;
     const bx = xc - Math.cos(a1) * r;
     const by = ys + Math.sin(a1) * r;
-    m.quad(
+    m.quadOrtho(
       _p[0].set(bx, by, zFront), _p[1].set(ax, ay, zFront), _p[2].set(ax, ay, zBack), _p[3].set(bx, by, zBack),
       uvScale,
     );
@@ -274,14 +274,14 @@ function voussoirRing(b: LevelBuild, trim: MatKey, op: Opening, reveal: number, 
     const C1 = at(_w[5], a1, rIn, zb);
     const D1 = at(_w[6], a1, o, zb);
     const D0 = at(_w[7], a0, o, zb);
-    m.quad(A0, A1, B1, B0, 1); // face of the stone
-    m.quad(C0, D0, D1, C1, 1); // back of the stone, inside the reveal
-    m.quad(A0, C0, C1, A1, 1); // intrados
-    m.quad(B0, B1, D1, D0, 1); // extrados, buried in the wall over the crown
+    m.quadOrtho(A0, A1, B1, B0, 1); // face of the stone
+    m.quadOrtho(C0, D0, D1, C1, 1); // back of the stone, inside the reveal
+    m.quadOrtho(A0, C0, C1, A1, 1); // intrados
+    m.quadOrtho(B0, B1, D1, D0, 1); // extrados, buried in the wall over the crown
     // Springer end caps only. Every INTERIOR boundary is handled by the step
     // below, because emitting it here as well would draw the shared face twice.
-    if (i === 0) m.quad(A0, B0, D0, C0, 1);
-    if (i === n - 1) m.quad(A1, C1, D1, B1, 1);
+    if (i === 0) m.quadOrtho(A0, B0, D0, C0, 1);
+    if (i === n - 1) m.quadOrtho(A1, C1, D1, B1, 1);
     // Springer end caps only. Every INTERIOR boundary is handled by the step
     // below, because emitting it here as well is what produced the sawtooth.
   }
@@ -298,7 +298,7 @@ function voussoirRing(b: LevelBuild, trim: MatKey, op: Opening, reveal: number, 
     const fB = zFront[i + 1];
     if (Math.abs(fB - fA) < 1e-4) continue;
     const rE = Math.min(rOut[i], rOut[i + 1]);
-    m.quad(
+    m.quadOrtho(
       at(_w[0], ab, rIn, fB), at(_w[1], ab, rE, fB),
       at(_w[2], ab, rE, fA), at(_w[3], ab, rIn, fA), 1,
     );

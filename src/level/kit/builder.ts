@@ -171,8 +171,11 @@ export class MeshBuilder {
 
   /**
    * A planar quad, wound a→b→c→d (counter-clockwise seen from the front). The
-   * normal is the face normal; UVs are true metres in the plane of the face, so
-   * neither a rectangle nor a trapezoid nor a sliver can stretch or shear.
+   * normal is the face normal; UVs run along the a→b and a→d edges in metres, so
+   * a rectangle never stretches no matter how it is proportioned.
+   *
+   * For a RECTANGLE this is identical to `quadOrtho`. For anything skewed it is
+   * not — see `quadOrtho`, and prefer it on new geometry.
    */
   quad(
     a: THREE.Vector3,
@@ -185,23 +188,56 @@ export class MeshBuilder {
   ): void {
     _e1.subVectors(b, a);
     _e2.subVectors(d, a);
-    this.texFrame();
-    const ub = _e1.dot(_tu) * uvScale;
-    const vb = _e1.dot(_tv) * uvScale;
-    const ud = _e2.dot(_tu) * uvScale;
-    const vd = _e2.dot(_tv) * uvScale;
+    _n.crossVectors(_e1, _e2).normalize();
+    const uLen = _e1.length() * uvScale;
+    const vLen = _e2.length() * uvScale;
+    // The c corner is not necessarily at (uLen, vLen) if the quad is a
+    // trapezoid, so project it rather than assuming a parallelogram.
     _c.subVectors(c, a);
-    const uc = _c.dot(_tu) * uvScale;
-    const vc = _c.dot(_tv) * uvScale;
+    const uc = _e1.lengthSq() > 1e-9 ? (_c.dot(_e1) / _e1.length()) * uvScale : uLen;
+    const vc = _e2.lengthSq() > 1e-9 ? (_c.dot(_e2) / _e2.length()) * uvScale : vLen;
     const i0 = this.vertex(a.x, a.y, a.z, _n.x, _n.y, _n.z, uOffset, vOffset);
-    const i1 = this.vertex(b.x, b.y, b.z, _n.x, _n.y, _n.z, uOffset + ub, vOffset + vb);
+    const i1 = this.vertex(b.x, b.y, b.z, _n.x, _n.y, _n.z, uOffset + uLen, vOffset);
     const i2 = this.vertex(c.x, c.y, c.z, _n.x, _n.y, _n.z, uOffset + uc, vOffset + vc);
-    const i3 = this.vertex(d.x, d.y, d.z, _n.x, _n.y, _n.z, uOffset + ud, vOffset + vd);
+    const i3 = this.vertex(d.x, d.y, d.z, _n.x, _n.y, _n.z, uOffset, vOffset + vLen);
     this.index.push(i0, i1, i2, i0, i2, i3);
   }
 
-  /** Triangle with a flat normal and the same orthonormal texture frame. */
+  /**
+   * Same winding as `quad`, but textured through the ORTHONORMAL in-plane frame
+   * rather than through the two edge vectors. Use it for any polygon that is not
+   * a rectangle — trapezoids, wedges, slivers — because for those the edge-vector
+   * frame is not a frame at all: see `texFrame` for what that does to the arch
+   * spandrels. Scoped rather than made the default because `quad` is called
+   * roughly forty thousand times across this lane and the two agree only on
+   * rectangles; switching every skewed quad in the level at once re-phases their
+   * texture and is not a change to make on the last pass of a round.
+   */
+  quadOrtho(a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3, d: THREE.Vector3, uvScale = 1): void {
+    _e1.subVectors(b, a);
+    _e2.subVectors(d, a);
+    this.texFrame();
+    _c.subVectors(c, a);
+    const i0 = this.vertex(a.x, a.y, a.z, _n.x, _n.y, _n.z, 0, 0);
+    const i1 = this.vertex(b.x, b.y, b.z, _n.x, _n.y, _n.z, _e1.dot(_tu) * uvScale, _e1.dot(_tv) * uvScale);
+    const i2 = this.vertex(c.x, c.y, c.z, _n.x, _n.y, _n.z, _c.dot(_tu) * uvScale, _c.dot(_tv) * uvScale);
+    const i3 = this.vertex(d.x, d.y, d.z, _n.x, _n.y, _n.z, _e2.dot(_tu) * uvScale, _e2.dot(_tv) * uvScale);
+    this.index.push(i0, i1, i2, i0, i2, i3);
+  }
+
+  /** Triangle with a flat normal. */
   triangle(a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3, uvScale = 1): void {
+    _e1.subVectors(b, a);
+    _e2.subVectors(c, a);
+    _n.crossVectors(_e1, _e2).normalize();
+    const i0 = this.vertex(a.x, a.y, a.z, _n.x, _n.y, _n.z, 0, 0);
+    const i1 = this.vertex(b.x, b.y, b.z, _n.x, _n.y, _n.z, _e1.length() * uvScale, 0);
+    const i2 = this.vertex(c.x, c.y, c.z, _n.x, _n.y, _n.z, _e1.dot(_e2) / Math.max(_e1.length(), 1e-6) * uvScale, _e2.length() * uvScale);
+    this.index.push(i0, i1, i2);
+  }
+
+  /** Triangle textured through the orthonormal in-plane frame. See `quadOrtho`. */
+  triangleOrtho(a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3, uvScale = 1): void {
     _e1.subVectors(b, a);
     _e2.subVectors(c, a);
     this.texFrame();

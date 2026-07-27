@@ -189,8 +189,11 @@ registerShot({
     // still opens onto water between them.
     //
     // Sightline 294°, within half a degree of round 1's, aimed at the third quay
-    // shed at 48 m: solid geometry under the centre pixel, so the auto-focus
-    // meters 48 m and everything from 40 m to the horizon stays sharp. The three
+    // shed: solid geometry under the centre pixel, so the auto-focus meters that
+    // range and everything from 40 m to the horizon stays sharp. Round 3 moved
+    // that shed 4.4 m west along the quay (its seaward-east corner was hanging
+    // past the end of the apron slab over open water), so the metered distance
+    // is now 41 m rather than 48 m and the sightline azimuth moved by 0.2°. The three
     // cranes then span 264–275°, i.e. the right third, with their 30 m jibs
     // cantilevering toward the camera — the only angle from which a ship-to-
     // shore crane reads as a machine rather than a tower — the container yard
@@ -280,18 +283,5 @@ registerShot({
     // downward pitch, because it is explicitly a map-shape frame and not a
     // gameplay frame.
     ctx.poseCamera([152, 236, 300], [-70, 10, 2], 45);
-  },
-});
-
-registerShot({
-  name: 'zz_dbg_shed',
-  description: 'DIAGNOSTIC — the quay shed gable at 22 m with the haze pulled off.',
-  frames: 8,
-  setup(ctx) {
-    ctx.seed(0x42);
-    ctx.setTimeOfDay(12.6);
-    ctx.setWeather(0.02, { wind: 2.0, fog: 0.0006 });
-    ctx.setOverlays({ viewmodel: false, hud: false });
-    ctx.poseCamera([75.0, 13.4, 81.5], [75.0, 14.3, 88.0], 45);
   },
 });

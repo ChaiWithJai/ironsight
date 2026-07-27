@@ -1451,7 +1451,7 @@ export const IRON_SURFACE = /* glsl */ `
       // and a second, sparser gate leaves most of the wall uncracked.
       float ironCrackZone = smoothstep( 0.42, 0.78, ironNoise2( pw * 0.9 + vec2( 71.3, 15.9 ) ) );
       crack *= ironCrackG * nearW * ironCrackZone * ( 0.45 + 0.9 * ironLf2 );
-      ironAlbedo *= 1.0 - 0.30 * crack;
+      ironAlbedo *= 1.0 - 0.24 * crack;
       ironAo *= 1.0 - 0.45 * crack;
       ironGrainRough += 0.18 * crack;
       // The lips tilt INTO the fissure: the ridge field's own gradient, signed
@@ -1891,9 +1891,13 @@ export const IRON_SURFACE = /* glsl */ `
   // runs off the face above it — so the tint moves toward neutral rather than
   // the albedo simply being scaled, which is what makes it read as pointing and
   // not as a shadow.
-  ironAlbedo = mix( ironAlbedo, ironAlbedo * vec3( 0.58, 0.60, 0.63 ), ironJoint );
+  // 0.70, not 0.58. Mortar is a lighter, greyer, rougher material than the stone
+  // it beds; it is not a black line. With the cavity term below it, 0.58 took a
+  // fully-open joint to 0.23 of its stone and the coursing read as a drawn grid
+  // rather than as pointing.
+  ironAlbedo = mix( ironAlbedo, ironAlbedo * vec3( 0.70, 0.72, 0.75 ), ironJoint );
   ironRoughness = clamp( ironRoughness + 0.12 * ironJoint - 0.055 * ironArris, 0.045, 1.0 );
-  ironAo *= 1.0 - 0.60 * ironJoint;
+  ironAo *= 1.0 - 0.45 * ironJoint;
   // The chipped arris is fresh stone: paler, and it is the one part of a
   // weathered wall that catches a raking sun as a thin bright line.
   ironAlbedo *= 1.0 + 0.13 * ironArris;

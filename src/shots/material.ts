@@ -211,7 +211,7 @@ registerShot({
 registerShot({
   name: 'material_steel',
   description:
-    'The BRAVO container yard from the landward lane at standing eye height. ' +
+    'The BRAVO container yard read across its south-west corner from the quay, ' +
     'Proves the SHEET-METAL half of the uber material, which nothing else in ' +
     'the roster covered: rolled corrugation with real depth, butt seams and ' +
     'proud weld beads, bolt rows, and the three rust generations — flat oxide, ' +
@@ -241,6 +241,32 @@ registerShot({
     // 44°, above the 40° cinematic-aperture threshold in
     // `src/render/passes/dof.ts`, so the near stack stays sharp — this is a
     // material chart, not an establishing frame.
-    ctx.poseCamera([-26.4, 5.17, -35.4], [-26.8, 4.35, -45.0], 44);
+    // ROUND 3: MOVED TO THE YARD'S SOUTH-WEST CORNER, because the old station
+    // rendered a frame with no light in it at all.
+    //
+    // The old pose stood north of the stack looking south down a lane. That
+    // satisfies the file header's off-light heuristic (99 deg) and it is still
+    // wrong, because the heuristic measures the SIGHTLINE and what a sheet-metal
+    // shot is actually about is the INCIDENCE on the plate. buildContainerYard
+    // carries 0.26 rad of yaw, so the stack's four face normals sit at 15, 105,
+    // 195 and 285 deg of azimuth. With the sun at 261:
+    //   - 105 deg and 15 deg are 156 and 114 deg off the sun: no key at all.
+    //   - 285 deg is 24 deg off: full irradiance, but near-frontal, so the ribs
+    //     throw no shadow worth having.
+    //   - 195 deg is 66 deg off: lit, and lit at 24 deg above the plate, which
+    //     is the raking incidence a 19 mm corrugation needs to throw a 4 cm bar
+    //     of shadow across itself.
+    // The old station saw only the 105 deg face. The capture came back as a
+    // black rectangle with a few orange pixels in it, which is a material shot
+    // that proves nothing.
+    //
+    // This station stands 7 m off the south-west CORNER, on bearing 240 from it,
+    // so one frame carries the 195 deg end at raking incidence AND the 285 deg
+    // long side at full key — the same lit/raking pair the stone shots get from
+    // a pier, on the material that had none of it.
+    //
+    // 44 deg, above the 40 deg cinematic-aperture threshold in
+    // src/render/passes/dof.ts, so the near stack stays sharp.
+    ctx.poseCamera([-56.1, 5.17, -53.6], [-41.2, 4.3, -48.3], 44);
   },
 });
