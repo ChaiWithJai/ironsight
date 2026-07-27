@@ -138,7 +138,7 @@ export interface ThrowableDef {
 export const FRAG: ThrowableDef = {
   id: 'frag',
   name: 'M67 FRAG',
-  capacity: 2,
+  capacity: 3,
 
   fuseSeconds: 3.4,
   // 2.45 s of cook leaves 0.95 s of flight at minimum — roughly 18 m at the
