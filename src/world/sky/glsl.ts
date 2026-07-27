@@ -347,6 +347,61 @@ vec3 ironHazeRadiance(vec3 dir, vec3 sunDir, vec3 sunChroma, float turbidity, fl
   }
   return col;
 }
+
+/**
+ * Chroma pre-expansion for the ATMOSPHERIC terms, about their own luminance.
+ *
+ * LOOK_SPEC §2.4 gives the sunward horizon as 9 000 cd/m² at chroma
+ * (1.00, 0.94, 0.87) and states it must DISPLAY as (250, 232, 210) — B−R = −40,
+ * S = 0.16. Fed exactly that, this renderer returns (248, 243, 235): B−R = −13,
+ * S = 0.054, so three quarters of the golden hour's warmth is gone from the one
+ * shot named after it. The corpus sides with the spec — bfv_gp_036's sun-side
+ * sky measures (249, 226, 206), S = 0.175 — and §5.3's own table allows S up to
+ * 0.24 in the 192–216 luma bucket.
+ *
+ * The loss is the transfer curve, not the model: an AgX-shaped tonemap converges
+ * every channel on white as it climbs its shoulder, and a golden-hour sky spends
+ * its whole angular extent up there. Nothing about the atmosphere is wrong, so
+ * the atmosphere is not the place to fix it — the sky is handed forward with its
+ * chroma pre-expanded about its own luminance by the inverse of what the
+ * shoulder takes back off it.
+ *
+ * KEYED ON WARM CHROMA, NOT ON ABSOLUTE RADIANCE. Keying it on cd/m² was tried
+ * first and is wrong for a recordable reason: RCORE ships an exposure pass, so
+ * the display luminance a given radiance lands at is a per-shot quantity, and one
+ * fixed cd/m² threshold ramped in on sky_golden and not on light_cascades. The
+ * chroma sign does not move with exposure. It is also the sharper statement of
+ * the defect — the anti-sun half of the dome already measures S 0.19 against the
+ * reference's 0.21 and must not be touched at all, and every direction that needs
+ * the correction is one where R > B.
+ *
+ * IT LIVES HERE, BESIDE 'ironHazeRadiance', AND NOT IN THE DOME, BECAUSE OF THE
+ * INVARIANT AT THE TOP OF THIS SECTION. 'ironHazeRadiance' is the radiance the
+ * aerial-perspective integral saturates to AND the radiance the dome's marine
+ * boundary layer saturates to; that is the whole reason one function is compiled
+ * into both shaders. A distant ridge and the sky one pixel above it differ in
+ * view direction by a milliradian, so whatever is done to one of those two
+ * values must be done to the other or the skyline acquires a chroma step that
+ * no amount of distance can dissolve. Round 2 introduced this correction on the
+ * dome side only and did exactly that: on 'sky_golden' the sky came back warm
+ * (B−R −15) while the hazed-out headland underneath it stayed neutral (B−R −4),
+ * which reads as a cut-out rather than a horizon. Apply it at the SOURCE, in the
+ * one function both sides share, and the step cannot exist by construction.
+ *
+ * APPLIED TO THE SCATTERING ONLY — not to the sun disc, and not to the cloud
+ * deck. Both are composited after it. The first build applied it to the finished
+ * dome and the cloud deck came back a uniform tangerine: a cumulus lit by a
+ * 3 400 K sun is legitimately the warmest thing in the frame, so it sat at the
+ * top of the ramp and got the full 2.6×, which is a correction for a horizon band
+ * being applied to an object that is not one.
+ *
+ * Luminance is preserved by construction, so no radiance in §2.4's table moves.
+ */
+vec3 ironSkyChroma(vec3 c) {
+  float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  float warm = clamp((c.r - c.b) / max(lum, 1.0), 0.0, 1.0);
+  return max(vec3(0.0), mix(vec3(lum), c, mix(1.0, 2.6, smoothstep(0.02, 0.13, warm))));
+}
 `;
 
 /* ==========================================================================

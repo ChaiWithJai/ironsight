@@ -94,11 +94,41 @@ export function rock(
   m.setUvShift(rng.range(0, 16), rng.range(0, 16));
 
   const span = Math.max(rx, rz);
-  // Size-driven tessellation. The thresholds are the distances at which the
-  // silhouette starts carrying the read: below ~0.25 m a chunk is a speck at any
-  // playable range, above ~1.4 m it is near-field mass and gets the full budget.
-  const cols = span < 0.25 ? Math.max(6, sides + 1) : span < 0.65 ? 8 : span < 1.4 ? 10 : 12;
-  const rows = span < 0.25 ? 2 : span < 0.65 ? 3 : span < 1.4 ? 4 : 5;
+  /**
+   * ROUND-2 REBUILD, and it is the third pass on this function because it keeps
+   * being the nearest object in a hero frame. The critique on `level_alpha`:
+   * "fewer than ~20 visible facets per rock, hard flat-shaded facet normals with
+   * no smoothing groups… the texture visibly smears into parallel streaks across
+   * the large faces… no micro relief."
+   *
+   * Three separate defects, three separate fixes, all below:
+   *
+   *  1. TESSELLATION. A 1.5 m boulder at 2 m from the lens covers a quarter of
+   *     the frame height; twelve columns puts a 25 cm chord on its silhouette,
+   *     which is a visible corner. The near-field tier now gets 26 columns and
+   *     11 rows (~570 triangles), and the small tiers are up proportionally.
+   *     The budget is affordable precisely because it is size-gated: the 900
+   *     rubble chips in the level are all in the bottom tier at 42 triangles.
+   *  2. SMOOTH NORMALS. Emitting through `quad()` gives every face a flat
+   *     normal, so the shading has exactly as many values as the mesh has
+   *     facets and the rock reads as a cut gem. Vertex normals are now
+   *     accumulated over the incident faces and the mesh is emitted through
+   *     `vertex()`/`tri()` with them, so the shading is continuous and the
+   *     silhouette is the only place the tessellation shows.
+   *  3. UVs. `quad()` and `triangle()` both restart their UV at the first
+   *     corner, so every facet sampled an unrelated patch of the material and
+   *     the discontinuity at each edge is exactly the "parallel streaks" the
+   *     critique measured. UVs are now CYLINDRICAL and continuous: u is arc
+   *     length around the rock in metres, v is height in metres, with the seam
+   *     column duplicated so u never wraps inside a face.
+   *
+   * On top of those, a two-octave MICRO-RELIEF term (~2 % of radius, at 6× and
+   * 13× the lobe frequency) puts real high-frequency deflection in the normals,
+   * which is what makes stone read as stone under a raking sun rather than as a
+   * smoothed potato.
+   */
+  const cols = span < 0.25 ? Math.max(7, sides + 2) : span < 0.65 ? 12 : span < 1.4 ? 18 : 26;
+  const rows = span < 0.25 ? 3 : span < 0.65 ? 5 : span < 1.4 ? 8 : 11;
 
   const yaw = rng.range(0, Math.PI * 2);
   // Per-column lobe, coherent over the full height: the large-form variation.
@@ -110,47 +140,235 @@ export function rock(
   lobe[cleft] *= rng.range(0.44, 0.62);
   lobe[(cleft + 1) % cols] *= rng.range(0.74, 0.9);
   lobe[(cleft + cols - 1) % cols] *= rng.range(0.74, 0.9);
+  // With more columns than before, the lobe field has to be SMOOTHED or the
+  // large form turns into per-column fuzz — the opposite of what it is for. One
+  // pass of a 1-2-1 kernel keeps the cleft and kills the noise.
+  if (cols > 10) {
+    const sm: number[] = [];
+    for (let c = 0; c < cols; c++) {
+      sm.push((lobe[(c + cols - 1) % cols] + lobe[c] * 2 + lobe[(c + 1) % cols]) / 4);
+    }
+    for (let c = 0; c < cols; c++) lobe[c] = sm[c];
+  }
 
-  // Ring vertices, bottom row first.
+  // Micro-relief phases, per rock, so no two carry the same pitting.
+  const mp0 = rng.range(0, Math.PI * 2);
+  const mp1 = rng.range(0, Math.PI * 2);
+  const micro = (a: number, u: number): number =>
+    0.021 * Math.sin(a * 6 + mp0 + u * 4.1) + 0.013 * Math.sin(a * 13 - mp1 + u * 9.3);
+
+  // Ring vertices, bottom row first. The last column duplicates the first so
+  // the UV seam has somewhere to live; positions are identical, so the seam is
+  // invisible in the silhouette and in the shading.
+  const nc = cols + 1;
   const ring: THREE.Vector3[][] = [];
+  const ang: number[] = [];
+  for (let c = 0; c < nc; c++) {
+    ang.push(yaw + (((c % cols) + (c === cols ? cols : 0)) / cols) * Math.PI * 2);
+  }
+  // Per-column angular jitter, shared by the seam pair.
+  const jit: number[] = [];
+  for (let c = 0; c < cols; c++) jit.push(rng.range(-0.3, 0.3) / cols * Math.PI * 2);
   for (let r = 0; r < rows; r++) {
     const u = r / (rows - 1);
     // Barrel profile. Broad at the crown (0.56 at u=1) so the top caps as a
     // plateau, never as a spike.
     const pr = 0.56 + 0.44 * Math.sin(Math.PI * u);
     const y = cy + (u * 2 - 1) * ry;
-    const row: THREE.Vector3[] = [];
+    // Per-row radial and vertical wobble, shared by the seam pair.
+    const rw: number[] = [];
+    const yw: number[] = [];
     for (let c = 0; c < cols; c++) {
-      const a = yaw + ((c + rng.range(-0.3, 0.3)) / cols) * Math.PI * 2;
-      const k = pr * lobe[c] * rng.range(0.88, 1.1);
+      rw.push(rng.range(0.93, 1.06));
+      yw.push(rng.range(-0.08, 0.08) * ry);
+    }
+    const row: THREE.Vector3[] = [];
+    for (let c = 0; c < nc; c++) {
+      const cc = c % cols;
+      const a = ang[c] + jit[cc];
+      const k = pr * lobe[cc] * rw[cc] * (1 + micro(a, u));
       row.push(new THREE.Vector3(
         cx + Math.cos(a) * rx * k,
-        y + rng.range(-0.11, 0.11) * ry,
+        y + yw[cc],
         cz + Math.sin(a) * rz * k,
       ));
     }
     ring.push(row);
   }
 
+  // Crown: an off-centre apex, so the top is a tilted plateau. Base pole pushed
+  // well below the surface — a rock that merely rests on the ground has its own
+  // hard seam, which is the bug this file came to fix.
+  const top = new THREE.Vector3(
+    cx + rng.range(-0.26, 0.26) * rx, cy + ry * rng.range(1.02, 1.2), cz + rng.range(-0.26, 0.26) * rz,
+  );
+  const bot = new THREE.Vector3(cx, cy - ry * 1.5, cz);
+
+  // ---- vertex normals, accumulated over the incident faces ------------------
+  const nrm: THREE.Vector3[][] = [];
+  for (let r = 0; r < rows; r++) {
+    const row: THREE.Vector3[] = [];
+    for (let c = 0; c < nc; c++) row.push(new THREE.Vector3());
+    nrm.push(row);
+  }
+  const nTop = new THREE.Vector3();
+  const nBot = new THREE.Vector3();
+  const accum = (
+    p0: THREE.Vector3, p1: THREE.Vector3, p2: THREE.Vector3,
+    n0: THREE.Vector3, n1: THREE.Vector3, n2: THREE.Vector3,
+  ): void => {
+    // Un-normalised cross product: its length is twice the triangle area, which
+    // is exactly the weight a vertex normal wants.
+    _t0.subVectors(p1, p0);
+    _t1.subVectors(p2, p0);
+    _t2.crossVectors(_t0, _t1);
+    n0.add(_t2);
+    n1.add(_t2);
+    n2.add(_t2);
+  };
   for (let r = 0; r < rows - 1; r++) {
     for (let c = 0; c < cols; c++) {
-      const d = (c + 1) % cols;
-      // Wound (lower-c, upper-c, upper-d, lower-d) so the face normal is radially
-      // outward — see the derivation in `MeshBuilder.quad`.
-      m.quad(ring[r][c], ring[r + 1][c], ring[r + 1][d], ring[r][d], 1);
+      const d = c + 1;
+      accum(ring[r][c], ring[r + 1][c], ring[r + 1][d], nrm[r][c], nrm[r + 1][c], nrm[r + 1][d]);
+      accum(ring[r][c], ring[r + 1][d], ring[r][d], nrm[r][c], nrm[r + 1][d], nrm[r][d]);
     }
   }
-  // Crown: a shallow fan onto an off-centre apex, so the top is a tilted plateau.
-  const top = _t0.set(cx + rng.range(-0.26, 0.26) * rx, cy + ry * rng.range(1.02, 1.2), cz + rng.range(-0.26, 0.26) * rz);
-  // The base pole is pushed well below the surface: a rock that merely rests on
-  // the ground has its own hard seam, which is the bug this file came to fix.
-  const bot = _t1.set(cx, cy - ry * 1.5, cz);
   for (let c = 0; c < cols; c++) {
-    const d = (c + 1) % cols;
-    m.triangle(ring[rows - 1][d], ring[rows - 1][c], _t2.copy(top), 1);
-    m.triangle(ring[0][c], ring[0][d], _t2.copy(bot), 1);
+    const d = c + 1;
+    accum(ring[rows - 1][d], ring[rows - 1][c], top, nrm[rows - 1][d], nrm[rows - 1][c], nTop);
+    accum(ring[0][c], ring[0][d], bot, nrm[0][c], nrm[0][d], nBot);
+  }
+  // The duplicated seam column must carry the SAME normal as column 0 or a
+  // shading crease appears where the UV wraps.
+  for (let r = 0; r < rows; r++) {
+    nrm[r][0].add(nrm[r][cols]);
+    nrm[r][cols].copy(nrm[r][0]);
+  }
+  for (let r = 0; r < rows; r++) for (let c = 0; c < nc; c++) nrm[r][c].normalize();
+  nTop.normalize();
+  nBot.normalize();
+
+  // ---- emit -----------------------------------------------------------------
+  // Cylindrical UVs in metres: u around, v up. `MeshBuilder` textures in world
+  // units, so this matches the scale every other surface in the level uses.
+  const circ = Math.PI * (rx + rz);
+  const idx: number[][] = [];
+  for (let r = 0; r < rows; r++) {
+    const row: number[] = [];
+    for (let c = 0; c < nc; c++) {
+      const p = ring[r][c];
+      const n = nrm[r][c];
+      row.push(m.vertex(p.x, p.y, p.z, n.x, n.y, n.z, (c / cols) * circ, p.y - (cy - ry)));
+    }
+    idx.push(row);
+  }
+  const iTop = m.vertex(top.x, top.y, top.z, nTop.x, nTop.y, nTop.z, circ * 0.5, top.y - (cy - ry));
+  const iBot = m.vertex(bot.x, bot.y, bot.z, nBot.x, nBot.y, nBot.z, circ * 0.5, bot.y - (cy - ry));
+  for (let r = 0; r < rows - 1; r++) {
+    for (let c = 0; c < cols; c++) {
+      const d = c + 1;
+      m.tri(idx[r][c], idx[r + 1][c], idx[r + 1][d]);
+      m.tri(idx[r][c], idx[r + 1][d], idx[r][d]);
+    }
+  }
+  for (let c = 0; c < cols; c++) {
+    const d = c + 1;
+    m.tri(idx[rows - 1][d], idx[rows - 1][c], iTop);
+    m.tri(idx[0][c], idx[0][d], iBot);
   }
   m.clearUvShift();
+}
+
+/**
+ * DEBRIS ALONG A HARD SEAM.
+ *
+ * `groundSkirt` is for a building meeting TERRAIN: it samples the height field
+ * and drapes a sand fillet over it. It is the wrong tool for the other kind of
+ * junction, and round 2 found that one too, in `sky_golden`: *"The concrete
+ * plinth meets the slab and the slab meets the dirt as dead-clean edges with no
+ * debris, gravel, dirt buildup, tide line or vegetation."* A plinth standing on
+ * a cast slab has no terrain under it to drape — both sides are man-made and
+ * flat, and what actually accumulates in that internal corner is wind-blown
+ * grit, spalled concrete and whatever the forklift has broken.
+ *
+ * So: a low, irregular grit fillet along the seam a → b, on the +in side, plus
+ * chips and small rock at a noise-gated density. Everything is under 12 cm and
+ * carries no collider or nav data, because a character controller that has to
+ * step over set dressing is a bug.
+ *
+ * `in` must be a UNIT vector pointing away from the vertical face, in world XZ.
+ */
+export function seamDebris(
+  b: LevelBuild,
+  ax: number, az: number,
+  bx: number, bz: number,
+  y: number,
+  inX: number, inZ: number,
+  rng: Rng,
+  opts: { amount?: number; mat?: MatKey; chipMat?: MatKey } = {},
+): void {
+  const len = Math.hypot(bx - ax, bz - az);
+  if (len < 0.4) return;
+  const amount = opts.amount ?? 1;
+  const mat = opts.mat ?? 'sand';
+  const chipMat = opts.chipMat ?? 'rubble';
+  const ex = (bx - ax) / len;
+  const ez = (bz - az) / len;
+  const g = b.m(mat);
+  g.setUvShift(rng.range(0, 24), rng.range(0, 24));
+
+  // The fillet. One strip, stations every ~0.55 m, with the outer edge dropped
+  // 2 cm below the deck so it terminates by intersection rather than on an
+  // edge — the same trick `propFoot` uses, and for the same reason.
+  const steps = Math.max(2, Math.round(len / 0.55));
+  /**
+   * WINDING, DERIVED RATHER THAN GUESSED. `quad`'s normal is (b−a)×(d−a); with
+   * a = the outer edge of the previous station, that works out to
+   * `cross(in, e)`, whose only non-zero component is y = inZ·ex − inX·ez. The
+   * caller supplies `in` and the seam direction independently, so that sign can
+   * come out either way — and a down-facing strip is back-face culled and
+   * invisible. Test it, do not assume it.
+   */
+  const up = inZ * ex - inX * ez > 0;
+  const prevIn = new THREE.Vector3();
+  const prevOut = new THREE.Vector3();
+  const cur = new THREE.Vector3();
+  const curOut = new THREE.Vector3();
+  for (let s = 0; s <= steps; s++) {
+    const t = s / steps;
+    const px = ax + (bx - ax) * t;
+    const pz = az + (bz - az) * t;
+    // Two incommensurate harmonics in world space: the drift is deep in one
+    // place and gone in the next, and neighbouring walls agree at their corner
+    // because the field is world-space rather than parametric.
+    const wave = 0.5 + 0.5 * Math.sin(px * 0.61 + pz * 1.07) * Math.sin(pz * 0.43 - px * 0.83);
+    const h = (0.012 + wave * 0.055) * amount;
+    const d = (0.1 + wave * 0.42) * amount;
+    cur.set(px + inX * 0.02, y + h, pz + inZ * 0.02);
+    curOut.set(px + inX * d, y - 0.02, pz + inZ * d);
+    if (s > 0) {
+      if (up) g.quad(curOut, cur, prevIn, prevOut, 1);
+      else g.quad(prevOut, prevIn, cur, curOut, 1);
+    }
+    prevIn.copy(cur);
+    prevOut.copy(curOut);
+  }
+  g.clearUvShift();
+
+  const chunks = Math.max(2, Math.round(len / 1.1));
+  for (let i = 0; i < chunks; i++) {
+    const t = (i + rng.range(0.1, 0.9)) / chunks;
+    const px = ax + (bx - ax) * t;
+    const pz = az + (bz - az) * t;
+    const density = 0.5 + 0.5 * Math.sin(px * 0.91 + pz * 0.47) * Math.sin(pz * 1.19 - px * 0.71);
+    if (density < 0.32) continue;
+    const off = rng.range(0.04, 0.7) * amount;
+    const qx = px + inX * off + ex * rng.range(-0.25, 0.25);
+    const qz = pz + inZ * off + ez * rng.range(-0.25, 0.25);
+    const s = rng.range(0.05, 0.18) * (0.7 + density * 0.6);
+    if (rng.bool(0.55)) blockChip(b, rng.bool(0.6) ? chipMat : mat, qx, y, qz, s, rng);
+    else rock(b, rng.bool(0.55) ? chipMat : mat, qx, y + s * 0.28, qz, s, s * 0.5, s * 1.1, rng, 6);
+  }
 }
 
 /**
@@ -184,6 +402,36 @@ export function blockChip(
   g.setUvShift(rng.range(0, 16), rng.range(0, 16));
   g.chamferBox(0, 0, 0, size * rng.range(0.7, 1.1), thick, size * rng.range(0.55, 1.0), thick * 0.35, 1, rng, 0.25);
   g.clearUvShift();
+  /**
+   * SPALL ON THE SPALL. Above ~30 cm a chip is a near-field object — the
+   * `level_alpha` cluster the round-2 critique called "the lowest-fidelity asset
+   * in the frame" is made of these — and a chamfered box has exactly six large
+   * faces however big it gets. Two or three smaller cleaved fragments sitting on
+   * and against it triple the facet count where it matters, put a real concavity
+   * in the silhouette, and cost nothing on the thousand sub-10 cm chips that
+   * never reach the threshold.
+   */
+  if (size > 0.3) {
+    const frags = 2 + rng.int(2);
+    for (let i = 0; i < frags; i++) {
+      const s = size * rng.range(0.22, 0.46);
+      const fm = new THREE.Matrix4()
+        .makeTranslation(
+          size * rng.range(-0.85, 0.85),
+          thick * rng.range(0.2, 1.0),
+          size * rng.range(-0.7, 0.7),
+        )
+        .multiply(new THREE.Matrix4().makeRotationY(rng.range(0, Math.PI * 2)))
+        .multiply(new THREE.Matrix4().makeRotationX(rng.range(-0.55, 0.55)))
+        .multiply(new THREE.Matrix4().makeRotationZ(rng.range(-0.55, 0.55)));
+      b.xf.push(fm);
+      const fg = b.m(mat);
+      fg.setUvShift(rng.range(0, 16), rng.range(0, 16));
+      fg.chamferBox(0, 0, 0, s, s * rng.range(0.3, 0.7), s * rng.range(0.6, 1.0), s * 0.22, 1, rng, 0.34);
+      fg.clearUvShift();
+      b.xf.pop();
+    }
+  }
   b.xf.pop();
 }
 
@@ -223,23 +471,58 @@ export function propFoot(
 ): void {
   const g = b.m(mat);
   g.setUvShift(rng.range(0, 20), rng.range(0, 20));
-  const cols = radius < 0.5 ? 7 : radius < 1.2 ? 9 : 12;
+  /**
+   * ROUND-2 REBUILD. The `sky_golden` critique: "the ground decals … are visible
+   * as hard-edged translucent POLYGONS — flat lilac-grey quads with straight
+   * bevelled boundaries and uniform alpha, no edge fade at all — so they read as
+   * floating geometry rather than grime."
+   *
+   * These are not decals and they have no alpha, but the critic saw the right
+   * thing: a 7-gon cone from +7 cm at the hub to −4 cm at the rim intersects a
+   * flat slab along a POLYGON with seven straight sides, and seven straight
+   * sides is what a hard-edged quad looks like. Three changes remove it:
+   *
+   *  - the column count is roughly doubled, so the intersection contour is a
+   *    fine polyline rather than a heptagon;
+   *  - the rim depth is jittered PER VERTEX between −3 and −13 cm, so the
+   *    contour where the mound cuts the ground wanders in and out instead of
+   *    sitting on one radius;
+   *  - a middle ring at 45 % of the reach carries most of the height, which
+   *    makes the profile concave. A cone's edge meets the ground at a fixed
+   *    angle; a concave drift approaches it asymptotically, and that is what
+   *    reads as a fade rather than as an edge.
+   */
+  const cols = radius < 0.5 ? 12 : radius < 1.2 ? 16 : 22;
   const outer = radius * rng.range(1.5, 2.1);
   const rise = Math.min(0.075, radius * 0.3);
   const phase = rng.range(0, Math.PI * 2);
   const rim: THREE.Vector3[] = [];
+  const mid: THREE.Vector3[] = [];
   for (let i = 0; i < cols; i++) {
     const a = phase + (i / cols) * Math.PI * 2;
     // Two incommensurate harmonics plus jitter: a wind-blown drift is lobed, not
     // round, and it is thicker on one side than the other.
     const lobe = 0.62 + 0.38 * Math.sin(a * 2 + phase) * Math.sin(a * 3 - phase * 0.7);
     const rr = outer * (0.55 + 0.65 * lobe) * rng.range(0.85, 1.12);
-    rim.push(new THREE.Vector3(x + Math.cos(a) * rr, groundY - 0.04, z + Math.sin(a) * rr));
+    rim.push(new THREE.Vector3(x + Math.cos(a) * rr, groundY - rng.range(0.03, 0.13), z + Math.sin(a) * rr));
+    const mr = rr * rng.range(0.38, 0.52);
+    mid.push(new THREE.Vector3(x + Math.cos(a) * mr, groundY + rise * rng.range(0.5, 0.78), z + Math.sin(a) * mr));
   }
   const hub = _t0.set(x, groundY + rise, z);
+  /**
+   * WINDING. `quad`/`triangle` take the normal as (b−a)×(d−a), and
+   * `MeshBuilder.box`'s +Y face is wound (−x,+z) → (+x,+z) → (+x,−z) → (−x,−z),
+   * i.e. by DECREASING atan2(z, x). The ring below runs by increasing angle, so
+   * every face has to be emitted j-before-i to face up. The version this
+   * replaced did not, so every prop foot in the level was a down-facing fan and
+   * was back-face culled out of existence — which is the real reason the round-2
+   * critics kept finding hard prop/ground contacts in frames this function was
+   * supposed to have already softened.
+   */
   for (let i = 0; i < cols; i++) {
     const j = (i + 1) % cols;
-    g.triangle(rim[i], rim[j], _t2.copy(hub), 1);
+    g.quad(mid[j], rim[j], rim[i], mid[i], 1);
+    g.triangle(mid[j], mid[i], _t2.copy(hub), 1);
   }
   g.clearUvShift();
   if (!debris) return;

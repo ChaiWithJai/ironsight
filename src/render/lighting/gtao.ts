@@ -209,10 +209,27 @@ function aoBody(slices: number, steps: number): string {
   float nv = dot( N, V );
   if ( nv < 0.06 ) N = normalize( N + V * ( 0.06 - nv ) );
 
-  // Screen-space radius of the FAR search, in UV. Everything is expressed as a
-  // fraction of it so the near search is just a shorter walk down the same ray.
+  // TWO screen-space radii, not one, and THAT is what makes both terms real.
+  //
+  // Every tap used to be a fraction of the FAR radius, and the far radius is
+  // clamped to 220 px so a half-res buffer does not thrash the cache. At an
+  // interior depth of 5 m, 10 m is 936 px, so the clamp was silently truncating
+  // the sky search to 2.3 m — shorter than the room. That is why the floor of a
+  // covered arcade measured 0.72 sky visibility on light_interior where
+  // LOOK_SPEC §2.5 asks for 0.15–0.30 in an enclosed shadow: the ceiling doing
+  // the enclosing was outside the search. And the same clamp was the only reason
+  // the CONTACT term worked at all — with the walk truncated, the inner taps
+  // happened to land inside 0.55 m. Raising the clamp alone would have fixed the
+  // sky term and destroyed the contact one.
+  //
+  // So the taps interleave two sweeps at zero extra cost: even taps walk the
+  // NEAR radius squared (0.4 cm, 10 cm, 31 cm of a 0.55 m window — micro,
+  // contact, crease), odd taps walk the FAR radius linearly (2.5, 5.8, 9.2 m of
+  // a 10 m window — ceiling, back wall, the building across the street). Every
+  // tap still updates all three horizons; they only differ in where they land.
   float pixelsPerMetre = 0.5 * uResolution.y * uProjection.z / depth;
-  float radiusPxFar = clamp( uAoParams.y * pixelsPerMetre, 3.0, 220.0 );
+  float radiusPxFar = clamp( uAoParams.y * pixelsPerMetre, 3.0, 420.0 );
+  float radiusPxNear = clamp( uAoParams.x * pixelsPerMetre, 2.0, 160.0 );
 
   float jitter = ironNoise( gl_FragCoord.xy );
   float visibilityFar = 0.0;
@@ -239,19 +256,13 @@ function aoBody(slices: number, steps: number): string {
     float cMicroA = -1.0, cMicroB = -1.0;
 
     for ( int t = 0; t < ${steps}; t ++ ) {
-      float frac = ( float( t ) + jitter + 0.5 ) / float( ${steps} );
-      // CUBIC spacing, not the quadratic it was, and the micro window is the
-      // whole reason. The taps are laid out as a fraction of the FAR radius, so
-      // over a typical 2–8 m far window quadratic spacing put its innermost taps
-      // at ~1 cm and ~8 cm and then jumped straight to 22 cm — one usable sample
-      // inside a 13 cm neighbourhood, which is not a horizon, it is a guess.
-      // Cubed, the same eight taps land at roughly 0.05, 1.5, 7, 18, 39, 72 cm
-      // and 1.2, 1.9 m of that window: four inside the micro radius, six inside
-      // the near radius, and the far end sampled coarsely — which is correct,
-      // because the far term is a smooth sky-visibility estimate and the near
-      // and micro terms are where the eye actually looks for a contact.
-      frac *= frac * frac;
-      vec2 offset = dir * frac * radiusPxFar / uResolution;
+      float u = ( float( t ) + jitter + 0.5 ) / float( ${steps} );
+      // See the two-radius note above. Squared rather than linear on the near
+      // sweep so the innermost tap lands inside the 13 cm micro window, which is
+      // the only way a 4 cm pebble ever registers.
+      bool nearSweep = mod( float( t ), 2.0 ) < 0.5;
+      float frac = nearSweep ? u * u : u;
+      vec2 offset = dir * frac * ( nearSweep ? radiusPxNear : radiusPxFar ) / uResolution;
 
       vec4 sb = texture( uGbuffer, vUv + offset );
       if ( sb.a > 0.0 && sb.a < 900.0 ) {
@@ -302,7 +313,14 @@ function aoBody(slices: number, steps: number): string {
   // for that band to be DARKER than the cast shadow it sits inside; a horizon
   // integral over a 0.55 m neighbourhood only reaches ~0.55 visibility at a
   // right-angled floor/wall joint, which is a suggestion rather than a contact.
-  aoNear = pow( aoNear, uAoParams.w * 1.9 );
+  // 2.4, up from 1.9. The near sweep now walks its OWN radius (see the
+  // two-radius note) which spends three taps inside 0.55 m where the truncated
+  // far walk used to spend four, so the raw horizon comes back a little more
+  // open; the exponent puts the contact band back where it measured before.
+  // Checked on light_interior with the AO channels written to the framebuffer:
+  // a column/floor joint reads the same 0.20 visibility it did, while the
+  // arcade soffit's SKY visibility has gone from 0.30 to 0.10.
+  aoNear = pow( aoNear, uAoParams.w * 2.4 );
   // The micro term is COMPOSITED, not averaged: a pebble occludes the 13 cm
   // around it and nothing beyond, so its occlusion is a separate event from the
   // 0.55 m crease term rather than a noisier estimate of the same one, and the

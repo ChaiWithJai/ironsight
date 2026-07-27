@@ -153,7 +153,14 @@ ${HAZE_GLSL}
     // properly; see HAZE_INSCATTER_NEAR in model.ts for why an interior at 5 m
     // being MORE veiled than a building at 80 m was the round-2 defect.
     float buildUp = mix(IRON_HAZE_IN_NEAR, 1.0, 1.0 - exp(-dist / IRON_HAZE_IN_BUILD));
-    vec3 inscatter = ironHazeRadiance(dir, sunDir, sunChroma, 3.4, 0.0) * (IRON_SKY_SCALE * buildUp);
+    // 'ironSkyChroma' WRAPS THIS AND IT IS NOT OPTIONAL. The dome's marine
+    // boundary layer saturates to 'ironSkyChroma(ironHazeRadiance(dir, …))' for
+    // the same 'dir'; a fully hazed-out ridge and the sky one pixel above it are
+    // a milliradian apart, so if only one of the two gets the correction the
+    // skyline gains a chroma step that no distance dissolves. See the function
+    // in glsl.ts §3 for what the correction is and why it exists.
+    vec3 inscatter = ironSkyChroma(ironHazeRadiance(dir, sunDir, sunChroma, 3.4, 0.0))
+                   * (IRON_SKY_SCALE * buildUp);
     return surface * trans + inscatter * (1.0 - trans);
   }
 #endif

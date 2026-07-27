@@ -110,18 +110,70 @@ float ironBoundaryTau(vec3 dir) {
   float above = exp(-max(0.0, uSkyCameraY) / IRON_BL_H);
   return IRON_BL_TAU_Z * airmass * above * uSkySigma;
 }
+
+/**
+ * 'ironSkyChroma' — the golden-hour chroma pre-expansion — now lives in
+ * 'HAZE_GLSL' (src/world/sky/glsl.ts, §3), beside 'ironHazeRadiance', and is in
+ * scope here because that chunk is concatenated above this one. It has to be
+ * there and not here: the same in-scatter value saturates BOTH this dome and
+ * the world-surface aerial-perspective chunk, and correcting it on one side
+ * only puts a chroma step on the skyline. See the note on the function.
+ */
 `;
 
 const DOME_FRAGMENT = /* glsl */ `
   vec3 dir = normalize(vDirection);
 
+  // The analytic in-scatter — LOOK_SPEC §2.4's five MEASURED sky directions,
+  // interpolated. Computed first because it is used twice: once to calibrate
+  // the table's chroma (immediately below) and once as the marine boundary
+  // layer's saturation radiance (at the end).
+  vec3 inscatter = ironSkyChroma(
+    ironHazeRadiance(dir, uSkySunDirection, uSkySunChroma, uSkyTurbidity, uSkyOvercast));
+
   // Clamped AT THE SOURCE, not only where it is composited. The re-applied Mie
   // aureole reaches a few hundred thousand cd/m² inside a degree of the sun and
   // every later expression that touches it then has to survive an fp16
   // intermediate. See the ceiling note below the cloud block for the failure.
-  vec3 sky = min(
+  vec3 lut = ironSkyChroma(min(
     ironSkyViewLut(uSkyViewLut, dir, uSkySunDirection, uSkySunElevationDeg, uSkySunChroma),
-    vec3(6.0e4));
+    vec3(6.0e4)));
+
+  // ── THE REFERENCE CALIBRATION, AND WHY THE DOME IS NOT THE RAW TABLE ────────
+  //
+  // Round 2 measured our dome at B−R = +82 and HSV S = 0.40 at 28° elevation.
+  // The corresponding direction in reference/gameplay/bfv_gp_036.jpg — the
+  // corpus' golden/blue-hour anchor — measures (155,175,195), B−R = +40,
+  // S = 0.21, Y = 172, and LOOK_SPEC §2.4's table agrees with it to within a
+  // few levels ((146,156,176) at the zenith). The dome is twice as blue as the
+  // thing it is being graded against.
+  //
+  // The raymarched table is not wrong; it is a PRISTINE atmosphere. A
+  // single+multiple-scattering integral over Bruneton's coefficients is a
+  // turbidity-1.04 sky, and pushing the aerosol at it does not fix the chroma —
+  // that was measured too, over mieScale 1.6 → 48, and the sky goes DARKER
+  // (Y 161 → 128) while B−R barely moves, because Mie extinguishes the low sun
+  // faster than its own scattering brightens the dome. The corpus' skies are
+  // hazy, graded and shot through an AgX-like transfer that compresses chroma
+  // hard in the 0.6–0.8 display band where a sky sits, and no coefficient inside
+  // the physical model reaches that.
+  //
+  // What the physical table uniquely owns is STRUCTURE: how radiance varies
+  // with elevation, azimuth and sun angle, where the aureole is, how the
+  // gradient tightens as the sun drops. What §2.4 uniquely owns is COLOUR at
+  // five measured directions. Mixing them keeps both: the table supplies the
+  // field, the anchors supply the white balance. Measured through the actual
+  // renderer, the table alone lands S 0.42 and the anchors alone S 0.044, so a
+  // mix near half hits the measured 0.21 exactly — which is the calibration,
+  // and the reason the number is not a taste.
+  //
+  // The weight leans toward the table at the zenith, where the blue genuinely
+  // belongs and where §2.4's own chroma is bluest, and toward the anchors down
+  // near the horizon where the aerosol dominates and the reference is pale and
+  // warm. Applied to the SKY TERM ONLY: the sun disc and the cloud deck are
+  // composited after it and must keep their own radiance.
+  float calib = mix(0.55, 0.26, smoothstep(0.02, 0.62, dir.y));
+  vec3 sky = mix(lut, inscatter, calib);
 
   // ---- sun disc ---------------------------------------------------------
   // 0.265° angular RADIUS (LOOK_SPEC §2.2 gives 0.53° diameter). The edge is
@@ -192,7 +244,6 @@ const DOME_FRAGMENT = /* glsl */ `
   float tau = ironBoundaryTau(dir);
   vec3 tauRGB = tau * IRON_HAZE_CH;
   vec3 trans = exp(-tauRGB);
-  vec3 inscatter = ironHazeRadiance(dir, uSkySunDirection, uSkySunChroma, uSkyTurbidity, uSkyOvercast);
   vec3 radiance = beyond * trans + inscatter * (1.0 - trans);
   // One guard for the whole dome. A NaN anywhere upstream writes as black and
   // is invisible in code review but glaring in a PNG; falling back to the

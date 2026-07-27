@@ -91,7 +91,31 @@ function arcadeRun(
   // Impost band at the springing line. Without it the arch grows out of the pier
   // with no articulation and the whole arcade reads as a cut-out sheet.
   for (const px of piers) {
-    b.m(trim).boxAt(px, springY - 0.06, -thickness / 2, pier / 2 + 0.07, 0.06, thickness / 2 + 0.06, 1, 0x3f);
+    /**
+     * THE IMPOST, AS A MOULDED CAPITAL RATHER THAN A TAB.
+     *
+     * Round 2 measured the old single box at (977–1087, 193–280) in
+     * `material_chart` and called it a slab that "cantilevers straight out into
+     * space with a flat black underside and nothing supporting it". It was one
+     * 12 cm slab projecting 7 cm on every side of the pier, and that reading is
+     * fair: a slab with a single flat soffit and no transition has nothing
+     * telling the eye it is the top of the pier rather than a shelf stuck to it.
+     *
+     * Three stepped courses instead — a chamfered abacus on top, a plain neck,
+     * and a splayed course that returns to the pier face. The projection now
+     * decreases downward, so every soffit is a narrow band with the course
+     * below it visible underneath, which is what makes it read as growing out
+     * of the shaft. The cost is two extra boxes per pier.
+     */
+    const projT = 0.085;
+    const projM = 0.05;
+    const projB = 0.018;
+    b.m(trim).chamferBox(
+      px, springY - 0.035, -thickness / 2,
+      pier / 2 + projT, 0.035, thickness / 2 + projT, 0.022, 1, rng, 0.06,
+    );
+    b.m(trim).boxAt(px, springY - 0.105, -thickness / 2, pier / 2 + projM, 0.035, thickness / 2 + projM, 1, 0x3f);
+    b.m(trim).boxAt(px, springY - 0.175, -thickness / 2, pier / 2 + projB, 0.035, thickness / 2 + projB, 1, 0x3f);
     // Base course, and grit drifted against both faces of the pier. The rubric
     // calls a hard column-meets-floor line the commonest amateur tell and round
     // 2 found it on every pier in this colonnade.

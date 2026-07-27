@@ -102,7 +102,10 @@ function archSpandrels(
   const xc = (o.x0 + o.x1) / 2;
   const ys = o.y1 - r;
   const m = b.m(mat);
-  const N = 9;
+  // 24 segments: the round-2 critique measured the intrados as a 'faceted
+  // low-segment polyline'. At a 2.2 m arcade span 9 segments put a 38 cm chord
+  // on the curve, which is visibly straight at 8 m; 24 puts it at 14 cm.
+  const N = 24;
   for (let i = 0; i < N; i++) {
     const a0 = (i / N) * Math.PI;
     const a1 = ((i + 1) / N) * Math.PI;
@@ -131,7 +134,10 @@ function archIntrados(b: LevelBuild, mat: MatKey, o: Opening, zFront: number, zB
   const xc = (o.x0 + o.x1) / 2;
   const ys = o.y1 - r;
   const m = b.m(mat);
-  const N = 9;
+  // 24 segments: the round-2 critique measured the intrados as a 'faceted
+  // low-segment polyline'. At a 2.2 m arcade span 9 segments put a 38 cm chord
+  // on the curve, which is visibly straight at 8 m; 24 puts it at 14 cm.
+  const N = 24;
   for (let i = 0; i < N; i++) {
     const a0 = (i / N) * Math.PI;
     const a1 = ((i + 1) / N) * Math.PI;
@@ -146,12 +152,119 @@ function archIntrados(b: LevelBuild, mat: MatKey, o: Opening, zFront: number, zB
   }
 }
 
+const _w = [
+  new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(),
+  new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(),
+];
+
+/**
+ * A REAL VOUSSOIR RING.
+ *
+ * What was here before was a ring of BOXES tangent to the extrados: each stone
+ * a rectangular slab whose corners left air on the inside of the curve and
+ * whose ends overhung the springing line. Round 2 measured it exactly — "flat
+ * rectangular boxes scattered near the arch curve with visible air gaps between
+ * them and the wall… cantilevers straight out into space with a flat black
+ * underside and nothing supporting it".
+ *
+ * This is the actual construction instead. The arc from springing to springing
+ * is divided into `n` wedges; every wedge is a closed hexahedron whose two
+ * radial side faces lie exactly on its share of the boundary angles, so
+ * NEIGHBOURS SHARE FACES and no gap between stones is geometrically possible.
+ * The inner face sits on the intrados radius (1.2 cm proud of the plaster, so
+ * the stone ring stands off the render the way an exposed arch does) and the
+ * outer face on the extrados. The end stones terminate ON the springing line —
+ * a springer, not a cantilever.
+ *
+ * Variation is per-BOUNDARY rather than per-stone, which is the trick that
+ * keeps it airtight: two adjacent stones read the same jittered extrados radius
+ * and the same jittered proud-of-face depth at the boundary they share, so the
+ * course wobbles like hand-cut masonry without ever opening a seam. The
+ * amplitudes are sub-centimetre, as a real seating tolerance is.
+ */
+function voussoirRing(b: LevelBuild, trim: MatKey, op: Opening, reveal: number, rng: Rng): void {
+  const r = (op.x1 - op.x0) / 2;
+  const xc = (op.x0 + op.x1) / 2;
+  const ys = op.y1 - r;
+  // Stone pitch: a voussoir is roughly as wide on the arc as it is deep. 0.34 m
+  // is a hand-workable block and gives 10 stones on a 2.2 m arcade arch.
+  const n = Math.max(7, Math.round((Math.PI * r) / 0.34));
+  const depth = Math.min(0.26, Math.max(0.11, 0.085 + r * 0.075));
+  const zb = -reveal;
+  const m = b.m(trim);
+  m.setUvShift(rng.range(0, 12), rng.range(0, 12));
+
+  // Per-boundary seating tolerance, shared by the two stones that meet there.
+  const rOut: number[] = [];
+  const zFront: number[] = [];
+  for (let i = 0; i <= n; i++) {
+    rOut.push(r + depth + rng.range(-0.011, 0.011));
+    zFront.push(0.021 + rng.range(-0.005, 0.005));
+  }
+  // The intrados radius the stones sit on, 1.2 cm inside the plaster soffit.
+  const rIn = r - 0.012;
+
+  const px = (a: number, rr: number): number => xc - Math.cos(a) * rr;
+  const py = (a: number, rr: number): number => ys + Math.sin(a) * rr;
+
+  for (let i = 0; i < n; i++) {
+    const a0 = (i / n) * Math.PI;
+    const a1 = ((i + 1) / n) * Math.PI;
+    const f0 = zFront[i];
+    const f1 = zFront[i + 1];
+    const o0 = rOut[i];
+    const o1 = rOut[i + 1];
+    // Front ring: inner a0, inner a1, outer a1, outer a0.
+    const A0 = _w[0].set(px(a0, rIn), py(a0, rIn), f0);
+    const A1 = _w[1].set(px(a1, rIn), py(a1, rIn), f1);
+    const B1 = _w[2].set(px(a1, o1), py(a1, o1), f1);
+    const B0 = _w[3].set(px(a0, o0), py(a0, o0), f0);
+    const C0 = _w[4].set(px(a0, rIn), py(a0, rIn), zb);
+    const C1 = _w[5].set(px(a1, rIn), py(a1, rIn), zb);
+    const D1 = _w[6].set(px(a1, o1), py(a1, o1), zb);
+    const D0 = _w[7].set(px(a0, o0), py(a0, o0), zb);
+    m.quad(A0, A1, B1, B0, 1); // face of the stone
+    m.quad(C0, D0, D1, C1, 1); // back of the stone, inside the reveal
+    m.quad(A0, C0, C1, A1, 1); // intrados
+    m.quad(B0, B1, D1, D0, 1); // extrados
+    m.quad(A0, B0, D0, C0, 1); // bed joint, shared with stone i−1
+    m.quad(A1, C1, D1, B1, 1); // bed joint, shared with stone i+1
+  }
+  m.clearUvShift();
+}
+
+/**
+ * WHICH OPENINGS ACTUALLY GO THROUGH THE WALL.
+ *
+ * `through` used to mean "every opening on this panel is a hole", and that is
+ * the mechanism behind the round-2 severity-9 finding on `level_bravo`: an
+ * enterable ground floor punched windows clean through BOTH leaves of every
+ * wall, so a sightline entering a front window left through the back one and
+ * the "interior" was a rectangle of background haze — brighter, because it was
+ * literally sky, than the sunlit render around it.
+ *
+ * A real building is not like that. You walk through the DOOR. The windows
+ * still stop at a room. So `through` now applies only to the openings a body
+ * fits through; everything else keeps its reveal and its unlit-room backing.
+ */
+function goesThrough(o: WallOpts, op: Opening): boolean {
+  if (!o.through) return false;
+  if (op.kind === 'void') return true;
+  if (op.kind === 'window' || op.kind === 'vent' || op.kind === 'bricked') return false;
+  // A door or an arcade arch: a hole only if it is big enough to be one.
+  return op.x1 - op.x0 > 0.85 && op.y1 - op.y0 > 1.7;
+}
+
 /**
  * Cut `openings` out of the rectangle [0,width] × [base, base+height] and emit
  * the surviving area as merged quads.
+ *
+ * `only` restricts the cut to a subset — the inner leaf of a `through` wall is
+ * cut only by the openings that genuinely pass through it.
  */
 function cutFace(
   b: LevelBuild, mat: MatKey, o: WallOpts, z: number, dir: 1 | -1,
+  only?: (op: Opening) => boolean,
 ): void {
   const base = o.base ?? 0;
   const top = base + o.height;
@@ -160,6 +273,7 @@ function cutFace(
   const ys = new Set<number>([base, top]);
   for (const op of o.openings) {
     if (op.kind === 'bricked') continue;
+    if (only && !only(op)) continue;
     xs.add(Math.max(0, op.x0));
     xs.add(Math.min(o.width, op.x1));
     ys.add(Math.max(base, op.y0));
@@ -177,6 +291,7 @@ function cutFace(
       if (inRange) {
         for (const op of o.openings) {
           if (op.kind === 'bricked') continue;
+          if (only && !only(op)) continue;
           if (cx > op.x0 && cx < op.x1 && cy > op.y0 && cy < op.y1) {
             covered = true;
             break;
@@ -191,6 +306,7 @@ function cutFace(
     }
   }
   for (const op of o.openings) {
+    if (only && !only(op)) continue;
     if (op.kind === 'arch') archSpandrels(b, mat, op, z, dir, uvScale);
   }
 }
@@ -204,10 +320,18 @@ export function wallPanel(b: LevelBuild, o: WallOpts, rng: Rng): void {
   const uvScale = o.uvScale ?? 1;
   const t = o.thickness;
   const trim = o.trim ?? 'sandstone';
-  const reveal = o.through ? t : Math.min(o.reveal ?? 0.22, t - 0.02);
+  const solidReveal = Math.min(o.reveal ?? 0.22, t - 0.02);
+  const hole = (op: Opening): boolean => goesThrough(o, op);
 
   if (!o.noOuter) cutFace(b, o.mat, o, 0, 1);
-  if (o.through) cutFace(b, o.mat, o, -t, -1);
+  if (o.through) {
+    // The inner leaf. It is cut ONLY by the openings that pass through, and it
+    // is emitted in `interior` rather than in the wall's own render: a room lit
+    // by what gets in through one door returns a small fraction of what the
+    // sunlit street face returns, and with no visibility term in the ambient
+    // that ratio has to come from albedo. See `materials.ts`.
+    cutFace(b, 'interior', o, -t, -1, hole);
+  }
 
   for (const op of o.openings) {
     if (op.kind === 'bricked') {
@@ -226,6 +350,11 @@ export function wallPanel(b: LevelBuild, o: WallOpts, rng: Rng): void {
     const h = op.y1 - op.y0;
     const isArch = op.kind === 'arch';
     const headY = isArch ? op.y1 - w / 2 : op.y1;
+    const isHole = hole(op);
+    // A hole's reveal is the full wall thickness — that is the door jamb, and
+    // the 15–25 cm of it is what makes the opening self-shadow instead of
+    // reading as a rectangle cut out of a sheet of card.
+    const reveal = isHole ? t : solidReveal;
 
     // ---- reveal: the four inner faces of the opening -----------------------
     const m = b.m(o.mat);
@@ -254,12 +383,47 @@ export function wallPanel(b: LevelBuild, o: WallOpts, rng: Rng): void {
     }
 
     // ---- back of a solid opening ------------------------------------------
-    if (!o.through && op.kind !== 'void') {
-      // The interior we never model. A near-black plane at the back of the
-      // reveal reads as a room with the lights off, which at 30 m is
-      // indistinguishable from one that is actually there, and at 3 m the
-      // reveal depth still sells it.
-      facePanel(b, 'glass', op.x0, op.y0, op.x1, op.y1 + (isArch ? 0 : 0), -reveal + 0.005, 1, uvScale);
+    if (!isHole && op.kind !== 'void') {
+      /**
+       * THE ROOM WE NEVER MODEL — now a box, not a plane.
+       *
+       * A single dark quad at the back of the reveal is flat: it carries one
+       * value over the whole opening no matter where the eye is, so at an
+       * oblique angle it reads as a painted rectangle. A shallow open-fronted
+       * BOX (0.9 m of side walls, a floor and a ceiling, all in `gloom`) costs
+       * five quads and buys the two things the plane cannot — parallax as the
+       * camera moves past, and a genuine value gradient, because the floor
+       * faces up into the sky and the ceiling faces down into nothing.
+       *
+       * The depth is deliberately not the room's real depth. It only has to
+       * exceed the reveal by enough that no sightline through the opening can
+       * reach its own back wall's silhouette, and 0.9 m does that for every
+       * opening in the level up to about 60° off-axis.
+       */
+      const zb = -reveal - 0.9;
+      const zf = -reveal + 0.004;
+      const gm = b.m('gloom');
+      // Back wall.
+      facePanel(b, 'gloom', op.x0, op.y0, op.x1, op.y1, zb, 1, 1);
+      // Side walls, floor and ceiling of the recess, wound so each normal points
+      // INTO the recess. `quad`'s normal is (b−a)×(d−a); every winding below was
+      // derived from that, not guessed.
+      gm.quad(
+        _p[0].set(op.x0, op.y0, zb), _p[1].set(op.x0, op.y1, zb),
+        _p[2].set(op.x0, op.y1, zf), _p[3].set(op.x0, op.y0, zf), 1,
+      );
+      gm.quad(
+        _p[0].set(op.x1, op.y0, zb), _p[1].set(op.x1, op.y0, zf),
+        _p[2].set(op.x1, op.y1, zf), _p[3].set(op.x1, op.y1, zb), 1,
+      );
+      gm.quad(
+        _p[0].set(op.x0, op.y0, zb), _p[1].set(op.x0, op.y0, zf),
+        _p[2].set(op.x1, op.y0, zf), _p[3].set(op.x1, op.y0, zb), 1,
+      );
+      gm.quad(
+        _p[0].set(op.x0, op.y1, zb), _p[1].set(op.x1, op.y1, zb),
+        _p[2].set(op.x1, op.y1, zf), _p[3].set(op.x0, op.y1, zf), 1,
+      );
     }
 
     // ---- glazing -----------------------------------------------------------
@@ -288,49 +452,7 @@ export function wallPanel(b: LevelBuild, o: WallOpts, rng: Rng): void {
         w / 2 + 0.07, 0.055, 0.05, 1, 0x3f,
       );
     } else {
-      /**
-       * VOUSSOIR BAND: a ring of short radial blocks following the extrados.
-       *
-       * The count MUST scale with the arc, and this is not a nicety. A fixed
-       * seven blocks around a 1 m arch is a tight course of quoins; the same
-       * seven around the market hall's 2.2 m arcade or the fort's gate leaves
-       * 0.8 m of bare wall between each pair and the arch reads as a row of
-       * loose tabs stuck on the facade — which is exactly what it looked like
-       * the first time this was rendered. Sizing each block to the pitch keeps
-       * the course continuous at every span in the level, from a 0.9 m window
-       * head to a 3.4 m gate.
-       */
-      const r = w / 2;
-      const xc = (op.x0 + op.x1) / 2;
-      const ys = op.y1 - r;
-      const ring = r + 0.075;
-      const n = Math.max(7, Math.round((Math.PI * ring) / 0.4));
-      // Chord half-length of one block's share of the arc, plus a hair of
-      // overlap so adjacent blocks meet at the extrados instead of at the
-      // intrados where the radial taper opens a wedge of daylight.
-      const half = (Math.PI * ring) / n / 2 * 1.12;
-      for (let i = 0; i < n; i++) {
-        const a = ((i + 0.5) / n) * Math.PI;
-        const px = xc - Math.cos(a) * ring;
-        const py = ys + Math.sin(a) * ring;
-        const bm = b.m(trim);
-        const q = new THREE.Matrix4().makeTranslation(px, py, 0.018);
-        /**
-         * SIGN MATTERS. The ring is parametrised (−cos a, sin a), so its
-         * TANGENT is (sin a, cos a) and the block's long (`half`) axis must lie
-         * along it: rotZ(θ) sends +X to (cos θ, sin θ), so θ = π/2 − a.
-         *
-         * With the negated angle the frame is off by 2a − π: correct at the
-         * crown, ninety degrees out at the haunches. Every block from about 30°
-         * to 60° either side then stands on end with its long axis pointing
-         * radially OUT of the arch, and the course renders as a ring of spikes
-         * — which is what shipped in the first integrated capture of ALPHA.
-         */
-        q.multiply(new THREE.Matrix4().makeRotationZ(Math.PI / 2 - a));
-        b.xf.push(q);
-        bm.boxAt(0, 0, 0, half, 0.105, 0.04, 1, 0x3f);
-        b.xf.pop();
-      }
+      voussoirRing(b, trim, op, reveal, rng);
     }
 
     // ---- shutters ----------------------------------------------------------
@@ -439,6 +561,52 @@ export function wallPanel(b: LevelBuild, o: WallOpts, rng: Rng): void {
  * read as designed rather than as noise. Randomising the window positions
  * directly does not; it just looks broken.
  */
+/**
+ * PER-BUILDING FACADE RHYTHM.
+ *
+ * Round 2 on `light_cascades`: "Three near-identical slab towers with the same
+ * window-band pattern, differing only in height… same floor-slab rhythm, window
+ * band spacing, corner treatment and facade noise."
+ *
+ * Everything `facadeOpenings` randomised, it randomised PER BAY. Per-bay noise
+ * averages out: over eight bays and four storeys, two buildings drawing bay
+ * widths from the same [1.9, 2.5] range converge on the same 2.2 m pitch and
+ * the same window proportion, so from 60 m they are the same building. The
+ * variation that reads at distance has to be drawn ONCE PER BUILDING and held
+ * constant across its whole facade — a squat building with wide windows next to
+ * a tall one with narrow ones is two buildings; two buildings each averaging
+ * the middle are one building twice.
+ *
+ * `buildBuilding` draws one of these per plot and passes the same object to
+ * every panel on every storey.
+ */
+export interface FacadeRhythm {
+  /** Target bay pitch in metres. 1.6 is a tight tenement, 3.1 a civic block. */
+  readonly bayPitch: number;
+  /** Window width as a fraction of the bay. */
+  readonly widthFrac: number;
+  /** Multiplier on window height: <1 squat and horizontal, >1 tall and narrow. */
+  readonly aspect: number;
+  /** Multiplier on the sill height within the storey. */
+  readonly sillFrac: number;
+}
+
+/** One rhythm per building. Drawn from the plot's own stream, so it is stable. */
+export function facadeRhythm(rng: Rng): FacadeRhythm {
+  // Three families rather than one continuous range: a continuous range puts
+  // most buildings in the middle, which is the failure this exists to fix.
+  const family = rng.next();
+  if (family < 0.34) {
+    // Tight tenement: many narrow tall openings.
+    return { bayPitch: rng.range(1.55, 1.85), widthFrac: rng.range(0.4, 0.5), aspect: rng.range(1.05, 1.2), sillFrac: rng.range(0.85, 1.0) };
+  }
+  if (family < 0.72) {
+    return { bayPitch: rng.range(2.0, 2.5), widthFrac: rng.range(0.48, 0.6), aspect: rng.range(0.95, 1.1), sillFrac: rng.range(0.9, 1.1) };
+  }
+  // Civic / warehouse block: few wide openings sitting low in the storey.
+  return { bayPitch: rng.range(2.8, 3.4), widthFrac: rng.range(0.58, 0.72), aspect: rng.range(0.78, 0.95), sillFrac: rng.range(1.05, 1.3) };
+}
+
 export function facadeOpenings(
   width: number,
   floorBase: number,
@@ -446,7 +614,11 @@ export function facadeOpenings(
   floorIndex: number,
   floorCount: number,
   rng: Rng,
-  opts: { street?: boolean; doorAt?: number; arch?: boolean; detail?: number } = {},
+  opts: {
+    street?: boolean; doorAt?: number; arch?: boolean; detail?: number;
+    /** Per-BUILDING facade rhythm. See `FacadeRhythm`. */
+    rhythm?: FacadeRhythm;
+  } = {},
 ): Opening[] {
   const out: Opening[] = [];
   // The detail budget scales the FURNITURE, never the openings themselves: a
@@ -454,10 +626,11 @@ export function facadeOpenings(
   // fewer shutters reads as the same building further away. Only the second is
   // an acceptable LOD.
   const detail = opts.detail ?? 1;
+  const rh = opts.rhythm ?? { bayPitch: rng.range(1.9, 2.5), widthFrac: 0.52, aspect: 1.0, sillFrac: 1.0 };
   const margin = 0.55;
   const usable = width - margin * 2;
   if (usable < 1.0) return out;
-  const bays = Math.max(1, Math.round(usable / rng.range(1.9, 2.5)));
+  const bays = Math.max(1, Math.round(usable / rh.bayPitch));
   const bayW = usable / bays;
   const ground = floorIndex === 0;
   const topFloor = floorIndex === floorCount - 1;
@@ -504,9 +677,12 @@ export function facadeOpenings(
       });
       continue;
     }
-    const ww = Math.min(bayW * rng.range(0.44, 0.6), 1.35);
-    const wh = topFloor ? rng.range(0.95, 1.25) : rng.range(1.25, 1.6);
-    const sill = floorBase + (topFloor ? floorHeight * 0.34 : floorHeight * 0.3);
+    const ww = Math.min(bayW * (rh.widthFrac + rng.range(-0.06, 0.06)), 1.6);
+    const wh = Math.min(
+      floorHeight - 0.75,
+      (topFloor ? rng.range(0.95, 1.25) : rng.range(1.25, 1.6)) * rh.aspect,
+    );
+    const sill = floorBase + (topFloor ? floorHeight * 0.34 : floorHeight * 0.3) * rh.sillFrac;
     out.push({
       x0: cx - ww / 2,
       x1: cx + ww / 2,

@@ -3,12 +3,17 @@
  *
  * OWNER: LEVEL.
  *
- * FIFTEEN materials for the entire town, and that number is a budget decision,
+ * SEVENTEEN materials for the entire town, and that number is a budget decision,
  * not an aesthetic one: `MaterialFactory.create()` throws past
- * `QualitySettings.budgets.shaderPrograms` (24 on Low, 40 on High/Ultra) and
- * that cap is shared with every other lane. Variety therefore has to come from
- * GEOMETRY and from per-plot choice among these fifteen, never from minting a
+ * `QualitySettings.budgets.shaderPrograms` (96 on Low, 192 on Ultra) and that
+ * cap is shared with every other lane. Variety therefore has to come from
+ * GEOMETRY and from per-plot choice among these seventeen, never from minting a
  * material per building.
+ *
+ * Two of the seventeen — `interior` and `gloom` — are not surfaces you see from
+ * outside at all. They exist because the ambient term arrives without a
+ * visibility factor, so sky occlusion has to be paid for in albedo. See their
+ * entries below.
  *
  * The four `plaster*` entries exist because a Levantine street is not one
  * colour: limewashed white, ochre, a faded rose and a pale sea-green, weathered
@@ -38,7 +43,9 @@ export type MatKey =
   | 'glass'
   | 'fabric'
   | 'rubble'
-  | 'sand';
+  | 'sand'
+  | 'interior'
+  | 'gloom';
 
 export const MAT_KEYS: readonly MatKey[] = [
   'plasterWhite',
@@ -56,6 +63,8 @@ export const MAT_KEYS: readonly MatKey[] = [
   'fabric',
   'rubble',
   'sand',
+  'interior',
+  'gloom',
 ];
 
 /** The four wall washes, in the order a plot picks from them. */
@@ -92,6 +101,33 @@ const DEFS: Record<MatKey, MatDef> = {
   fabric: { surface: SurfaceId.Tarp, color: 0x9c8557, roughness: 0.96, metalness: 0, doubleSided: true },
   rubble: { surface: SurfaceId.Rubble, color: 0x8b7c62, roughness: 0.97, metalness: 0 },
   sand: { surface: SurfaceId.Sand, color: 0xb6a179, roughness: 0.98, metalness: 0 },
+  /**
+   * SKY OCCLUSION, BOUGHT WITH ALBEDO.
+   *
+   * The round-2 critique on `level_bravo` was that a shed doorway read BRIGHTER
+   * than the sunlit wall around it — "a building interior receiving more sky
+   * light than its own sunlit exterior is a total inversion of sky occlusion".
+   * The root cause is that the ambient/IBL term arrives as a constant with no
+   * visibility factor, and that term lives in RCORE's uber material, not here.
+   *
+   * What LEVEL can do about it is put the visibility term in the ALBEDO. A room
+   * behind a 4 m doorway sees maybe 8 % of the sky hemisphere; multiplying a
+   * 0.45-albedo plaster wall by that visibility lands at ~0.036, which is what
+   * these two entries are. They are not "dark paint" — they are the diffuse
+   * albedo a surface would need in order to return the radiance an occluded
+   * surface actually returns under a constant ambient.
+   *
+   *   interior  the inner faces of an enterable room: walls, floor, ceiling.
+   *             Some bounce reaches them from the doorway, so ~0.09 linear.
+   *   gloom     the back of an opening whose room we never model, and the deep
+   *             end of one we do. ~0.035 linear, the bottom of the critic's
+   *             requested 0.03–0.06 band.
+   *
+   * Both are fully rough and non-metallic so no specular lobe leaks out of them
+   * at the grazing angles every one of these surfaces is seen at.
+   */
+  interior: { surface: SurfaceId.Plaster, color: 0x2c261d, roughness: 0.97, metalness: 0 },
+  gloom: { surface: SurfaceId.Concrete, color: 0x0f0d0b, roughness: 1.0, metalness: 0 },
 };
 
 export function surfaceOf(key: MatKey): SurfaceId {

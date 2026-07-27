@@ -409,6 +409,14 @@ export const IRON_SURFACE = /* glsl */ `
   vec3 ironAbsN = abs( ironGeoN );
   vec2 ironPlane = ironAbsN.y > max( ironAbsN.x, ironAbsN.z )
     ? vIronWorld.xz : ( ironAbsN.x > ironAbsN.z ? vIronWorld.zy : vIronWorld.xy );
+  // The same select applied to the instance origin. Hoisted here from the grain
+  // frame further down because the near-field pitting band below needs it too,
+  // and evaluating the branch twice on the heaviest fragment in the frame to
+  // save one vec2 is not a trade worth making. Subtracting it makes every
+  // world-space band object-STATIONARY: a field locked to world coordinates
+  // crawls over anything that moves through it, most visibly the viewmodel.
+  vec2 ironOriginPlane = ironAbsN.y > max( ironAbsN.x, ironAbsN.z )
+    ? vIronOrigin.xz : ( ironAbsN.x > ironAbsN.z ? vIronOrigin.zy : vIronOrigin.xy );
 
   // ---- 3 the low-frequency field set, LOOK_SPEC §4.1 ------------------------
   // Three octaves at the spec's non-harmonic ratios 1.00 / 3.70 / 13.90 on an
@@ -421,10 +429,28 @@ export const IRON_SURFACE = /* glsl */ `
   // second, COARSER lattice — which is worse than the repeat it was hiding,
   // because a 2.4 m repeat is at least small enough to read as masonry and a
   // 12 m beat reads as nothing at all.
-  float ironLf0 = ironNoise2( ironPlane * 0.0901 );                              // 11.1 m
-  float ironLf1 = ironNoise2( ironPlane * 0.3333 + vec2( 17.31, 5.77 ) );        //  3.0 m
-  float ironLf2 = ironNoise2( ironPlane * 1.2524 + vec2( 3.19, 41.70 ) );        //  0.8 m
-  float ironLfMask = 0.45 + 1.10 * ironNoise2( ironPlane * 0.0303 + vec2( 61.3, 8.9 ) );
+  //
+  // THE FIELD IS PER-MATERIAL, IN SCALE AND IN PHASE, and that is round 2's
+  // light_cascades finding answered: "far facades all carry the identical
+  // blotchy noise at identical scale regardless of distance, reading as one
+  // melted-concrete pattern rather than concrete, render, brick and stucco".
+  // They did, because every material in the game evaluated these four octaves
+  // at the same four constants on the same world plane — so a stucco wall and
+  // the concrete slab beside it drew the SAME blotch in the SAME place, and a
+  // street of them read as one extruded surface with windows cut in it.
+  //
+  // One hash of the per-material seed buys a ±26 % scale spread and a 97 m phase
+  // offset, so two materials never share a blotch even where they share a plane.
+  // The scale range is deliberately narrow: these wavelengths are chosen
+  // irrational against the bake's tiling rates and a wide spread would walk one
+  // of them back onto a repeat.
+  float ironLfS = 0.80 + 0.52 * fract( uIronVary.w * 0.18374 );
+  vec2 ironLfP = ironPlane * ironLfS
+    + vec2( fract( uIronVary.w * 0.3173 ), fract( uIronVary.w * 0.7131 ) ) * 97.0;
+  float ironLf0 = ironNoise2( ironLfP * 0.0901 );                                // 11.1 m
+  float ironLf1 = ironNoise2( ironLfP * 0.3333 + vec2( 17.31, 5.77 ) );          //  3.0 m
+  float ironLf2 = ironNoise2( ironLfP * 1.2524 + vec2( 3.19, 41.70 ) );          //  0.8 m
+  float ironLfMask = 0.45 + 1.10 * ironNoise2( ironLfP * 0.0303 + vec2( 61.3, 8.9 ) );
   // THE ZONE BAND, ~50 m. Not a modulator like ironLfMask but a term in its own
   // right, and the reason a 70 m quay or warehouse wall stops reading as one
   // constant albedo at silhouette distance. The round-2 critique measured mean
@@ -433,7 +459,7 @@ export const IRON_SURFACE = /* glsl */ `
   // 40 m is below the eye's threshold for a large-form value change. Whole ends
   // of a building have to be a different tone from the other end; that is what
   // salt, prevailing wind and one repaint in 1987 actually do to a facade.
-  float ironZone = ironNoise2( ironPlane * 0.0207 + vec2( 113.7, 44.1 ) );
+  float ironZone = ironNoise2( ironLfP * 0.0207 + vec2( 113.7, 44.1 ) );
 
   /* =========================== SHEET METAL ================================ *
    *
@@ -458,6 +484,7 @@ export const IRON_SURFACE = /* glsl */ `
   float ironRibSlope = 0.0;     // d(height)/d(plane.x), metres per metre
   float ironBead = 0.0;         // weld bead, 0..1
   vec2  ironBeadSlope = vec2( 0.0 );
+  vec2  ironDentSlope = vec2( 0.0 );  // panel dishing and dents, metres per metre
   float ironSeamGap = 0.0;      // the dark line the two plates do not quite close
   float ironBolt = 0.0;
   vec2  ironBoltSlope = vec2( 0.0 );
@@ -472,7 +499,16 @@ export const IRON_SURFACE = /* glsl */ `
     // all. Blending rather than branching keeps the 45° faces (a hopper, a
     // sloping hull plate) continuous.
     float vert = 1.0 - smoothstep( 0.35, 0.85, ironUp );
-    vec2 p = ironPlane;
+    // PER-INSTANCE PHASE. The whole sheet layer is built in world metres, which
+    // is what stops two boxes carrying the same stain in the same place — but
+    // the rib comb and the plate grid are global lattices, so every container in
+    // the yard puts its ribs and its seams on the SAME world planes and a stack
+    // of them reads as one extruded object. Half a pitch of phase off the
+    // instance origin is enough to break that; it costs one hash and cannot
+    // move a feature off the geometry it belongs to, because it is a shift of
+    // the whole field rather than of a sample.
+    float ironSheetSeed = ironHash13( floor( vIronOrigin * 2.9 ) + 13.7 );
+    vec2 p = ironPlane + ironSheetSeed * vec2( 0.73, 1.31 );
 
     // Pixel footprint in world metres, so the fine bands can be faded out
     // before they alias instead of being resolved by TAA into a shimmer.
@@ -498,14 +534,53 @@ export const IRON_SURFACE = /* glsl */ `
       ironRib = mix( 0.5, ironRib, ribFade );
     }
 
+    /* ---- 1b DENTS, and why a perfect comb is the defect ------------------- */
+    // A rolled rib is genuinely periodic, so some autocorrelation at the rib
+    // pitch is correct physics and removing it would be wrong. What is NOT
+    // correct is that every rib on every box is the same depth for its whole
+    // length: a container that has been handled by a spreader for fifteen years
+    // is dished between its corner posts and dented wherever something hit it,
+    // and that is the rubric's "asymmetry and history" on the one prop the
+    // harbour has forty of.
+    //
+    // Two scales: a ~1.9 m panel dish that bows the whole sheet, and a ~53 cm
+    // dent field. Both are analytic gradients, so they cost no fetch and they
+    // land as real slope — under an 11° sun a 4 mm dish across 1.9 m moves the
+    // specular a long way and is far more visible than its depth suggests. The
+    // dent field also modulates the rib's own depth, so the comb's teeth are
+    // uneven and its autocorrelation stops being a spike.
+    {
+      vec3 dish = ironNoiseD2( p * 0.53 + vec2( 44.1, 17.3 ) );
+      vec3 dent = ironNoiseD2( p * 1.90 + vec2( 6.7, 82.9 ) );
+      ironDentSlope = ( dish.yz * 0.055 + dent.yz * 0.030 ) * ribFade;
+      float dentAmp = 0.58 + 0.84 * dent.x;
+      ironRibSlope *= dentAmp;
+      ironRib = mix( 0.5, ironRib, clamp( dentAmp, 0.35, 1.3 ) );
+    }
+
     /* ---- 2 the butt seam and its weld bead ------------------------------- */
     // 14 mm of proud bead with a 2 mm dark gap down the middle of it. The bead
     // is the single most valuable feature in this whole block: it is a CONVEX
     // arris running the full height of the sheet, so it is where the paint goes
     // first, and a thin bright specular line on an otherwise matte face is what
     // the rubric means by "real edges catch light".
-    vec2 g = p / max( uIronClass.w, 0.05 );
-    vec2 dm = abs( fract( g ) - 0.5 ) * max( uIronClass.w, 0.05 );
+    //
+    // THE GRID IS RECTANGULAR AND ITS PHASE WANDERS, and both halves of that
+    // matter on a horizontal face. Sheet stock is 2.4 × 1.2 m, not square, so a
+    // square lattice is wrong to begin with; and on a container TOP the dominant
+    // plane is world .xz, which means a square lattice draws a perfectly regular
+    // checkerboard of light and dark cells across every horizontal steel surface
+    // in the map, all in phase with each other because the grid is global. The
+    // round-2 sky_golden critique measured exactly that — an autocorrelation
+    // peak at lag 44 px on the container tops, "reading as a checkerboard rather
+    // than as surface variation". A 2:1 cell plus a metre of low-frequency phase
+    // wander breaks the lattice without touching the seams themselves, which are
+    // real features and have to stay.
+    vec2 ironPlateM = max( uIronClass.w, 0.05 ) * vec2( 1.0, 0.52 );
+    vec2 ironPlatePhase = vec2( ironNoise2( p * 0.083 + vec2( 9.7, 31.1 ) ),
+                                ironNoise2( p * 0.061 + vec2( 47.3, 2.8 ) ) ) - 0.5;
+    vec2 g = p / ironPlateM + ironPlatePhase * 0.85;
+    vec2 dm = abs( fract( g ) - 0.5 ) * ironPlateM;
     vec2 sgn = sign( fract( g ) - 0.5 );
     vec2 q = dm / 0.014;
     vec2 bx = exp( - q * q );
@@ -540,12 +615,28 @@ export const IRON_SURFACE = /* glsl */ `
 
     /* ---- 4 rust, three generations --------------------------------------- */
     float rust = uIronClass.y;
-    // Where water sits and paint fails: the trough, the seam, the bolt head.
-    float seed = ( 1.0 - ironRib ) * 0.40 + ironBead * 0.55 + ironBolt * 0.65
-               + ironSeamGap * 0.9;
     float rN0 = ironNoise2( p * 0.62 + vec2( 12.4, 71.9 ) );   // 1.6 m blooms
     float rN1 = ironNoise2( p * 2.37 + vec2( 3.1, 44.2 ) );    // 0.42 m patches
     float rN2 = ironNoise2( p * 9.10 + vec2( 55.7, 8.3 ) );    // 0.11 m pitting
+    // Where water sits and paint fails: the trough, the seam, the bolt head.
+    //
+    // THE TROUGH TERM IS GATED, and that gate is the whole of round 2's loudest
+    // sheet-metal finding. Rust does start in a corrugation trough, so the term
+    // is physically right — but driven raw it makes the rust ALBEDO a function
+    // of the rib phase, which means the oxide blotching repeats on the rib's own
+    // 320 mm pitch. The sky_golden critique measured it exactly: horizontal
+    // autocorrelation of the container face peaking at lag 30 px (r = 0.641),
+    // 60 px and 90 px — "the dark rust albedo blotch repeats with the
+    // corrugation, which is exactly the tell the rubric names".
+    //
+    // Multiplying by a 0.42 m field that has no relationship to the rib phase
+    // keeps the physics (rust still prefers troughs) and destroys the periodicity
+    // (only SOME troughs, in patches larger than the pitch, actually rust). The
+    // seam, bead and bolt terms are left ungated: those are one-dimensional
+    // features metres apart, not a comb, so they cannot beat into a lattice.
+    float ironTroughRust = ( 1.0 - ironRib ) * 0.42 * smoothstep( 0.30, 0.78, rN1 );
+    float seed = ironTroughRust + ironBead * 0.55 + ironBolt * 0.65
+               + ironSeamGap * 0.9;
     float field = rN0 * 0.50 + rN1 * 0.34 + rN2 * 0.16 + seed * 0.35;
 
     // GENERATION 1 — flat oxide. The broad, dry, mid-brown bloom that eats a
@@ -572,14 +663,22 @@ export const IRON_SURFACE = /* glsl */ `
     // exfoliates into near-black flakes, and it does that in the LOW points
     // where the water actually stood. Gating on the trough is what keeps the
     // three generations spatially separated instead of stacked on one mask.
+    // Same gate, weaker: the flake still prefers the trough, but the trough
+    // dependence is halved and rides its own field so generation 3 does not put
+    // the rib's period back into the albedo after generation 1 has had it taken
+    // out.
     ironFlake = ironOxide * smoothstep( 0.35, 0.92, rN1 )
-      * ( 0.30 + 0.70 * ( 1.0 - ironRib ) ) * rust;
+      * ( 0.55 + 0.45 * ( 1.0 - ironRib ) * smoothstep( 0.28, 0.72, rN2 ) ) * rust;
 
     // The paint that is LEFT is on the flats; what stands proud has been walked
     // on, lashed against and scraped by a spreader. Bare steel on the rib crest
     // and the bead, held down wherever the oxide has already won.
+    // The rib term takes the same non-phase-locked gate the rust does, and for
+    // the same reason: bare steel on EVERY crest is an albedo feature on the
+    // rib's own 320 mm pitch, which is half of what made the face autocorrelate
+    // at lag 30. Paint comes off the crests that have actually been scraped.
     ironBareEdge = clamp(
-      ( ironRib * 0.55 + ironBead * 0.9 + ironBolt * 0.5 )
+      ( ironRib * 0.60 * smoothstep( 0.34, 0.80, rN2 ) + ironBead * 0.9 + ironBolt * 0.5 )
       * ( 0.35 + 0.85 * rN1 ) * ( 1.0 - ironOxide * 0.75 ), 0.0, 1.0 );
   }
   #endif
@@ -827,7 +926,7 @@ export const IRON_SURFACE = /* glsl */ `
     #ifdef IRON_SHEET
       float ironDamp = 0.82 * ( 1.0 - smoothstep( 12.0, 36.0, ironDist ) );
     #else
-      float ironDamp = 0.56 * ( 1.0 - smoothstep( 3.5, 14.0, ironDist ) );
+      float ironDamp = 0.74 * ( 1.0 - smoothstep( 5.0, 16.0, ironDist ) );
     #endif
     ironMotifDamp = ironDamp;
     vec4 ironTexSoft = texture2DGradEXT( uIronAlbedoHeight, ironUv + ironWearUv,
@@ -863,6 +962,197 @@ export const IRON_SURFACE = /* glsl */ `
     ironGrainRough = 0.34 * ironGrain * ironDamp;
   }
   #endif
+
+  /* ---- 8b THE NEAR-FIELD PITTING BAND ------------------------------------ *
+   *
+   * WHY THIS EXISTS. Round-2's material finding measured the defect precisely:
+   * the near-left wall at 2-3 m returned mean |dLum/dx| = 5.8 while the column
+   * at 6 m returned 11.1. Texel density was INVERTED — the surface got smoother
+   * as the camera approached it, which is item two on the brief's defect list
+   * and the single loudest "hobby demo" tell a material can carry.
+   *
+   * The mechanism was straightforward once measured. Inside ~4 m the bake's
+   * 1024 px tile is MAGNIFIED: one texel covers four or five pixels, so
+   * everything the near field was being shaded by was a bilinear ramp between
+   * texels, and the frame's whole near-field detail budget was a 40-80 px soft
+   * blob field. Every band that could have taken over was either gone (the micro
+   * normal faded out at 2.4 m, which is in FRONT of the nearest wall) or tied to
+   * the same magnified fetch.
+   *
+   * WHY IT IS NOT SIMPLY MORE NORMAL. The first attempt raised the micro
+   * normal's amplitude and carried it to 9 m. It measured beautifully — mean
+   * |dx| 12.6, the target — and looked like a photocopy: at an 11° sun a
+   * vertical face is at 79° incidence, so ANY slope past ~11° carries N·L
+   * through zero and the wall renders as a two-tone black-and-white mask. A
+   * micro band at a raking sun has to stay UNDER the terminator, which caps its
+   * slope at a few degrees, which is not enough contrast on its own.
+   *
+   * So the band is split across the four carriers a real pitted mineral surface
+   * actually uses, none of them alone large enough to break:
+   *
+   *   value      a pit is darker because it is a pit — view-independent, and the
+   *              one carrier that survives being in full shadow
+   *   cavity AO  and it is darker again because it sees less sky
+   *   roughness  a pit scatters, the polished ridge between two pits does not,
+   *              so the specular breaks up at the same wavelength
+   *   slope      3.5° peak, an order under the terminator, which modulates N·L
+   *              by about a third at 79° incidence without ever flipping it
+   *
+   * FREQUENCIES are 2.8 cm / 9 mm / 3.2 mm, chosen against PIXELS rather than
+   * against the spec's bands: at 2.5 m through a 50° lens a pixel is 1.2 mm, so
+   * those land at 23 / 7.5 / 2.7 px — the top of the band the eye reads as
+   * texture and the bottom of the band it reads as noise. Each octave carries
+   * its own footprint guard, so as the camera pulls back each one drops out at
+   * its own Nyquist instead of the whole band dying at one distance.
+   *
+   * The weight is the round-2 finding's own prescription, 1 - saturate(d/6),
+   * softened to a smoothstep so there is no visible iso-distance ring on a long
+   * receding surface (a hard linear ramp on the paving of material_grazing
+   * puts a band across the run at exactly 6 m).
+   */
+  float ironPit = 0.0;
+  vec2 ironPitSlope = vec2( 0.0 );
+  // THE DERIVATIVES ARE TAKEN OUTSIDE THE BRANCH BELOW, and that is not style.
+  // dFdx/dFdy inside divergent control flow is undefined in GLSL ES: a quad
+  // straddling the 11 m cut would have two of its four fragments skip the
+  // instruction and the other two read garbage. Hoisting them costs two
+  // instructions on the far-field path and makes the early-out legal.
+  vec3 ddxW = dFdx( vIronWorld );
+  vec3 ddyW = dFdy( vIronWorld );
+  // EARLY OUT PAST 11 m. The block below is four noise evaluations — sixteen
+  // hashes — and in a typical frame most fragments are further away than the
+  // band reaches. The branch is coherent (it is a function of distance, so whole
+  // quads take it together), which is the only kind of branch worth writing in a
+  // fragment shader.
+  if ( ironDist < 11.0 ) {
+    // THE FOOTPRINT MEASURE IS THE GEOMETRIC MEAN OF THE TWO SCREEN
+    // DERIVATIVES, not the length of their sum, and on this band that is the
+    // difference between working and not working.
+    //
+    // Every other guard in this shader uses length(fwidth(world)), which is the
+    // LONG axis of the pixel's footprint. On a facade seen at 79° incidence —
+    // which is every near-field wall in this game, because a first-person
+    // camera is always walking alongside them — the footprint is a 10:1 sliver:
+    // 1.6 mm across the surface and 16 mm along it. Guarding on the long axis
+    // therefore switched the whole band off on exactly the surfaces it was
+    // written for, and the first capture measured a 37 % gain where it needed
+    // 250 %. The geometric mean sqrt(lx·ly) is the isotropic-equivalent radius
+    // of that sliver and is what a 16× anisotropic sampler actually resolves,
+    // so it is the honest number to compare a wavelength against.
+    float fpN = max( sqrt( length( ddxW ) * length( ddyW ) ), 1e-5 );
+    // 1 at contact, 0 by 6 m. Squared so the band arrives steeply in the last
+    // two metres, which is where the magnification problem actually is.
+    float nearW = 1.0 - smoothstep( 1.0, 11.0, ironDist );
+    // SCALED BY THE MATERIAL'S OWN DETAIL SCALE. uIronTiling.y is
+    // DETAIL_BASE_FREQ × spec.detailScale, so dividing by the base recovers the
+    // lane's "this is hand-sized" signal without a new uniform. A 6 mm pit is
+    // right for a wall and absurd on a weapon receiver 30 cm from the eye, where
+    // the same relative feature is well under a millimetre.
+    // The knee matters. Architectural materials author detailScale 2-3 and want
+    // pits at their authored 6-45 mm; a weapon authors 9-14 and wants the same
+    // relative feature at a tenth the size. Passing the ratio through unchanged
+    // would take a wall's pits to 2.5 mm — measured, and it turns the near wall
+    // from pitted stone into sandpaper. So the scale is held at 1 up to
+    // detailScale 3 and only tracks the lane's number once it is unambiguously
+    // hand-scale.
+    float ironDetScale = uIronTiling.y * 0.05;
+    float ironPitScale = mix( 1.0, max( ironDetScale, 1.0 ),
+                              smoothstep( 3.0, 6.0, ironDetScale ) );
+    vec2 pp = ( ironPlane - ironOriginPlane ) * ironPitScale;
+    // Per-octave Nyquist guard, each set at roughly wavelength/3.5 → /1.8 so a
+    // band dies at its own Nyquist rather than the whole stack dying at one
+    // distance. The wavelengths were chosen against MEASURED pixels, not
+    // against the spec's nominal bands: a 5 cm stripe test pattern rendered on
+    // this frame's near wall came back 20 px wide, i.e. 2.5 mm per pixel at
+    // 2.4 m through a 50° lens once the 79° incidence compression is counted.
+    // So 4.5 cm / 1.6 cm / 6 mm land at 18 / 6.4 / 2.4 px — the top of the band
+    // the eye reads as texture down to the bottom of the band it reads at all.
+    // The guards compare against the SCALED footprint for the same reason the
+    // coordinate is scaled: a hand-scale material's bands are a tenth the size,
+    // so their Nyquist arrives ten times closer.
+    float fpS = fpN * ironPitScale;
+    float gA = 1.0 - smoothstep( 0.024, 0.045, fpS );    // 4.5 cm
+    float gB = 1.0 - smoothstep( 0.0085, 0.0160, fpS );  // 1.6 cm
+    float gC = 1.0 - smoothstep( 0.0032, 0.0060, fpS );  //  6 mm
+    // Value AND analytic gradient off the same four hashes per octave, so the
+    // slope carrier below is free: ironNoiseD2 costs exactly what ironNoise2
+    // costs and returns the derivative as .yz.
+    vec3 pA = ironNoiseD2( pp * 22.2 + vec2( 8.13, 21.7 ) );
+    vec3 pB = ironNoiseD2( pp * 62.5 + vec2( 63.1, 4.9 ) );
+    vec3 pC = ironNoiseD2( pp * 167.0 + vec2( 27.7, 88.2 ) );
+    ironPit = ( ( pA.x - 0.5 ) * 0.40 * gA + ( pB.x - 0.5 ) * 0.52 * gB
+              + ( pC.x - 0.5 ) * 0.52 * gC ) * nearW;
+    /* THE PIT LAYER PROPER — sparse, one-sided, and the reason the band works.
+     *
+     * A symmetric noise field is the wrong shape for stone twice over. It is
+     * wrong physically, because a weathered mineral face is a flat plane with
+     * holes knocked in it, not a field of hills and valleys either side of a
+     * mean. And it is wrong perceptually, because a symmetric field spends half
+     * its energy brightening the surface and reads as static: it costs the whole
+     * variance budget for a texture the eye files under "noise".
+     *
+     * Thresholding the finest octave into ~22 % coverage of DARK pits spends the
+     * same variance on something the eye files under "pitted limestone", and it
+     * concentrates that variance at edges rather than spreading it: a 6 mm pit
+     * whose rim falls inside two pixels puts its whole contrast into one
+     * gradient, which is what a texel-density measurement is actually counting.
+     * Measured on this frame it moves the near wall three times as far per unit
+     * of albedo variance as the symmetric band does.
+     *
+     * Each pit takes value, sky occlusion and roughness together — it is a hole,
+     * so it is darker, it sees less sky, and its broken surface scatters.
+     */
+    //
+    // COVERAGE IS A FIELD, NOT A CONSTANT, and the pits come in two sizes. A
+    // single threshold at a single frequency lays an even carpet of identical
+    // holes, which at 1:1 reads as cork board rather than as stone: real
+    // weathering eats a face unevenly, so some courses are honeycombed and the
+    // sheltered ones beside them are nearly sound. The threshold therefore
+    // rides the 0.8 m and 3 m noise octaves the whole wear stack already shares
+    // — a heavily pitted zone is also a paler, grimier one — and a second,
+    // sparser layer at 1.6 cm puts a few larger blowouts among the fine holes.
+    float ironPitCover = 0.30 + 0.36 * ironLf2 + 0.18 * ironLf1;
+    float ironPitMask = smoothstep( ironPitCover, ironPitCover - 0.26, pC.x ) * gC;
+    ironPitMask = max( ironPitMask,
+                       smoothstep( 0.88, 0.74, pB.x ) * gB * 0.55 );
+    ironPitMask *= nearW;
+    // 0.10 on the coarse octave — about 5.5° of peak tilt against an 11° sun.
+    // Deliberately under the terminator: this term is here to modulate N·L by a
+    // third, not to carry it through zero. The first attempt at this band did
+    // carry it through zero (0.34 of slope, ~19°) and the wall rendered as a
+    // black-and-white photocopy. The coarse octave takes most of the weight
+    // because it is the one whose shadow is long enough to be legible at a
+    // raking sun; a 6 mm pit throws a 3 cm shadow and is carried by value.
+    ironPitSlope = ( pA.yz * 0.140 * gA + pB.yz * 0.070 * gB
+                   + pC.yz * 0.032 * gC ) * nearW;
+    // The rim of a pit is where its slope lives: the underlying octave's own
+    // gradient, gated by the mask, tips the surface into the hole rather than
+    // across the whole face. Under an 11° sun that is a bright arc on one side
+    // and a dark one on the other, which is what makes a hole read as a hole
+    // rather than as a stain.
+    ironPitSlope += pC.yz * 0.11 * ironPitMask;
+    // WHY THE COEFFICIENT IS 1.5 AND NOT THE 0.15 THE BAND WIDTH SUGGESTS.
+    // Smoothstep-interpolated value noise is nothing like uniform on ±0.5: its
+    // standard deviation is about 0.19, and three octaves summed in quadrature
+    // at these weights give the field a σ of ~0.13. So 1.5 buys a ±19 % ONE-
+    // SIGMA swing on albedo, the top of LOOK_SPEC §4.1's mesoscale window, and
+    // the first pass at 0.60 was measured doing almost nothing for exactly this
+    // reason — it was a 7 % band being asked to replace a 40 % one.
+    // The pit term is MEAN-REMOVED against its own average coverage (~0.20), so
+    // switching the band on does not darken every near-field surface in the game
+    // by a tenth of a stop. Without it the near wall measured 15 % down on the
+    // untouched build, which is a grade change masquerading as a material one.
+    ironAlbedo *= ( 1.0 + 1.30 * ironPit ) * ( 1.0 - 0.38 * ( ironPitMask - 0.20 * nearW ) );
+    // Roughness rides the SAME field with the sign the physics asks for: the
+    // low points hold dust and scatter, the ridges between them have been
+    // rubbed. This is the carrier that survives into the shadowed half of the
+    // frame, where there is no key light for the slope term to modulate.
+    ironGrainRough += 1.30 * ironPit + 0.20 * ironPitMask;
+    // Cavity: the pits see less sky. One-sided — a ridge is not brighter than
+    // open surface, it is merely unoccluded — which is the difference between
+    // an occlusion term and a lighting artefact.
+    ironAo *= ( 1.0 - 0.55 * max( 0.0, -ironPit ) ) * ( 1.0 - 0.52 * ironPitMask );
+  }
 
   // Baked roughness is a VARIATION around the texture's own centre, not an
   // absolute: the lane authored its roughness against LOOK_SPEC §4.2 and the
@@ -1184,8 +1474,8 @@ export const IRON_SURFACE = /* glsl */ `
   // rather than the middle of it. The field is already modulated by the cell's
   // face mask and by the 33 m variation mask, so the amplitude reached on any
   // given block is well inside the band even at this coefficient.
-  ironAlbedo *= 1.0 + 0.185 * ironStone;
-  ironAlbedo *= 1.0 + 0.085 * ironStoneHue * vec3( 1.0, 0.12, -0.85 );
+  ironAlbedo *= 1.0 + 0.26 * ironStone;
+  ironAlbedo *= 1.0 + 0.13 * ironStoneHue * vec3( 1.0, 0.12, -0.85 );
   ironRoughness = clamp( ironRoughness + 0.21 * ironStoneRough, 0.045, 1.0 );
 
   // Macro break-up (3-12 m) — the term that stops a 70 m wall reading as one
@@ -1355,19 +1645,15 @@ export const IRON_SURFACE = /* glsl */ `
   // each carry their own origin and subtracting it would put a phase step along
   // every chunk seam.
   vec3 ironPlaneT, ironPlaneB;
-  vec2 ironOriginPlane;
   if ( ironAbsN.y > max( ironAbsN.x, ironAbsN.z ) ) {
     ironPlaneT = vec3( 1.0, 0.0, 0.0 );
     ironPlaneB = vec3( 0.0, 0.0, 1.0 );
-    ironOriginPlane = vIronOrigin.xz;
   } else if ( ironAbsN.x > ironAbsN.z ) {
     ironPlaneT = vec3( 0.0, 0.0, 1.0 );
     ironPlaneB = vec3( 0.0, 1.0, 0.0 );
-    ironOriginPlane = vIronOrigin.zy;
   } else {
     ironPlaneT = vec3( 1.0, 0.0, 0.0 );
     ironPlaneB = vec3( 0.0, 1.0, 0.0 );
-    ironOriginPlane = vIronOrigin.xy;
   }
   // The two plane axes are by construction the normal's two SMALLER components,
   // so neither is ever near-parallel to it and this Gram-Schmidt is
@@ -1409,7 +1695,7 @@ export const IRON_SURFACE = /* glsl */ `
   // copy of the material's own masonry. One octave rather than two because the
   // micro band already sits a further 6× up and covers what a second octave here
   // would have, at half the hashes.
-  vec2 ironSlope = vec2( 0.0 );
+  vec2 ironSlope = ironPitSlope * ironNStr;
   if ( ironDetailFade > 0.002 ) {
     ironSlope += ironNoiseD2( ironDetUv * ironDetailFreq ).yz
       * uIronDetail.x * ironDetailFade * ironNStr;
@@ -1440,8 +1726,8 @@ export const IRON_SURFACE = /* glsl */ `
     vec3 ironPlaneYW = ironAbsN.y > max( ironAbsN.x, ironAbsN.z )
       ? vec3( 0.0, 0.0, 1.0 ) : vec3( 0.0, 1.0, 0.0 );
     float sB = dot( ironPlaneB, ironPlaneYW ) < 0.0 ? -1.0 : 1.0;
-    ironSlope.x += ironRibSlope + ironBeadSlope.x + ironBoltSlope.x;
-    ironSlope.y += ( ironBeadSlope.y + ironBoltSlope.y ) * sB;
+    ironSlope.x += ironRibSlope + ironBeadSlope.x + ironBoltSlope.x + ironDentSlope.x;
+    ironSlope.y += ( ironBeadSlope.y + ironBoltSlope.y + ironDentSlope.y ) * sB;
   }
   #endif
 

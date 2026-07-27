@@ -31,7 +31,7 @@
 import * as THREE from 'three';
 import { CollisionGroup, SurfaceId, type Rng } from '@/engine/types';
 import type { LevelBuild } from '@/level/build';
-import { facadeOpenings, wallPanel, type Opening } from '@/level/kit/wall';
+import { facadeOpenings, facadeRhythm, wallPanel, type Opening } from '@/level/kit/wall';
 import {
   acUnit, aerial, chimney, drainpipe, conduit, railing, rebarStubs,
   satelliteDish, shopSign, stairs, waterTank,
@@ -160,9 +160,22 @@ export function buildBuilding(
   const totalH = groundH + upperH * (floors - 1);
   const roofY = baseY + totalH;
 
+  /**
+   * ROUND-2: "three near-identical slab towers … no per-instance facade UV
+   * rotation, no colour variation, no differing damage state".
+   *
+   * The harbour block's three-material palette was the colour half of that. All
+   * three of its entries — concrete, ochre plaster, sandstone — sit inside about
+   * eight degrees of hue and twelve points of value of each other, so three
+   * neighbouring towers drawing independently from it still came out the same
+   * colour. Widening to six, two of them off the town's cool washes, gives a run
+   * of slab blocks a genuine hue spread; and a shipping district built out over
+   * forty years is exactly where you would find one rendered block among the
+   * concrete ones.
+   */
   const wallMat: MatKey =
     plot.style === 'harbour'
-      ? rng.pick(['concrete', 'plasterOchre', 'sandstone'] as MatKey[])
+      ? rng.pick(['concrete', 'plasterOchre', 'sandstone', 'plasterTeal', 'plasterWhite', 'concrete'] as MatKey[])
       : plot.style === 'shack'
         ? rng.pick(['wood', 'rust', 'plasterOchre'] as MatKey[])
         : plot.style === 'grand'
@@ -261,6 +274,9 @@ export function buildBuilding(
   const doorBay = Math.round(rng.range(0, 3));
   const enterable = plot.enterable === true;
   const detail = Math.max(0.15, Math.min(1, plot.detail ?? 1));
+  // One facade rhythm per BUILDING, held across every storey and every side.
+  // See `facadeRhythm` for why per-bay randomisation could not do this job.
+  const rhythm = facadeRhythm(rng);
 
   /**
    * A SET-BACK TOP STOREY on a third of the taller buildings: the last floor
@@ -328,6 +344,7 @@ export function buildBuilding(
           doorAt: f === 0 && side === doorSide ? doorBay : undefined,
           arch: plot.style === 'grand' || (plot.style === 'town' && rng.bool(0.3)),
           detail,
+          rhythm,
         });
       }
       wallPanel(
@@ -463,7 +480,17 @@ export function buildBuilding(
 
     // ---- roof clutter ------------------------------------------------------
     const area = plot.hx * plot.hz * 4;
-    const items = Math.max(1, Math.min(9, Math.round((area / 16 + rng.range(1, 3)) * detail)));
+    /**
+     * The floor used to be 1. `detail` falls to 0.15 on a plot 200 m from an
+     * objective, which is precisely the distance band the three slab towers in
+     * `light_cascades` sit in — so each of them got exactly ONE roof item and
+     * the round-2 critique's "no rooftop clutter distinguishing them" followed
+     * directly. Roof clutter is the cheapest silhouette differentiator there is
+     * (a water tank is 40 triangles and changes a building's outline against the
+     * sky), so it is the wrong thing to LOD away. The floor is now 3 on anything
+     * over two storeys, which is where a roofline is actually against sky.
+     */
+    const items = Math.max(floors > 2 ? 3 : 1, Math.min(9, Math.round((area / 16 + rng.range(1, 3)) * detail)));
     for (let i = 0; i < items; i++) {
       const rx = rng.range(-plot.hx + 0.7, plot.hx - 0.7);
       const rz = rng.range(-plot.hz + 0.7, plot.hz - 0.7);

@@ -106,8 +106,18 @@ export class DepthOfFieldPass implements RenderPass {
 
   execute(ctx: FrameCtx, graph: RenderGraph): void {
     const dof = this.state.dof;
-    const cinematic = ctx.camera.fovDeg <= CINEMATIC_FOV_DEG;
     const ads = ctx.services.viewmodel.state.adsBlend;
+    // FOV alone is NOT a sufficient signal and shipping it as one was a live
+    // gameplay bug. `defs/dmr-marksman.ts` is 4× glass: aiming it multiplies the
+    // world FOV by a third, so a player pressing the aim button in normal play
+    // takes the camera to ~23° — under CINEMATIC_FOV_DEG — and the branch below
+    // would hand him the establishing lens: 15 px of CoC, a 40 px·m aperture and
+    // a centre-pixel auto-focus clamped to 12 m, on the one frame in the game
+    // where he most needs the far field readable. §6.2's ADS row asks for the
+    // opposite (CoC ≤ 1.2 px past 40 m). Nothing in the shot roster is affected
+    // — every pose at or under 40° is a viewmodel-less establishing shot, where
+    // adsBlend is 0 — so this costs the captures nothing and closes the hole.
+    const cinematic = ctx.camera.fovDeg <= CINEMATIC_FOV_DEG && ads < 0.01;
 
     if (cinematic) {
       // 8 m is the fallback when the centre ray misses geometry entirely (a

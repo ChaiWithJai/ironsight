@@ -28,7 +28,7 @@
  *
  * DRAW CALLS
  * ----------
- * The whole town is FIFTEEN draws — one per material in `materials.ts` — because
+ * The whole town is SEVENTEEN draws — one per material in `materials.ts` — because
  * everything is appended into one vertex stream per material by `MeshBuilder`.
  * That is what makes "detail density is final quality" affordable: adding a
  * thousand shutters costs triangles and costs nothing else.

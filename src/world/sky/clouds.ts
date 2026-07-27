@@ -589,7 +589,39 @@ vec4 ironCloudMarch(
     // volume. Depth in the slab drives it, with the sun-march optical depth as a
     // second-order proxy for how buried this particular sample is.
     float hh = clamp((p.y - IRON_SLAB_LO) / (IRON_SLAB_HI - IRON_SLAB_LO), 0.0, 1.0);
-    float skyOcc = mix(0.12, 1.0, hh * hh) * (0.24 + 0.76 * exp(-tauL * 0.32));
+    // ── ONE UPWARD PROBE, AND IT IS WHAT GIVES A BASE ITS STRUCTURE ───────────
+    //
+    // Round 2, severity 8: "a core with a standard deviation of just 0.0195 over
+    // an 80×70 px region — essentially a constant fill with no internal density
+    // variation". Re-measured on this build the shadowed underside of the near
+    // anvil was mean 0.205, std 0.027, against a reference cumulus interior at
+    // 0.47–0.55 / std 0.07–0.09 (bfv_gp_036). Both halves of that gap have the
+    // same cause and it is HERE, not in the density field.
+    //
+    // Everything that varied across the underside was saturated: sun march tau is
+    // 20+ everywhere under a kilometre of cloud, so exp(-tauL·0.32) is zero; the
+    // slab-height term is zero across a base by definition, because a cumulus
+    // base IS the condensation level and the profile makes it a plane. So the
+    // whole underside converged to one number and stayed there.
+    //
+    // What actually decides how bright a point on a cloud base is, is HOW MUCH
+    // CLOUD IS DIRECTLY ABOVE IT — that is the sky the sample cannot see, and it
+    // is a strongly varying quantity even where the base is geometrically flat,
+    // because the towers above it are not. One density tap 300 m up, at the
+    // octaves' means so it agrees with the view march about how much medium there
+    // is, and the base develops the mottling a real one has for the physical
+    // reason a real one has it.
+    //
+    // The floor moved with it, from 0.029 of the hemisphere to 0.102. A cloud is
+    // a conservative scatterer (single-scattering albedo ~0.9999): light that
+    // enters it leaves it, and the base of a 1.2 km cumulus at golden hour is
+    // grey, not twelve times darker than the sky it sits against. 0.029 was an
+    // occlusion model with no multiple scattering behind it, and it is the other
+    // half of why the underside read as smoke.
+    float upTau = ironCloudDensity(p + vec3(0.0, 300.0, 0.0), 0.0, 0.0)
+                * density * 300.0 * IRON_CLOUD_SIGMA;
+    float buried = exp(-(tauL * 0.32 + upTau * 0.85));
+    float skyOcc = mix(0.44, 1.0, hh * hh) * (0.42 + 0.58 * buried);
     // CLAMPED HERE, PER SAMPLE, AND NOT ONLY ON THE ACCUMULATED TOTAL. Inside
     // ~2° of the sun the narrow lobe of ironCloudPhase reaches 6.5 sr⁻¹, and
     // 6.5 × the 55 200 lx red channel is 1.4e5 cd/m² — past fp16's 65 504. The

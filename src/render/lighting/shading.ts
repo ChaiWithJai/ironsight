@@ -92,6 +92,13 @@ export const DEBUG_SUN_SHADOW = 1;
 export const DEBUG_CASCADE_INDEX = 2;
 export const DEBUG_AO = 3;
 export const DEBUG_NDL = 4;
+export const DEBUG_CONTACT = 5;
+/** Geometric (non-normal-mapped) N·L — the reference the terminator clamp works against. */
+export const DEBUG_NDL_GEOM = 6;
+/** Blocker gap in metres / 40 — how far up-sun the occluder that shadows this pixel is. */
+export const DEBUG_GAP = 7;
+/** A linear 0..1 horizontal ramp — reads the post chain's whole transfer curve in one frame. */
+export const DEBUG_RAMP = 8;
 
 export interface ShadingUniforms {
   readonly matrices: Float32Array;
@@ -144,6 +151,22 @@ uniform sampler2D ironAoTex;
 #define IRON_MIN_NZ 0.05
 /** tan of the steepest receiver slope the plane bias will follow (83°). */
 #define IRON_MAX_PLANE_SLOPE 8.0
+/**
+ * How much of the geometric cosine the normal map is allowed to add or take
+ * away. See \`ironTerminatorNormal\`. 0.6 lets the relief modulate the sun by
+ * ±60 % — visually a strong, clearly readable raking texture — while capping the
+ * lit:shaded ratio inside one pixel's worth of relief at 4:1 instead of the
+ * infinity a hard \`max(N·L, 0)\` allows.
+ */
+#define IRON_TERMINATOR_CAP 0.30
+/**
+ * Fraction of a surface's SKY irradiance that arrives from the circumsolar cone,
+ * and is therefore lost when something up-sun puts it in shadow. See
+ * \`ironAureoleLoss\`. MIN is the near-horizontal-ground case (the cone is caught
+ * at a glancing 11°), MAX a face square to the sun.
+ */
+#define IRON_AUREOLE_MIN 0.12
+#define IRON_AUREOLE_MAX 0.35
 #define IRON_MAX_LOCAL_LIGHTS ${IRON_MAX_LOCAL_LIGHTS}
 #define IRON_LIGHT_BASE ${V_LIGHT_BASE}
 /** Debug mode selectors. \`#define\` so the ints never land in float context. */
@@ -151,9 +174,29 @@ uniform sampler2D ironAoTex;
 #define IRON_DBG_CASCADE ${DEBUG_CASCADE_INDEX}
 #define IRON_DBG_AO ${DEBUG_AO}
 #define IRON_DBG_NDL ${DEBUG_NDL}
+#define IRON_DBG_CONTACT ${DEBUG_CONTACT}
+#define IRON_DBG_NDL_GEOM ${DEBUG_NDL_GEOM}
+#define IRON_DBG_GAP ${DEBUG_GAP}
+#define IRON_DBG_RAMP ${DEBUG_RAMP}
 
 /** Debug channel, written in \`lights_fragment_begin\`, read in \`opaque_fragment\`. */
 vec4 ironDebug = vec4( 0.0 );
+/**
+ * The shading normal, parked while the sun is shaded with the terminator-clamped
+ * one and restored before the indirect terms. Zero means "never saved", which is
+ * what a material compiled without a directional light leaves it at.
+ */
+vec3 ironNormalSaved = vec3( 0.0 );
+/** Geometric N·L, kept for the debug channel. */
+float ironNdlGeom = 0.0;
+/** Occluder-receiver gap in metres, kept for the debug channel. */
+float ironGapDebug = 0.0;
+/**
+ * The sun's cascade visibility, read back by the indirect terms. It defaults to
+ * FULLY VISIBLE so a material that compiles without a directional light gets no
+ * circumsolar loss rather than all of it.
+ */
+float ironSunVis = 1.0;
 
 vec3 ironWorldPos( const in vec3 viewPos ) {
   return ( ironMatrix[${M_VIEW_INVERSE}] * vec4( viewPos, 1.0 ) ).xyz;
@@ -315,6 +358,7 @@ float ironCascade( const in int cascade, const in vec3 worldPos, const in vec3 w
 
   // Contact hardening: penumbra half-width = gap * tan(sun angular radius).
   float gap = gapSum / blockerCount;
+  ironGapDebug = gap;
   float penumbraUv = max( gap * atlas.z * uvPerMetre, atlas.w * texelWorld * uvPerMetre );
 
   // ---- filter ------------------------------------------------------------
@@ -368,6 +412,99 @@ float ironSunShadow( const in vec3 worldPos, const in vec3 worldNormal, const in
   // terrain carries no resolvable shadow detail, it dissolves into aerial
   // perspective. Fade out rather than pop.
   return mix( s, 1.0, smoothstep( ironVec[${V_MISC}].z, splits[ count - 1 ], viewDepth ) );
+}
+
+/**
+ * THE BUMPED-SURFACE TERMINATOR CLAMP.
+ *
+ * A normal map is a stand-in for relief the geometry does not carry, and
+ * \`max(N·L, 0)\` on a point-sampled perturbed normal is a bad estimator of what
+ * that relief actually does to the sun near the terminator. Two physical facts
+ * are being ignored at once: the relief SELF-SHADOWS as the light grazes (the
+ * raised facets shade the pits, so no facet can be delivering full irradiance on
+ * a surface the sun is skimming), and a pixel covers a whole distribution of
+ * facet normals rather than the one that happened to be sampled. The result on a
+ * plaster wall lit at 11° is the classic shadow-terminator artefact: N·L flips
+ * between +0.4 and −0.4 from one normal-map texel to the next, and the frame
+ * carries a band of fully-lit and fully-black blobs where it should carry a
+ * smooth ramp with the relief legible inside it. Measured on \`light_cascades\`
+ * before this existed: a horizontal luma profile across the near wall's
+ * terminator swung ±100 display luma between samples 10 px apart, while the same
+ * wall in full sun held a standard deviation of 10.
+ *
+ * The clamp is on the PERTURBATION, not on the normal, and that is what keeps it
+ * from flattening the look. Write the perturbed cosine as
+ *
+ *     ndlShading = ndlGeom + perturbation
+ *
+ * and cap |perturbation| at a fraction of \`ndlGeom\` itself. Where the sun is
+ * properly on the surface the cap is far larger than the perturbation ever gets
+ * and the normal map passes through completely untouched — raking micro-detail,
+ * which is a headline requirement of LOOK_SPEC §2.2, is fully preserved. As the
+ * geometric surface turns edge-on the cap closes proportionally, so the relief
+ * fades out exactly and only where it would otherwise manufacture a black hole
+ * next to a blown highlight. The perturbed cosine can then never cross zero
+ * while the geometry still faces the sun, which is what makes the terminator
+ * monotonic.
+ *
+ * It is applied by MIXING THE NORMAL rather than by scaling the light, because
+ * scaling \`directLight.color\` can only ever darken: a pixel whose perturbed
+ * cosine has already gone negative is dead inside \`RE_Direct\` and no multiplier
+ * brings it back. \`t\` is chosen so the mixed normal lands on the capped cosine.
+ */
+vec3 ironTerminatorNormal( const in vec3 shading, const in vec3 geom, const in vec3 lightDir ) {
+  float ndlG = dot( geom, lightDir );
+  float ndlS = dot( shading, lightDir );
+  float perturbation = ndlS - ndlG;
+  // The floor keeps a face that is exactly edge-on from losing its normal map
+  // discontinuously; 0.012 is about a degree of tilt and is invisible.
+  float limit = IRON_TERMINATOR_CAP * max( ndlG, 0.0 ) + 0.012;
+  float t = clamp( limit / max( abs( perturbation ), 1e-4 ), 0.0, 1.0 );
+  vec3 mixed = mix( geom, shading, t );
+  float len = length( mixed );
+  return len > 1e-4 ? mixed / len : geom;
+}
+
+/**
+ * THE CIRCUMSOLAR LOSS — the sky a cast shadow's own occluder takes away.
+ *
+ * The environment cube is a real directional sky, so a surface already receives
+ * the right irradiance for its ORIENTATION. What no environment lookup can know
+ * is that a point sitting in the sun's cast shadow is being shadowed by
+ * something standing on the sun vector, and that something is covering the
+ * brightest part of the dome by a wide margin: LOOK_SPEC §2.4 measures the
+ * horizon within 20° of the sun azimuth at 9 000 cd/m² against 3 400 cd/m² at
+ * 90° off and 2 200 at the zenith. At an 11° sun that circumsolar cone carries
+ * roughly a quarter of the diffuse irradiance a sun-facing surface collects, and
+ * a building 40 m up-sun — the thing that put this pixel in shadow in the first
+ * place — sits squarely on it.
+ *
+ * GTAO cannot supply this: its far radius is 10 m, so an occluder that is
+ * shadowing the ground from 40 m away is invisible to it, and the shadowed
+ * ground keeps its full 8 200 lx of sky. That is the whole reason a cast shadow
+ * on open ground was measuring 1.5:1 in display luma against LOOK_SPEC §2.5's
+ * 2.5–4.5:1 acceptance band — the sun was being removed correctly and the sky
+ * was not being touched at all.
+ *
+ * The share is scaled by the geometric N·L because the cosine weighting decides
+ * how much of the cone a surface actually sees, and the two ends of that scale
+ * are very different sizes. Near-horizontal ground catches the circumsolar cone
+ * at a glancing 11°, so an 8 m occluder 40 m up-sun covers a band of about
+ * 0.13 sr of the hemisphere's cosine measure at roughly 3× the dome's mean
+ * radiance — 12 %. A face square to the sun has that same cone dead centre in
+ * its own hemisphere and loses about 35 %. Those are the two numbers below, and
+ * they are why this term deepens a shadow on a sunward WALL far more than one on
+ * open ground: that asymmetry is real, and it is the same asymmetry LOOK_SPEC
+ * §2.5 records when it asks for 2.5–4.5:1 on ground and 5.0–9.0:1 on a sunward
+ * vertical face out of one pair of illuminances.
+ *
+ * It is gated on the cascade's own visibility, so ground in full sun is
+ * untouched — this can only ever deepen a shadow that already exists, never
+ * darken the frame generally.
+ */
+float ironAureoleLoss( const in float sunVisibility, const in float ndlGeom ) {
+  float share = IRON_AUREOLE_MIN + ( IRON_AUREOLE_MAX - IRON_AUREOLE_MIN ) * clamp( ndlGeom, 0.0, 1.0 );
+  return 1.0 - share * clamp( 1.0 - sunVisibility, 0.0, 1.0 );
 }
 
 /** Jimenez's multi-bounce GTAO fit: coloured, energy-preserving, no grey halo. */
@@ -474,6 +611,9 @@ const OCCLUSION = /* glsl */ `
 	reflectedLight.indirectDiffuse *= ironMultiBounce( ironVis, material.diffuseColor );
 	float ironDotNV = saturate( dot( geometryNormal, geometryViewDir ) );
 	reflectedLight.indirectSpecular *= computeSpecularOcclusion( ironDotNV, ironVis, material.roughness );
+	float ironAureole = ironAureoleLoss( ironSunVis, ironNdlGeom );
+	reflectedLight.indirectDiffuse *= ironAureole;
+	reflectedLight.indirectSpecular *= ironAureole;
 }
 #endif
 `;
@@ -514,24 +654,49 @@ export function installShadingModel(quality: Readonly<QualitySettings>): void {
     throw new Error('LIGHT: lights_fragment_begin has no RE_IndirectDiffuse anchor for clustered lights.');
   }
 
+  // THE SHADOW LOOKUP TAKES THE GEOMETRIC NORMAL, NOT THE SHADED ONE, AND THAT
+  // IS NOT A DETAIL. `ironCascade` builds a receiver PLANE from the normal and
+  // extrapolates the atlas depth across the whole PCSS kernel with it; the
+  // gradient it uses is `4R²/(N·rowZ)`, which at an 11° sun is thousands of
+  // metres per unit of uv. Feeding that a normal-mapped normal makes the plane
+  // wrong by the normal map's own slope at every pixel, and the error lands
+  // exactly where the kernel is widest — inside the penumbra — which is a second
+  // texture-shaped noise field on top of the terminator one. The vertex normal
+  // is what the rasteriser actually wrote depth from, so it is what the plane
+  // has to be built on.
   const cascaded = /* glsl */ `
 		#ifdef STANDARD
 		{
 			vec3 ironWp = ironWorldPos( geometryPosition );
-			vec3 ironWn = normalize( ironWorldDir( geometryNormal ) );
+			vec3 ironWn = normalize( ironWorldDir( nonPerturbedNormal ) );
 			float ironNdl = dot( ironWn, ironVec[${V_SUN}].xyz );
+			ironNdlGeom = ironNdl;
 			float ironS = ironSunShadow( ironWp, ironWn, -geometryPosition.z, ironNdl );
 			ironDebug.x = ironS;
-			ironDebug.y = ironNdl;
+			ironSunVis = ironS;
+			ironDebug.y = dot( normalize( ironWorldDir( geometryNormal ) ), ironVec[${V_SUN}].xyz );
 			ironDebug.w = ironContactSun();
 			directLight.color *= ironS * ironDebug.w;
+			// Park the shading normal and shade the sun through the clamped one.
+			// Restored at \`ironRestoreNormal\` below, before any indirect term
+			// reads it — the sky ambient must keep the full normal map.
+			ironNormalSaved = geometryNormal;
+			geometryNormal = ironTerminatorNormal( geometryNormal, nonPerturbedNormal, directLight.direction );
 		}
 		#else
 ${dirShadow}		#endif
 `;
+  const restoreNormal = /* glsl */ `
+#ifdef STANDARD
+	// > 0.5 rather than > 0.0: the saved slot is a unit vector when it has been
+	// written and exactly zero when the material compiled with no directional
+	// light at all, in which case there is nothing to put back.
+	if ( dot( ironNormalSaved, ironNormalSaved ) > 0.5 ) geometryNormal = ironNormalSaved;
+#endif
+`;
   chunk.lights_fragment_begin = begin
     .replace(dirShadow, cascaded)
-    .replace(indirectAnchor, `${LOCAL_LIGHTS}\n${indirectAnchor}`);
+    .replace(indirectAnchor, `${restoreNormal}${LOCAL_LIGHTS}\n${indirectAnchor}`);
 
   if (!chunk.lights_fragment_begin.includes('ironSunShadow')) {
     throw new Error('LIGHT: failed to install the cascaded shadow term into lights_fragment_begin.');
@@ -562,6 +727,10 @@ ${dirShadow}		#endif
     ironDebug.z < 2.5 ? vec3( 0.2, 0.4, 1.0 ) : vec3( 1.0, 1.0, 0.2 ) ) * ironGain, 1.0 );
   else if ( ironMode == IRON_DBG_AO ) gl_FragColor = vec4( ironOcclusion().rgr * ironGain, 1.0 );
   else if ( ironMode == IRON_DBG_NDL ) gl_FragColor = vec4( vec3( max( ironDebug.y, 0.0 ) ) * ironGain, 1.0 );
+  else if ( ironMode == IRON_DBG_CONTACT ) gl_FragColor = vec4( vec3( ironDebug.w ) * ironGain, 1.0 );
+  else if ( ironMode == IRON_DBG_NDL_GEOM ) gl_FragColor = vec4( vec3( max( ironNdlGeom, 0.0 ) ) * ironGain, 1.0 );
+  else if ( ironMode == IRON_DBG_GAP ) gl_FragColor = vec4( vec3( ironGapDebug / 40.0 ) * ironGain, 1.0 );
+  else if ( ironMode == IRON_DBG_RAMP ) gl_FragColor = vec4( vec3( gl_FragCoord.x / 1920.0 ) * ironGain, 1.0 );
 }
 #endif
 `;

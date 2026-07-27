@@ -18,7 +18,7 @@ import * as THREE from 'three';
 import { CollisionGroup, SurfaceId, type Rng } from '@/engine/types';
 import type { LevelBuild } from '@/level/build';
 import { railing, stairs } from '@/level/kit/detail';
-import { blockChip, groundSkirt, rock, spillTongues } from '@/level/kit/ground';
+import { blockChip, groundSkirt, rock, seamDebris, spillTongues } from '@/level/kit/ground';
 import { barrel, bollard, container, crateStack, palletStack, ropeCoil, sandbagWall, tyreStack } from '@/level/dressing';
 import { BREAKWATER, CRANES, QUAY } from '@/level/layout';
 import type { MatKey } from '@/level/materials';
@@ -573,11 +573,35 @@ export function buildWarehouse(
   b.m(plinth).boxAt(0, -0.6, 0, hx + 0.2, 1.0, hz + 0.2, 0.5, 0x3f);
   b.deck(x, g + 0.42, z, hx - 0.6, hz - 0.6, yaw, 0);
 
+  /**
+   * THE INTERIOR SHELL — the round-2 severity-9 finding on `level_bravo`.
+   *
+   * The critique: "Warehouse sheds are hollow facades — doorways read BRIGHTER
+   * than sunlit exterior walls… no door frame depth, no interior floor, no back
+   * wall, no falloff of sky light into the opening." The last clause is the
+   * real one: the ambient term arrives with no visibility factor, so a slab of
+   * concrete inside a shed returns exactly what the same slab returns on the
+   * open apron.
+   *
+   * A shed like this HAS all its geometry — long walls, gable ends, a roof,
+   * portal frames — so the missing thing was never the back wall. It was the
+   * light. Every surface below that only the doorway can see is emitted in
+   * `interior`, whose albedo already carries the sky-visibility factor (see
+   * `materials.ts`), and the result is a doorway that reads as a dark volume
+   * with a lit floor strip inside it instead of a hole punched in a facade.
+   *
+   * The floor first: an `interior` slab 1 cm over the plinth's top, inset so the
+   * plinth's own edge still catches the sun outside the walls.
+   */
+  b.m('interior').boxAt(0, 0.41, 0, hx - 0.02, 0.01, hz - 0.02, 0.5, 0x04);
+
   // Long walls: corrugated cladding as a run of alternating ribs, which is what
   // gives the raking sun something to break up over a 30 m facade.
   const ribs = Math.max(8, Math.round((hx * 2) / 0.5));
   for (const sz of [1, -1]) {
     b.m(clad).boxAt(0, wallH / 2 + 0.4, sz * hz, hx, wallH / 2, 0.09, 0.5, 0x3f);
+    // Inner lining board, 3 cm proud of the cladding's inner face.
+    b.m('interior').boxAt(0, wallH / 2 + 0.4, sz * (hz - 0.12), hx, wallH / 2, 0.03, 0.5, 0x3f);
     for (let i = 0; i <= ribs; i++) {
       const px = -hx + (i / ribs) * hx * 2;
       b.m(clad).boxAt(px, wallH / 2 + 0.4, sz * (hz + 0.07), 0.07, wallH / 2 - 0.1, 0.05, 1, 0x3f);
@@ -598,10 +622,57 @@ export function buildWarehouse(
   for (const sx of [1, -1]) {
     const doorW = Math.min(4.2, hz * 0.8);
     const doorH = 4.4;
-    // Wall around the door, in four pieces.
-    b.m(clad).boxAt(sx * hx, wallH / 2 + 0.4, (hz + doorW) / 2 + 0.001, 0.09, wallH / 2, (hz - doorW) / 2, 0.5, 0x3f);
-    b.m(clad).boxAt(sx * hx, wallH / 2 + 0.4, -(hz + doorW) / 2, 0.09, wallH / 2, (hz - doorW) / 2, 0.5, 0x3f);
+    /**
+     * WALL AROUND THE DOOR — AND THE ACTUAL ROOT CAUSE OF THE ROUND-2
+     * SEVERITY-9 FINDING ON `level_bravo`.
+     *
+     * `doorW` is the door's FULL width, so the wall panel beside it runs from
+     * z = doorW/2 out to z = hz: centre (doorW/2 + hz)/2, half (hz − doorW/2)/2.
+     * What was here used `(hz ± doorW)/2`, i.e. it treated `doorW` as a HALF
+     * width — which on the 15 m gable of shed C put the panel between z = 4.2
+     * and z = 7.5 and left z = 2.1 → 4.2 with NO WALL AT ALL. Every shed on the
+     * quay had a 2.1 m, 7 m tall hole either side of its door, and the frame
+     * showed exactly that: "a flat pale blue-grey rectangle showing background
+     * haze straight through the building". It was not a lighting inversion and
+     * it was not a missing interior. It was a hole.
+     *
+     * The same arithmetic error was in the two side-wall colliders below, so
+     * the physics agreed with the render and nothing caught it.
+     */
+    const jambZ = doorW / 2;
+    const sideC = (jambZ + hz) / 2;
+    const sideH = (hz - jambZ) / 2;
+    b.m(clad).boxAt(sx * hx, wallH / 2 + 0.4, sideC + 0.001, 0.09, wallH / 2, sideH, 0.5, 0x3f);
+    b.m(clad).boxAt(sx * hx, wallH / 2 + 0.4, -sideC, 0.09, wallH / 2, sideH, 0.5, 0x3f);
     b.m(clad).boxAt(sx * hx, (wallH + doorH) / 2 + 0.4, 0, 0.09, (wallH - doorH) / 2, doorW / 2, 0.5, 0x3f);
+    /**
+     * THE DOOR REVEAL. A 22 cm structural opening — the depth of the portal
+     * frame's end stanchion plus the door track — returned around all three
+     * sides of the doorway. This is the "15–25 cm of jamb depth so the opening
+     * self-shadows" the critique asked for, and at an 11° sun it is worth more
+     * than anything inside the shed: one jamb goes to full shadow, the other
+     * catches a hard vertical highlight, and the head throws a band down the
+     * inside of the door.
+     */
+    const jamb = 0.22;
+    for (const s of [1, -1]) {
+      b.m('steel').boxAt(
+        sx * (hx - jamb / 2 - 0.04), (doorH + 0.4) / 2 + 0.2, s * (doorW / 2 + 0.055),
+        jamb / 2, (doorH - 0.4) / 2 + 0.4, 0.055, 1, 0x3f,
+      );
+    }
+    b.m('steel').boxAt(sx * (hx - jamb / 2 - 0.04), doorH + 0.44, 0, jamb / 2, 0.06, doorW / 2 + 0.11, 1, 0x3f);
+    // Inner lining either side of the door, so the gable's inside face is as
+    // occluded as the long walls are.
+    for (const s of [1, -1]) {
+      b.m('interior').boxAt(
+        sx * (hx - 0.16), wallH / 2 + 0.4, s * sideC,
+        0.03, wallH / 2, sideH, 0.5, 0x3f,
+      );
+    }
+    b.m('interior').boxAt(
+      sx * (hx - 0.16), (wallH + doorH) / 2 + 0.42, 0, 0.03, (wallH - doorH) / 2 - 0.02, doorW / 2, 0.5, 0x3f,
+    );
     // Gable triangle above the eaves.
     const gm = b.m(clad);
     gm.triangle(
@@ -610,13 +681,41 @@ export function buildWarehouse(
     gm.triangle(
       _v[0].set(sx * hx, wallH + 0.4, hz), _v[1].set(sx * hx, wallH + 0.4, -hz), _v[2].set(sx * hx, wallH + 0.4 + ridge, 0), 1,
     );
-    // The roller door itself: shutter slats, half up on one end.
+    /**
+     * THE ROLLER DOOR.
+     *
+     * Round 2 read this panel as "a flat pale blue-grey rectangle showing
+     * background haze straight through the building", and at 76 m through the
+     * shot's own fog that is a fair description of what it was: nine slat boxes
+     * whose half-heights tiled EXACTLY, so there was no groove between them, no
+     * shadow line, and the whole 4.2 × 4.4 m door resolved to one flat quad of a
+     * low-albedo colour — which aerial perspective then washed to sky colour
+     * faster than the higher-albedo cladding around it. A surface that goes to
+     * haze faster than its surroundings reads as a hole. The fix is not to
+     * brighten it; it is to give it VALUE STRUCTURE that survives the haze.
+     *
+     *  - a 1.6 cm groove between slats, so each one throws a hard line under an
+     *    11° sun;
+     *  - alternating proud depth, so the door has a corrugation rather than a
+     *    face;
+     *  - guide rails either side and a bottom rail on the leading slat.
+     */
     const open = sx > 0 ? rng.range(1.6, 3.2) : 0.0;
-    const slats = 9;
+    const slats = 12;
+    const pitch = (doorH - open) / slats;
     for (let i = 0; i < slats; i++) {
-      const y = 0.4 + open + (i / slats) * (doorH - open);
+      const y = 0.4 + open + (i + 0.5) * pitch;
       if (y > doorH + 0.4) break;
-      b.m('paint').boxAt(sx * (hx + 0.05), y, 0, 0.04, (doorH - open) / slats / 2, doorW / 2, 1, 0x3f);
+      const proud = i % 2 === 0 ? 0.055 : 0.032;
+      b.m('paint').boxAt(sx * (hx + proud), y, 0, proud, pitch / 2 - 0.008, doorW / 2, 1, 0x3f);
+    }
+    if (open > 0.2) {
+      // Bottom rail of a part-raised door: heavier than a slat, and the thing
+      // that puts a hard horizontal shadow across the open gap.
+      b.m('steel').boxAt(sx * (hx + 0.07), 0.4 + open, 0, 0.075, 0.075, doorW / 2 + 0.03, 1, 0x3f);
+    }
+    for (const s of [1, -1]) {
+      b.m('steel').boxAt(sx * (hx + 0.06), (doorH + 0.4) / 2 + 0.2, s * (doorW / 2 + 0.09), 0.07, doorH / 2 + 0.2, 0.06, 1, 0x3f);
     }
     b.m('steel').boxAt(sx * (hx + 0.05), doorH + 0.62, 0, 0.08, 0.22, doorW / 2 + 0.15, 1, 0x3f);
     if (open < 0.2) {
@@ -631,9 +730,9 @@ export function buildWarehouse(
     for (const s of [1, -1]) {
       b.collider({
         matrix: new THREE.Matrix4().multiplyMatrices(
-          m, new THREE.Matrix4().makeTranslation(sx * hx, wallH / 2 + 0.4, s * (hz + doorW) / 2),
+          m, new THREE.Matrix4().makeTranslation(sx * hx, wallH / 2 + 0.4, s * sideC),
         ),
-        shape: { kind: 'box', half: new THREE.Vector3(0.2, wallH / 2 + 0.4, (hz - doorW) / 2) },
+        shape: { kind: 'box', half: new THREE.Vector3(0.2, wallH / 2 + 0.4, sideH) },
         surface: SurfaceId.PaintedMetal,
         group: CollisionGroup.StaticGeo,
       });
@@ -649,7 +748,11 @@ export function buildWarehouse(
       _v[3].set(-hx - 0.35, wallH + 0.4 + ridge, 0),
       0.5,
     );
-    rm.quad(
+    // The soffit. Emitted in `interior`, not in the cladding: it is the single
+    // largest surface in the shed that can see no sky at all, and leaving it at
+    // the cladding's albedo is what made the roof read as a lid floating over a
+    // lit box rather than as a ceiling.
+    b.m('interior').quad(
       _v[0].set(hx + 0.35, wallH + 0.32, sz * (hz + 0.35)),
       _v[1].set(-hx - 0.35, wallH + 0.32, sz * (hz + 0.35)),
       _v[2].set(-hx - 0.35, wallH + 0.32 + ridge, 0),
@@ -670,6 +773,34 @@ export function buildWarehouse(
       );
     }
   }
+  /**
+   * THE CROSS PARTITION — "no back wall".
+   *
+   * A 32 m shed with a door at each end is a telescope: stand on the axis and
+   * the far doorway frames a rectangle of sky, which is exactly the read the
+   * round-2 critique got. Real sheds of this size are divided — a bay wall with
+   * an offset opening for the forklift route. That is what this is: a full
+   * height partition at 34–46 % of the length, in `interior`, with a 4.4 m
+   * opening pushed to one side. Every sightline in through a gable door now
+   * terminates on a dark surface within 15 m, the through-route survives
+   * (offset, so you have to walk round), and the shed finally has an inside.
+   */
+  const partX = hx * rng.range(-0.32, 0.32) + hx * (rng.bool(0.5) ? 0.4 : -0.4);
+  const gapZ = (hz - 2.2) * (rng.bool(0.5) ? 1 : -1) * 0.55;
+  for (const sz of [1, -1]) {
+    const z0 = sz > 0 ? gapZ + 2.2 : -hz;
+    const z1 = sz > 0 ? hz : gapZ - 2.2;
+    if (z1 - z0 < 0.15) continue;
+    // `solid` rather than a raw box: the partition has to exist for physics and
+    // for the navmesh too, or bots walk through the wall the frame shows them.
+    b.solid('interior', partX, wallH / 2 + 0.4, (z0 + z1) / 2, 0.12, wallH / 2, (z1 - z0) / 2, {
+      uvScale: 0.6, noCover: true,
+    });
+  }
+  // Head over the opening, so the partition reads as a wall with a hole in it.
+  b.m('interior').boxAt(partX, wallH - 0.4, gapZ, 0.12, 0.9, 2.2, 0.6, 0x3f);
+  b.m('steel').boxAt(partX, wallH - 1.34, gapZ, 0.16, 0.09, 2.24, 1, 0x3f);
+
   // Contents: pallets, drums, a stack of crates, a spill of rope.
   for (let i = 0; i < 8; i++) {
     const px = rng.range(-hx + 1.6, hx - 1.6);
@@ -699,16 +830,41 @@ export function buildWarehouse(
   }
   b.exclude(x, z, Math.max(hx, hz) + 2);
 
-  groundSkirt(
-    b,
-    [
-      { x: x + (-hx - 0.3) * Math.cos(yaw) + (hz + 0.3) * Math.sin(yaw), z: z - (-hx - 0.3) * Math.sin(yaw) + (hz + 0.3) * Math.cos(yaw) },
-      { x: x + (hx + 0.3) * Math.cos(yaw) + (hz + 0.3) * Math.sin(yaw), z: z - (hx + 0.3) * Math.sin(yaw) + (hz + 0.3) * Math.cos(yaw) },
-      { x: x + (hx + 0.3) * Math.cos(yaw) + (-hz - 0.3) * Math.sin(yaw), z: z - (hx + 0.3) * Math.sin(yaw) + (-hz - 0.3) * Math.cos(yaw) },
-      { x: x + (-hx - 0.3) * Math.cos(yaw) + (-hz - 0.3) * Math.sin(yaw), z: z - (-hx - 0.3) * Math.sin(yaw) + (-hz - 0.3) * Math.cos(yaw) },
-    ],
-    ground, rng, { amount: 1.3, blockFraction: 0.5 },
-  );
+  const corner = (lx: number, lz: number): { x: number; z: number } => ({
+    x: x + lx * Math.cos(yaw) + lz * Math.sin(yaw),
+    z: z - lx * Math.sin(yaw) + lz * Math.cos(yaw),
+  });
+  const outline = [
+    corner(-hx - 0.3, hz + 0.3),
+    corner(hx + 0.3, hz + 0.3),
+    corner(hx + 0.3, -hz - 0.3),
+    corner(-hx - 0.3, -hz - 0.3),
+  ];
+  groundSkirt(b, outline, ground, rng, { amount: 1.3, blockFraction: 0.5 });
+  /**
+   * GRIT AT THE PLINTH / SLAB SEAM.
+   *
+   * `groundSkirt` above drapes sand over the TERRAIN around the shed, which is
+   * the right answer for the three sides standing on open ground and no answer
+   * at all for a shed standing on a cast apron — there the plinth meets a flat
+   * concrete slab and the terrain field is metres below both. That junction is
+   * exactly the one `sky_golden` was marked down for ("the concrete plinth meets
+   * the slab … as dead-clean edges with no debris, gravel, dirt buildup").
+   * `seamDebris` works on a stated Y instead of a height field, so it lands on
+   * the slab whatever the terrain is doing underneath it.
+   */
+  for (let i = 0; i < 4; i++) {
+    const p = outline[i];
+    const q = outline[(i + 1) % 4];
+    const ex = q.x - p.x;
+    const ez = q.z - p.z;
+    const l = Math.hypot(ex, ez) || 1;
+    // Outward normal of a clockwise-in-XZ outline. Sign is irrelevant to
+    // `seamDebris`'s winding (it derives that itself) but not to which side the
+    // grit lands on, so it is worth getting right: the outline runs +Z → +X →
+    // −Z → −X, so (−ez, ex)/l points away from the shed.
+    seamDebris(b, p.x, p.z, q.x, q.z, g, -ez / l, ex / l, rng, { amount: 1.15 });
+  }
 }
 
 /**

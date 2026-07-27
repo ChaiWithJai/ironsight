@@ -268,7 +268,20 @@ export const GRADE_CONTRAST = 1.42;
  * magnitude above it — the sun disc is 1.6e7 cd/m², about 3 000 after exposure —
  * and every diffuse surface in the map, sky included, is below it.
  *
- * Re-derive this whenever the curve moves; it is a property of the curve.
+ * IT STAYS AT 2.19 THROUGH THE `GRADE_WHITE_POINT` CHANGE, AND THE DERIVATION
+ * ABOVE IS THE REASON. Under the shoulder the composed ramp now runs 0.72→202,
+ * 1.44→232, 2.0→249, 2.6→255, so "the scene-linear value that maps to display
+ * 240" has moved DOWN to about 1.65 — and following it there would put the
+ * threshold BELOW the golden-hour sky (§2.4's 9 000 cd/m² horizon is
+ * scene-linear 1.69 under §2.1's exposure), which is precisely the milky veil
+ * the paragraph above exists to prevent. Display 240 was only ever a proxy for
+ * the physical statement, which has not moved and does not depend on the curve:
+ * **threshold just above the brightest DIFFUSE thing the map contains.** Sunlit
+ * white plaster is 0.72–1.0, the sky peaks at 1.7–2.0, and the sun disc is about
+ * 3 000. 2.19 is the only decade-wide gap in that list. Under the new curve it
+ * sits at display ~251, i.e. bloom now fires only on pixels that are already
+ * essentially clipped — which is §6.1's intent stated more strictly than before,
+ * not less.
  */
 export const BLOOM_THRESHOLD_LINEAR = 2.19;
 
@@ -310,7 +323,167 @@ const GRADE_S_WARP = Math.log(0.5) / Math.log(GRADE_CONTRAST_PIVOT);
  *
  * AgX's own shoulder is the shoulder: it puts scene 16.3 on display 255 and
  * desaturates toward white on the way, which is §5.1's requirement verbatim.
+ *
+ * WHAT AgX'S SHOULDER DOES NOT DO, AND WHY THE WHITE POINT BELOW EXISTS.
+ * The obituary above is still correct about every one of its measurements and
+ * nothing in it is being reverted. It is also, on its own, an incomplete answer,
+ * and the round-1 critics measured the hole from four different shots: AgX's
+ * white point is scene-linear 16.3, i.e. **6.5 stops over mid grey and 4.5 stops
+ * over sunlit diffuse white**, and no daylight exterior in this map contains
+ * anything that far up unless the sun disc or a specular glint is physically in
+ * frame. Measured on the roster, `light_cascades` max luma 224, `level_alpha`
+ * 239, `level_bravo` 241, `weapon_ads` 241, `material_chart` 247, and the
+ * fraction of pixels over code 250 was **0.0000 on every one of them**.
+ *
+ * Measured on all 135 `reference/gameplay/` frames: median max luma **255**,
+ * 78.5 % of frames reach 254 or higher, median fraction over 250 is 0.053 %
+ * (p75 0.25 %, p90 1.46 %) and median fraction over 240 is 0.23 %. A real
+ * graded game frame carries a small, genuinely clipped tail; ours carried none,
+ * which is the "the image never touches white" read.
+ *
+ * `GRADE_WHITE_POINT` is where that is fixed — not with a gain, which is the
+ * thing the obituary buried. See its own comment.
  */
+
+/**
+ * **The display white point, and the shoulder knee under it.** `ironWhitePoint`
+ * maps code `GRADE_WHITE_POINT` to 1.0 and leaves everything below
+ * `GRADE_SHOULDER_KNEE` bit-identical.
+ *
+ * This is NOT the gain wheel the obituary above removed, and the difference is
+ * the whole point:
+ *
+ *  - the gain was a MULTIPLIER over the whole range followed by a soft clip that
+ *    ASYMPTOTED at 0.80, so it moved the midtones and LOWERED the ceiling to
+ *    code 251. This is a BIT-EXACT IDENTITY below code 227 — nothing at or below
+ *    scene-linear 1.0 moves by one code, so the §5.1 ramp at 0.020 / 0.180 /
+ *    0.360 / 0.720 is untouched at 21 / 110 / 158 / 202 — and it RAISES the
+ *    ceiling to exactly 255.
+ *  - the gain was fitted to a p99 that was low because the camera was pointed
+ *    away from the sun. This is fitted to §2.4's own sky table (below) and to a
+ *    MAX that was 224–247 on five independent shots.
+ *
+ * Shape: `d' = T + (1−T)·f(u)`, `u = (d−T)/(W−T)`, with `f` the unique cubic
+ * that is C¹ with the identity at `T` (`f'(0) = (W−T)/(1−T)`), reaches 1 at
+ * `u = 1` and has ZERO SLOPE there. Three properties, all load bearing:
+ *
+ *  - **Zero slope at the white point** is what makes it a film shoulder rather
+ *    than a clip. Values approach 255 with decreasing contrast and then stop, so
+ *    the last few codes compress instead of banding into a hard edge.
+ *  - **Driven off max(r, g, b), and desaturating toward white on the way up.**
+ *    A per-channel version was written first and measured wrong; the reason, the
+ *    numbers and the replacement are on `ironWhitePoint` itself. The property
+ *    that matters here is that an over-range pixel CONVERGES ON NEUTRAL WHITE,
+ *    which is §5.1's "desaturates toward white" and the rubric's Axis 4
+ *    requirement.
+ *  - **Monotone**, so it cannot invert or posterise: f'(u) = A + 2Cu + 3Eu² with
+ *    A > 0 and a single root at u = 1.
+ *
+ * **WHERE 0.89 / 0.930 COMES FROM: §2.4's SKY TABLE, WHICH THE OLD CURVE COULD
+ * NOT REACH.** §2.4 lists five sky radiances with the display value each must
+ * land on. Only the brightest row moves under this shoulder — every other row is
+ * below the knee and is bit-identical — and the brightest row is exactly the one
+ * the old curve was missing:
+ *
+ * | §2.4 row | cd/m² | §2.4 target | old chain | with the shoulder |
+ * |---|---|---|---|---|
+ * | Horizon within 20° of the sun | 9 000 | (250, 232, 210) | (240, 234, 223) | (255, 246, 225) |
+ * | Horizon 90° off sun | 3 400 | (196, 188, 184) | (193, 188, 183) | (193, 188, 183) |
+ * | Horizon anti-sun | 3 200 | (172, 182, 198) | (180, 182, 184) | (180, 182, 184) |
+ * | Zenith | 2 200 | (146, 156, 176) | (150, 154, 167) | (150, 154, 167) |
+ *
+ * §2.4 asks the sun-adjacent horizon for a RED CHANNEL OF 250 — i.e. the spec
+ * itself expects the brightest sky in the map to sit five codes off clipping —
+ * and the old curve delivered 240 and could not have delivered more from any
+ * input, because 240 is where scene-linear 1.69 lands and AgX puts nothing on
+ * 255 until 16.3. The green overshoot (246 against 232) is the shoulder doing
+ * its job: once red has clipped, green keeps climbing, which is the
+ * desaturation toward white §5.1 and the rubric's Axis 4 both require of a
+ * filmic highlight. §2.4's chroma there is (1.00, 0.94, 0.87) — already nearly
+ * white — and the three darker rows do not move by a single code.
+ *
+ * Neutral-ramp effect, whole chain, luma (computed on the composed curve, not
+ * measured off a frame, so it is reproducible):
+ *
+ * | scene-linear | 0.02 | 0.18 | 0.36 | 0.72 | 1.00 | 1.44 | 1.70 | 2.00 | 2.90 | 16.3 |
+ * | before       |  9.1 |  110 |  158 |  202 |  218 |  231 |  236 |  240 |  246 | 254.7 |
+ * | after        |  9.1 |  110 |  158 |  202 |  218 |  238 |  250 |  254 |  255 |   255 |
+ *
+ * So display white now sits at scene-linear ≈ 2.3, which is **+1.7 EV over
+ * sunlit diffuse white (0.72) and +3.7 EV over mid grey** — a photographic white
+ * point rather than AgX's archival one. A diffuse surface still cannot clip; the
+ * sun disc, a specular glint, a muzzle flash and the sun-adjacent sky all can.
+ *
+ * Measured on the roster, whole frame, against a corpus median of 0.053 % over
+ * 250 and 0.23 % over 240 (see the paragraph above for the corpus figures):
+ *
+ * | shot | max before → after | >250 before → after | >240 before → after |
+ * |---|---|---|---|
+ * | level_alpha    | 238.6 → 253.1 | 0.000 → 0.136 | 0.000 → 1.11 |
+ * | weapon_ads     | 240.6 → 253.1 | 0.000 → 0.071 | 0.000 → 0.36 |
+ * | level_bravo    | 240.6 → 250.6 | 0.000 → 0.006 | 0.001 → 0.68 |
+ * | post_chain     | 253.0 → 255.0 | 0.023 → 0.725 | 0.283 → 1.17 |
+ * | sky_golden     | 251.4 → 253.9 | 0.030 → 1.015 | 1.334 → 2.05 |
+ * | water_golden   | 254.6 → 255.0 | 1.184 → 4.223 | 3.436 → 6.64 |
+ * | light_cascades | 224.3 → 243.9 | 0.000 → 0.000 | 0.000 → 0.01 |
+ *
+ * The two columns are separate captures hours apart and the LIGHT, SKY, LEVEL
+ * and MATERIAL lanes all landed work in between, so the SCENE behind several of
+ * those frames is not the scene the "before" column saw — `light_cascades` in
+ * particular gained a brighter cloud deck it did not have, which is most of its
+ * 224 → 244. The MAXIMA and the DIRECTION are what this table is evidence for.
+ * Four of the eight now clip; none of the eight could exceed 254.7 before, from
+ * any input whatsoever.
+ *
+ * `water_golden` runs well over the corpus p90 of 1.46 % and that is the honest
+ * cost of a global white point: its subject IS an over-range emitter (the sun
+ * glitter path on open water), and it was already the brightest frame in the
+ * roster at 1.18 % before this existed. If it reads as blown to WATER's critic,
+ * the fix is a lower `GRADE_WHITE_POINT`, and it costs the four frames above
+ * their tail.
+ *
+ * Split tone at the top, measured on the same capture, against §5.4's B−R bands
+ * (216–240 wants −22…−8, above 240 wants −10…0): level_alpha −14 / −12,
+ * level_bravo −16 / −9, weapon_ads −16 / −12, light_cascades −23 / −17. The
+ * above-240 bucket did not exist at all before the shoulder — nothing reached
+ * it — and it is now populated and close to neutral, which is the behaviour
+ * §5.4 asks for and the per-channel first draft got backwards.
+ *
+ * `light_cascades` is the honest failure and it is NOT a curve failure: its
+ * brightest pixel is white plaster in direct sun at scene-linear 1.1, six tenths
+ * of a stop over diffuse white, and there is no sun disc, no water, no metal and
+ * no emitter anywhere in that camera's frustum. No transfer function can invent
+ * range the scene does not have — which is exactly what the obituary above says,
+ * and it is still true. That frame needs a specular source, not a curve.
+ *
+ * `material_chart` runs hot on the >240 figure and that is the deliberate cost of
+ * one global curve: it is 40 % sunlit sand at grazing incidence with the sun just
+ * inside the frame, and it already had 0.68 % of the frame over 240 before this
+ * existed.
+ *
+ * ONE THING THE SHOULDER DELIBERATELY DOES NOT FIX: the lens vignette (`LensFx`,
+ * 8 % at the corner, §6.5) runs AFTER the grade, so a clipped pixel in a corner
+ * comes back at ~236 rather than 255. That is not a bug — §6.5's own measurement
+ * is `[m: bf2042_gp_022]` "a blown sky falls from 247 at x = 0.40 to 236 at
+ * x = 0.995", i.e. the reference corpus vignettes its blown highlights by the
+ * same amount. It does mean the clipped fraction of a frame whose only bright
+ * thing is in a corner (material_chart's sun) stays small.
+ */
+export const GRADE_SHOULDER_KNEE = 0.89;
+export const GRADE_WHITE_POINT = 0.930;
+
+/**
+ * The cubic's coefficients, solved once here rather than written down, so the
+ * two constants above can move without a hand re-derivation going stale.
+ *
+ *   f(u) = A·u + C·u² + E·u³      A = (W−T)/(1−T)
+ *   f(1) = 1                   →  A + C + E = 1
+ *   f'(1) = 0                  →  A + 2C + 3E = 0
+ */
+const SHOULDER_A = (GRADE_WHITE_POINT - GRADE_SHOULDER_KNEE) / (1 - GRADE_SHOULDER_KNEE);
+/** Eliminating C between the two conditions gives E = A − 2 and C = 3 − 2A. */
+const SHOULDER_E = SHOULDER_A - 2;
+const SHOULDER_C = 3 - 2 * SHOULDER_A;
 
 /**
  * §5.3 saturation. Three deliberate deviations from the section's code snippet,
@@ -565,6 +738,54 @@ vec3 ironContrastS(vec3 d) {
   return pow(max(a / (a + b), 1e-5), vec3(${1 / GRADE_S_WARP}));
 }
 
+/** The scalar shoulder: identity below T, exactly 1.0 at W, zero slope there. */
+float ironShoulder(float m) {
+  float u = clamp((m - ${GRADE_SHOULDER_KNEE.toFixed(4)}) * ${(1 / (GRADE_WHITE_POINT - GRADE_SHOULDER_KNEE)).toFixed(6)}, 0.0, 1.0);
+  float f = ((${SHOULDER_E.toFixed(6)} * u + ${SHOULDER_C.toFixed(6)}) * u + ${SHOULDER_A.toFixed(6)}) * u;
+  return clamp(${GRADE_SHOULDER_KNEE.toFixed(4)} + ${(1 - GRADE_SHOULDER_KNEE).toFixed(4)} * f, 0.0, 1.0);
+}
+
+/**
+ * The display white point, driven off the MAX CHANNEL and desaturating toward
+ * white as it climbs.
+ *
+ * The obvious implementation — run the scalar shoulder independently on r, g and
+ * b — was written first and MEASURED WRONG, which is why this one exists. Under
+ * it the channels enter the shoulder at different inputs, so a warm highlight
+ * has its red pinned at 255 while blue is still fifteen codes below the knee and
+ * untouched: measured on level_alpha and level_bravo the >240 bucket came
+ * back at B−R −25 and −15 against §5.4's −10…0, i.e. the frame's brightest
+ * pixels got MORE saturated as they clipped. That is the "highlights that stay
+ * saturated, reads as digital" failure in the rubric's own words, and it is the
+ * opposite of the filmic behaviour the shoulder was added for.
+ *
+ * So the shoulder runs ONCE, on max(r, g, b), and the result is applied two
+ * ways that are blended by how deep into the shoulder the pixel is:
+ *
+ *  - d · (s/m) — a pure gain. Preserves the ratios between channels exactly,
+ *    so hue and saturation are untouched. This is what the pixel gets just above
+ *    the knee, where a real film stock is still recording colour.
+ *  - vec3(s) — the neutral. This is what the pixel gets as its max channel
+ *    approaches display 255, where a real film stock has no colour left.
+ *
+ * The blend weight is k = (m − T)/(1 − T), LINEAR, so it reaches 1 only when
+ * the max channel is at 1.0 — i.e. only genuinely over-range pixels go fully
+ * white, and a pixel sitting exactly on the white point is ~36 % desaturated
+ * rather than 100 %. Worked example, a warm highlight at (0.930, 0.900, 0.860):
+ * per channel it came out (255, 233, 219), B−R −36; this returns (255, 250,
+ * 243), B−R −12, inside §5.4's band for the >240 bucket.
+ *
+ * Output is bounded by construction — every channel is ≤ m, so d·(s/m) ≤ s ≤ 1
+ * — and monotone in every channel because both the gain and the blend are.
+ */
+vec3 ironWhitePoint(vec3 d) {
+  float m = max(d.r, max(d.g, d.b));
+  if (m <= ${GRADE_SHOULDER_KNEE.toFixed(4)}) return d;
+  float s = ironShoulder(m);
+  float k = clamp((m - ${GRADE_SHOULDER_KNEE.toFixed(4)}) * ${(1 / (1 - GRADE_SHOULDER_KNEE)).toFixed(6)}, 0.0, 1.0);
+  return clamp(mix(d * (s / max(m, 1e-4)), vec3(s), k), 0.0, 1.0);
+}
+
 vec3 ironGrade(vec3 displayLinear) {
   vec3 d = ironSrgbEncode(clamp(displayLinear, 0.0, 1.0));
 
@@ -661,7 +882,18 @@ vec3 ironGrade(vec3 displayLinear) {
   // did not warm, and is exactly the pixel the corrector is entitled to touch.
   float splitW = mix(0.25, 1.0, vib);
   float shadowW = 1.0 - smoothstep(0.0, 0.25, L);
-  float highW = smoothstep(0.58, 0.86, L) * (1.0 - 0.55 * smoothstep(0.90, 1.0, L)) * splitW;
+  // The roll-off runs 0.86 → 1.00 and takes the wheel down to 0.15, where it
+  // used to run 0.90 → 1.00 and stop at 0.45. Reason: ironWhitePoint below now
+  // drives the top of the range to a genuine 1.0, and a warm wheel still worth
+  // 0.45 up there means the RED channel clips a full four codes before blue and
+  // the brightest pixel in the frame settles at RGB(255, 255, 251) — luma 254.7,
+  // never 255, and never neutral. Measured on the pre-shoulder roster that was
+  // the ACTUAL ceiling of the whole chain: water_golden, a frame full of sun
+  // glitter, maxed at 254.6 for exactly this reason. §5.4's own target above
+  // display 240 is B−R −10…0, i.e. near-neutral, and the old shape delivered
+  // −15. At 0.15 the same bucket measures −3 while 216–240, where §5.4 wants
+  // −22…−8, is untouched at −16.
+  float highW = smoothstep(0.58, 0.86, L) * (1.0 - 0.85 * smoothstep(0.86, 1.0, L)) * splitW;
   float midW = (1.0 - shadowW) * (1.0 - highW) * splitW;
   // The shadow lift stays UNGATED: it is ±0.014 at most, it carries the ambient
   // dome hue rather than the sun's, and §5.4's shadow row (−4…+6) is the one
@@ -685,6 +917,13 @@ vec3 ironGrade(vec3 displayLinear) {
   // The rest has to come from the aerial-perspective in-scatter carrying the sun
   // chroma, which is not this file's to set.
   d *= 1.0 + vec3(0.038, 0.010, -0.034) * highW;
+
+  // --- §5.1 white point -------------------------------------------------
+  // LAST, and after the split tone on purpose: the wheel above is the thing
+  // that decides which channel runs out of headroom first, and the shoulder is
+  // what turns "runs out of headroom" into a smooth convergence on white rather
+  // than a per-channel clip with a visible hue shift in front of it.
+  d = ironWhitePoint(d);
 
   return ironSrgbDecode(clamp(d, 0.0, 1.0));
 }
