@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ironsight",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["tools/with-node.sh", "npx", "vite", "--port", "5173", "--strictPort"],
+      "port": 5173
+    }
+  ]
+}
