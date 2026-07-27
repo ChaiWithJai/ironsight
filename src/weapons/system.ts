@@ -36,11 +36,13 @@ import {
   type WeaponId,
   type WeaponService,
   type WeaponState,
+  type ThrowableState,
 } from '@/engine/types';
 import { clamp, DEG2RAD, hashInt } from '@/engine/math/curves';
 import { integrateSpring3 } from '@/engine/math/spring';
 import { declareWeaponAssets } from '@/weapons/models/assets';
 import { buildWeaponTable, resolveId } from '@/weapons/defs/index';
+import { installThrowableProbe, installThrowables, resetThrowables, throwablesInstance } from '@/weapons/throwables';
 
 /** Mutable mirror of the read-only contract struct. Only this file writes it. */
 type MutableWeaponState = { -readonly [K in keyof WeaponState]: WeaponState[K] };
@@ -162,6 +164,28 @@ class IronWeapons implements WeaponService, TickSystem {
   }
 
   /**
+   * Reserve resupply. See `WeaponService.resupply` for why this seam exists —
+   * short version: nothing in the repo could put a round back, so a match had a
+   * hard ammunition budget and ended with everyone dry.
+   *
+   * Reserve only, clamped to `def.reserve`, and it does NOT touch `ammo`: the
+   * magazine in the weapon is the player's problem and a crate that also filled
+   * it would be a free instant reload. The caller has the `TickCtx` and owns
+   * announcing it — `src/level/ammo.ts` emits `ammoState` off the return value,
+   * so the HUD counter moves the instant the crate is used.
+   */
+  resupply(entity: EntityId, fraction = 1): number {
+    const slot = this.slots.get(entity);
+    if (!slot) return 0;
+    const def = this.def(slot.state.def);
+    const want = Math.round(def.reserve * clamp(fraction, 0, 1));
+    const added = Math.min(want, def.reserve - slot.state.reserve);
+    if (added <= 0) return 0;
+    slot.state.reserve += added;
+    return added;
+  }
+
+  /**
    * The aim basis AFTER `aimPunch`. Ballistics and the HUD reticle both read
    * this, so the crosshair can never lie about where the barrel is pointing.
    */
@@ -177,6 +201,20 @@ class IronWeapons implements WeaponService, TickSystem {
 
   spreadDegrees(entity: EntityId): number {
     return this.slots.get(entity)?.state.currentSpreadDeg ?? 0;
+  }
+
+  /**
+   * Throwable inventory. Delegated to `weapons/throwables.ts`, which owns the
+   * pouch and the state machine; this is the contract face of it, so the HUD's
+   * throwable row and an ammo crate both talk to `services.weapons` and neither
+   * needs to know a second system exists.
+   */
+  throwableOf(entity: EntityId): Readonly<ThrowableState> | null {
+    return throwablesInstance()?.throwableOf(entity) ?? null;
+  }
+
+  restockThrowables(entity: EntityId): number {
+    return throwablesInstance()?.restock(entity) ?? 0;
   }
 
   /* ------------------------------------------------------------------ tick -- */
@@ -594,6 +632,12 @@ export function createWeaponService(ctx: BootContext): WeaponService {
   const weapons = new IronWeapons(ctx);
   ctx.addTick(weapons);
   instance = weapons;
+  // The throwable pouch and the frag grenade. Registered from here rather than
+  // from a descriptor of its own because `src/bootstrap/subsystems.ts` is frozen
+  // and cannot grow a 24th entry; `installThrowables` does exactly what that
+  // descriptor would have done — one `addTick`, one `addRender`.
+  const throwables = installThrowables(ctx);
+  installThrowableProbe(throwables, () => ctx.services);
   return weapons;
 }
 
@@ -615,6 +659,9 @@ export function registerWeaponsBakes(assets: AssetRegistry, _quality: Readonly<Q
  */
 export function resetWeapons(_seed: number): void {
   instance?.reset();
+  // A grenade still in the air from the previous capture is an order-dependent
+  // screenshot, and a pouch left at zero is an order-dependent HUD readout.
+  resetThrowables();
 }
 
 /**

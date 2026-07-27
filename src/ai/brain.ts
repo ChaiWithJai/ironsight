@@ -39,6 +39,19 @@ const COVER_INDEX = { value: -1 };
 
 /** Minimum time in a behaviour before a rival score may take it. */
 const DWELL = 0.55;
+/** How long one cover slot is held before the bot must choose again. */
+const COVER_TENURE_S = 6.5;
+/**
+ * How long a bot will hold one firing position before he jockeys sideways.
+ *
+ * The `Engage` goal is "close to the weapon's comfortable range, then stop
+ * pushing", which at the comfortable range resolves to the ground he is already
+ * standing on — so a bot who opened at 22 m simply stands there. Measured: one
+ * bot spent 767 unbroken ticks (12.8 s) motionless in `Engage`.
+ */
+const ENGAGE_JOCKEY_S = 2.6;
+/** How far sideways a jockey step goes. Far enough to change the angle. */
+const ENGAGE_JOCKEY_M = 6;
 
 export class Brain {
   constructor(private readonly squads: SquadDirector) {}
@@ -75,9 +88,22 @@ export class Brain {
       }
     };
 
-    const hasContact = memory !== null && memory.confidence >= 0.55;
     const visible = memory !== null && memory.visible;
     const distance = memory?.distance ?? Infinity;
+    /**
+     * A contact worth CHANGING WHAT YOU ARE DOING for.
+     *
+     * Confidence alone is not it. Hearing a rifle raises a memory to 0.85 from
+     * any distance the profile can hear, which on this map is most of the town,
+     * so an unqualified `confidence >= 0.55` put bots into cover-and-suppress
+     * against a man 200 m away behind three buildings — a behaviour that
+     * neither shoots nor advances. The threat has to be inside the range this
+     * soldier could actually do something about.
+     */
+    const hasContact =
+      memory !== null &&
+      memory.confidence >= 0.55 &&
+      (memory.visible || distance < bot.profile.visionRange * 1.15);
 
     consider(BotBehaviour.Idle, 0.05);
 
@@ -108,11 +134,19 @@ export class Brain {
       );
       // Suppress: known position, no clean sight, and the discipline to keep
       // the enemy's head down rather than push into him.
+      //
+      // IT HAS TO BE A POSITION HE HAS ACTUALLY SEEN, AND ONE HE CAN REACH
+      // WITH THE RIFLE. `fireControl` already refuses to pull the trigger on a
+      // heard-only contact — correctly, you cannot suppress a noise — so the
+      // old unguarded form put bots into a behaviour that stops them advancing
+      // and then fires nothing: a single distant gunshot froze a squad 150 m
+      // from anybody. Measured at 12.8% of all bot-ticks spent standing still
+      // suppressing a sound.
+      const canSuppress =
+        !memory.heardOnly && !visible && world.time - memory.lastSeenTime < 4 && distance < bot.profile.visionRange;
       consider(
         BotBehaviour.Suppress,
-        (!visible && world.time - memory.lastSeenTime < 4 ? 1.25 : 0.1) +
-          bot.profile.burstDiscipline * 0.8 -
-          (bot.ammo < 6 ? 1.5 : 0),
+        (canSuppress ? 1.25 : 0.1) + bot.profile.burstDiscipline * 0.8 - (bot.ammo < 6 ? 1.5 : 0),
       );
       // Flank: only when someone else is already holding his attention.
       consider(
@@ -216,6 +250,15 @@ export class Brain {
           // Close to the weapon's comfortable range, then stop pushing.
           const step = Math.max(-8, Math.min(14, dist - ideal));
           TMP_B.copy(self.state.position).addScaledVector(toward, step);
+          // …and never stand perfectly still while doing it. The side alternates
+          // on a per-bot phase off SPAWN-RELATIVE sim time — absolute time would
+          // make two captures of the same shot disagree — so a firing line
+          // shuffles rather than freezing, and two men beside each other do not
+          // shuffle in lockstep.
+          const phase = Math.floor((world.time - bot.spawnTime) / ENGAGE_JOCKEY_S + bot.slot * 0.37);
+          const side = (phase & 1) === 0 ? 1 : -1;
+          TMP_B.x += -toward.z * side * ENGAGE_JOCKEY_M;
+          TMP_B.z += toward.x * side * ENGAGE_JOCKEY_M;
           if (world.nav.sample(TMP_B, 8, TMP_A)) {
             bot.goal.copy(TMP_A);
             kind = 'objective';
@@ -291,8 +334,12 @@ export class Brain {
   private claimCover(bot: Bot, world: AiWorld, threat: THREE.Vector3): CoverSlot | null {
     const self = world.actorOf(bot.entity);
     if (!self) return null;
-    // Keep the slot we already hold unless it stopped facing the threat.
-    if (bot.cover) {
+    // Keep the slot we already hold unless it stopped facing the threat — or
+    // unless we have been in it long enough that holding it has stopped being a
+    // decision. Measured without the tenure bound: one bot held a single slot
+    // for 12.8 s of unbroken stillness, which is the exact silhouette a human
+    // reads as "the AI is broken" however good the peek animation is.
+    if (bot.cover && world.time - bot.coverSince < COVER_TENURE_S) {
       TMP_A.copy(threat).sub(bot.cover.position).setY(0);
       const len = TMP_A.length() || 1;
       const align = (TMP_A.x / len) * bot.cover.facing.x + (TMP_A.z / len) * bot.cover.facing.z;
@@ -306,6 +353,7 @@ export class Brain {
       COVER_INDEX,
     );
     if (slot) {
+      if (slot !== bot.cover) bot.coverSince = world.time;
       bot.cover = slot;
       bot.coverIndex = COVER_INDEX.value;
     }

@@ -2970,6 +2970,43 @@ export interface WeaponService {
    */
   aimBasis(entity: EntityId, outOrigin: Vec3, outDirection: Vec3): void;
   spreadDegrees(entity: EntityId): number;
+  /**
+   * Throwable inventory for `entity`. Null before the entity has been issued a
+   * loadout (i.e. before it is under locomotion control).
+   *
+   * THE HUD'S THROWABLE ROW READS THIS. See `ThrowableState`. OPTIONAL so the
+   * frozen null service in `bootstrap/nulls.ts` — which builds a `WeaponService`
+   * literal and may not be edited — stays valid; call it as
+   * `services.weapons.throwableOf?.(entity) ?? null`.
+   */
+  throwableOf?(entity: EntityId): Readonly<ThrowableState> | null;
+  /**
+   * Refill `entity`'s throwables to capacity. The resupply seam: an ammo crate,
+   * a supply drop or a respawn. Returns the units actually added.
+   *
+   * OPTIONAL for the same frozen-nulls reason as `throwableOf`.
+   */
+  restockThrowables?(entity: EntityId): number;
+  /**
+   * Put rounds back in `entity`'s pouch. Returns the rounds actually added.
+   *
+   * THE RESUPPLY SEAM FOR AMMUNITION, and the reason it has to exist: a soldier
+   * carried `magazine + reserve` rounds and NOTHING in the whole repo could add
+   * one back, so a match had a hard round budget — 210 for the service rifle —
+   * and every player who reached it was dry for the rest of the game. The crates
+   * are LEVEL's (`src/level/ammo.ts`, one at every capture point) and the
+   * ammunition is WEAPONS', so this method is the only place the two meet.
+   *
+   * `fraction` is of the weapon's own `WeaponDef.reserve` and the total is
+   * clamped to it: a crate cannot make a soldier carry more than a soldier
+   * carries, so standing on one is not an infinite magazine. RESERVE ONLY — it
+   * deliberately does not load the magazine, because a free instant reload
+   * mid-firefight is a different mechanic and this one must not quietly be it.
+   *
+   * OPTIONAL for the same frozen-nulls reason as `throwableOf`; call it as
+   * `services.weapons.resupply?.(entity) ?? 0`.
+   */
+  resupply?(entity: EntityId, fraction?: number): number;
 }
 
 export interface ShotRequest {
@@ -3020,6 +3057,52 @@ export interface BallisticsService {
   nearestWhizby(listener: Vec3, out: Vec3): number;
   readonly liveProjectiles: number;
   clear(): void;
+}
+
+/* ------------------------------------------------------- throwables (WEAPONS) */
+
+/**
+ * Throwable gadgets. One member today. A union rather than a bare string so a
+ * second throwable is a compile error at every switch that has to grow, not a
+ * silent fall-through.
+ */
+export type ThrowableId = 'frag';
+
+/**
+ * Live throwable inventory for ONE entity — the seam the HUD's gadget/throwable
+ * row reads, and the reason it exists.
+ *
+ * `src/ui/system.ts` currently hardcodes `{ icon: 'frag', key: 'G', count: 2 }`
+ * with the comment "no lane publishes deployed gadgets on the contract". This is
+ * that publication: `GadgetSlot` needs `count`, `infinite` and `cooldown`, and
+ * every one of them is here in the same units, so the HUD row can be driven
+ * from the simulation with no arithmetic of its own.
+ *
+ *     const frag = services.weapons.throwableOf(services.player.localEntity);
+ *     { icon: 'frag', key: 'G', count: frag?.count ?? 0,
+ *       infinite: false, cooldown: frag?.cooldown ?? 0, selected: false }
+ */
+export interface ThrowableState {
+  readonly id: ThrowableId;
+  /** Units left in hand. 0 ⇒ pressing the button does nothing but click. */
+  readonly count: number;
+  /** Units carried on a fresh spawn. The denominator for a stock bar. */
+  readonly capacity: number;
+  /**
+   * 0 = ready, 1 = fully unavailable — exactly `GadgetSlot.cooldown`'s meaning,
+   * so it drives the tile's 45° hatch directly. 1 while empty, and ramping down
+   * through the post-throw refractory.
+   */
+  readonly cooldown: number;
+  /**
+   * 0..1 of the way through the maximum cook while the button is HELD, 0 when
+   * it is not. A ring around the tile, or a bar; the fuse is already burning.
+   */
+  readonly cook: number;
+  /** True between pin-pull and release. */
+  readonly cooking: boolean;
+  /** Units in flight or on the ground with a live fuse, thrown by this entity. */
+  readonly live: number;
 }
 
 /** Implemented by WEAPONS (`src/weapons/viewmodel/rig.ts`). */

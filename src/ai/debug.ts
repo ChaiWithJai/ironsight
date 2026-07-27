@@ -55,6 +55,10 @@ const DEBUG_FRAGMENT = /* glsl */ `
 
 const TMP = new THREE.Vector3();
 
+/** Corridor legs drawn per bot, and how far along it the overlay follows. */
+const CORRIDOR_DRAW_CORNERS = 5;
+const CORRIDOR_DRAW_M = 45;
+
 export class AiDebugDraw {
   private readonly geometry = new THREE.BufferGeometry();
   private readonly positions = new Float32Array(MAX_VERTICES * 3);
@@ -235,8 +239,19 @@ export class AiDebugDraw {
         let px = state.position.x;
         let py = state.position.y + 0.25;
         let pz = state.position.z;
-        for (let i = bot.corridorIndex; i < path.cornerCount; i++) {
+        // BOUNDED, and the bound is the point of the overlay. Once the
+        // string-pull was fixed a corridor became a real 150 m cross-town route
+        // of twenty-odd corners, and drawing all of it for every bot turned
+        // `ai_firefight` into a wireframe cage laid over the town — legible as
+        // nothing at all. The next few legs are the DECISION; the rest is just
+        // the map. Capped by count and by run so the overlay stays local to the
+        // squad it is explaining.
+        let drawn = 0;
+        let run = 0;
+        for (let i = bot.corridorIndex; i < path.cornerCount && drawn < CORRIDOR_DRAW_CORNERS && run < CORRIDOR_DRAW_M; i++) {
           const c = path.corners[i].position;
+          run += Math.hypot(c.x - px, c.z - pz);
+          drawn++;
           const current = i === bot.corridorIndex;
           this.segment(px, py, pz, c.x, c.y + 0.25, c.z, current ? 0.25 : 0.1, current ? 0.85 : 0.34, current ? 1 : 0.5);
           // A tick at every corner, so the string-pull is legible as a polyline

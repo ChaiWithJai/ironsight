@@ -7,7 +7,7 @@
  * 8 m" is the SMG and the answer to "who wins at 80 m" is anything else.
  */
 import { FireMode, type AssetKey, type MeshAsset, type RecoilPattern, type SpreadDef, type WeaponDef } from '@/engine/types';
-import { adsBlock, ballistics, muzzleBlock, recoverySpring, soundSet, v3, viewFeel } from '@/weapons/defs/shared';
+import { adsBlock, ballistics, carried, muzzleBlock, recoverySpring, soundSet, v3, viewFeel } from '@/weapons/defs/shared';
 
 const MASS_KG = 2.7;
 
@@ -62,7 +62,9 @@ export function smgCompact(mesh: AssetKey<MeshAsset>): WeaponDef {
     rpm: 900,
     burstCount: 3,
     magazine: 32,
-    reserve: 192,
+    // Same seven spares as the rifle. The SMG empties them faster at 900 rpm,
+    // which is the cost of the fire rate rather than a shorter war.
+    reserve: carried(32, 7),
     pelletsPerShot: 1,
     reloadTactical: 1.72,
     reloadEmpty: 2.34,

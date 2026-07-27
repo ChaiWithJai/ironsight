@@ -17,7 +17,7 @@
  */
 import * as THREE from 'three';
 import { CollisionGroup, SurfaceId, type Rng } from '@/engine/types';
-import type { LevelBuild } from '@/level/build';
+import { yawOf, type LevelBuild } from '@/level/build';
 import { railing } from '@/level/kit/detail';
 import { propFoot, rock, seamDebris } from '@/level/kit/ground';
 import type { MatKey } from '@/level/materials';
@@ -88,14 +88,42 @@ export function crate(b: LevelBuild, x: number, y: number, z: number, size: numb
   b.xf.pop();
 }
 
+/**
+ * A stack of crates.
+ *
+ * THE SIZES ONLY EVER GO DOWN, and the offset is bounded by what is underneath.
+ * The previous form drew each crate's size independently from 0.55–0.95 and only
+ * scaled the RANGE by 0.88 per tier, so a 0.55 m crate carrying a 0.84 m one was
+ * an ordinary roll — and the `level_bravo` frame a player photographed has
+ * exactly that: a big case balanced on a small one, overhanging into thin air on
+ * two sides. Same defect class as a floating prop and it reads identically at
+ * distance, because what the eye is judging is the daylight under an edge.
+ *
+ * `s` is therefore clamped to the crate below, and the lateral jitter to the
+ * margin that leaves — so every crate's whole footprint lands on the one under
+ * it, whatever the rolls come out as.
+ */
 export function crateStack(b: LevelBuild, x: number, y: number, z: number, rng: Rng): void {
   worldFoot(b, x, y, z, 0.55, rng);
   const n = 1 + rng.int(3);
   let cy = y;
+  let below = Infinity;
+  let cx = x;
+  let cz = z;
   for (let i = 0; i < n; i++) {
-    const s = rng.range(0.55, 0.95) * (1 - i * 0.12);
-    crate(b, x + rng.range(-0.18, 0.18) * i, cy, z + rng.range(-0.18, 0.18) * i, s, rng);
+    const s = Math.min(rng.range(0.55, 0.95) * (1 - i * 0.12), below * 0.92);
+    // The crate body is rotated freely about Y, so the safe offset is measured
+    // against the inscribed circle of the one below, not its half-width.
+    const slack = Number.isFinite(below) ? Math.max(0, (below - s) * 0.35) : 0;
+    const jx = rng.range(-1, 1);
+    const jz = rng.range(-1, 1);
+    if (i > 0) {
+      cx += jx * slack;
+      cz += jz * slack;
+    }
+    crate(b, cx, cy, cz, s, rng);
     cy += s;
+    below = s;
   }
 }
 
@@ -342,34 +370,64 @@ export function concreteBarrier(b: LevelBuild, x: number, y: number, z: number, 
 }
 
 /** ISO container — the harbour's structural cover unit and its climbing frame. */
+export interface ContainerOpts {
+  /** False for a container stacked on another, or standing on a ship's deck. */
+  readonly foot?: boolean;
+  /**
+   * Author in the CALLER'S frame instead of world space.
+   *
+   * THE BUG THIS EXISTS TO STOP, because it shipped and a player found it. Like
+   * every emitter in this file `container` is authored in absolute world space
+   * (see the `worldFoot` note above), so a caller that hands it LOCAL
+   * coordinates gets its containers at those numbers in world space instead —
+   * `landmarks/freighter.ts` did exactly that and put five 6 m boxes 100 m
+   * inland, hanging 4.7 m over open ground at BRAVO with daylight under them.
+   *
+   * A container is the one prop here that is routinely carried on something
+   * that is neither flat nor level, so it gets the opt-in: with this set the
+   * body, its foot, its collider and its nav deck all go through the frame, and
+   * cargo on a heeled deck lists with the deck instead of hovering off it.
+   */
+  readonly inFrame?: boolean;
+}
+
 export function container(
   b: LevelBuild,
   x: number, y: number, z: number, yaw: number,
   long: boolean,
   mat: MatKey,
   rng: Rng,
-  /** False for a container stacked on another, or standing on a ship's deck. */
-  foot = true,
+  opts: ContainerOpts = {},
 ): void {
   const L = long ? 6.06 : 3.0;
-  if (foot) {
+  // Snapshot: the body pushes its own frame, so the base has to be captured
+  // before anything touches the stack.
+  const base = (opts.inFrame ? b.xf.matrix.clone() : _identity.clone());
+  const toWorld = (lx: number, ly: number, lz: number): THREE.Vector3 =>
+    _cp.set(lx, ly, lz).applyMatrix4(base);
+  if (opts.foot ?? true) {
     // Three drifts along the length rather than one disc — a 6 m box banks sand
     // along its whole windward side, not in a circle around its centre.
     for (const t of [-0.62, 0, 0.62]) {
-      worldFoot(b, x + Math.cos(yaw) * L * t, y, z - Math.sin(yaw) * L * t, 0.85, rng);
+      const p = toWorld(x + Math.cos(yaw) * L * t, y, z - Math.sin(yaw) * L * t);
+      worldFoot(b, p.x, p.y, p.z, 0.85, rng);
     }
   }
   const W = 1.22;
   const H = 1.3;
-  const m = new THREE.Matrix4().makeTranslation(x, y + H, z)
-    .multiply(new THREE.Matrix4().makeRotationY(yaw))
-    .multiply(new THREE.Matrix4().makeRotationZ(rng.range(-0.012, 0.012)));
+  const m = new THREE.Matrix4().multiplyMatrices(
+    base,
+    new THREE.Matrix4().makeTranslation(x, y + H, z)
+      .multiply(new THREE.Matrix4().makeRotationY(yaw))
+      .multiply(new THREE.Matrix4().makeRotationZ(rng.range(-0.012, 0.012))),
+  );
+  const groundY = toWorld(x, y, z).y;
   b.xf.pushAbsolute(m);
   // Per-container UV phase, so nine containers in a stack do not all carry the
   // same rust streak in the same place down their doors.
   b.m(mat).setUvShift(rng.range(0, 30), rng.range(0, 30));
   b.m('rust').setUvShift(rng.range(0, 30), rng.range(0, 30));
-  b.solid(mat, 0, 0, 0, L / 2, H, W, { groundY: y, occluder: long });
+  b.solid(mat, 0, 0, 0, L / 2, H, W, { groundY, occluder: long });
   // Corrugation: vertical ribs on the long sides, which is what makes a
   // container silhouette read at 150 m instead of being a coloured brick.
   const ribs = Math.round(L / 0.32);
@@ -392,7 +450,8 @@ export function container(
   b.m(mat).clearUvShift();
   b.m('rust').clearUvShift();
   b.xf.pop();
-  b.deck(x, y + H * 2, z, L / 2, W, yaw, 0);
+  const top = toWorld(x, y + H * 2, z);
+  b.deck(top.x, top.y, top.z, L / 2, W, yaw + yawOf(base), 0);
 }
 
 /** A burnt-out saloon, shoved onto the kerb. Real cover, and a landmark. */
@@ -844,6 +903,58 @@ export function palletStack(
 }
 
 /**
+ * THE AMMO CRATE — the one prop in this file that is a MECHANIC and not
+ * dressing, so it is built to be found rather than to be looked at.
+ *
+ * `src/level/ammo.ts` puts one at every capture point and refills a soldier's
+ * reserve when they stand on it. That only works if a player can see which box
+ * out of the four hundred on this map is the one that does something, so the
+ * silhouette is deliberately unlike everything around it: a squat steel pallet
+ * base a crate never has, two olive ammunition boxes side by side with lift
+ * handles, a lid band, and a painted stripe running the full length at exactly
+ * crouch height. It stands 0.72 m — low enough to vault, too low to use as
+ * cover, so it never doubles as a piece of the firefight.
+ *
+ * No collider on the boxes themselves, only the base: a player has to be able to
+ * walk INTO it to use it, and a 1.4 m box that shoves you off the trigger radius
+ * is the classic way an interaction prop stops working.
+ */
+export function ammoCrate(b: LevelBuild, x: number, y: number, z: number, yaw: number, rng: Rng): void {
+  worldFoot(b, x, y, z, 0.8, rng);
+  const m = new THREE.Matrix4().makeTranslation(x, y, z).multiply(new THREE.Matrix4().makeRotationY(yaw));
+  b.xf.pushAbsolute(m);
+  const g = b.m('paint');
+  g.setUvShift(rng.range(0, 20), rng.range(0, 20));
+  // Steel pallet base, proud of the boxes so it reads as a platform.
+  b.m('steel').boxAt(0, 0.07, 0, 0.86, 0.07, 0.56, 1, 0x3f);
+  for (const s of [-1, 1]) b.m('steel').boxAt(s * 0.72, 0.03, 0, 0.1, 0.03, 0.52, 1, 0x3f);
+  // Two boxes, one nudged out of square. Bodies first, then the lid bands.
+  for (const [ox, oz, oy, skew] of [[-0.41, 0, 0.14, 0.0], [0.41, 0.05, 0.14, 0.07]] as const) {
+    b.xf.push(new THREE.Matrix4().makeTranslation(ox, oy, oz).multiply(new THREE.Matrix4().makeRotationY(skew)));
+    g.boxAt(0, 0.21, 0, 0.33, 0.21, 0.46, 1, 0x3f);
+    // Lid, sitting 3 cm proud, and its clasp.
+    g.boxAt(0, 0.44, 0, 0.345, 0.03, 0.475, 1, 0x3f);
+    for (const s of [-1, 1]) b.m('steel').boxAt(0, 0.40, s * 0.48, 0.09, 0.05, 0.02, 1, 0x3f);
+    // Lift handles on the ends — the feature that says "carried by two men".
+    for (const s of [-1, 1]) b.m('steel').boxAt(s * 0.34, 0.30, 0, 0.02, 0.02, 0.14, 1, 0x3f);
+    // Stencil band on BOTH long faces: the only long horizontal line on the
+    // object, and it has to be there from whichever side the player approaches.
+    for (const s of [-1, 1]) b.m('rust').boxAt(0, 0.155, s * 0.465, 0.27, 0.045, 0.01, 1, 0x3f);
+    b.xf.pop();
+  }
+  g.clearUvShift();
+  b.xf.pop();
+  // Collider on the base only. Half the height of the prop, so it is a step and
+  // not an obstacle, and tagged Prop so it is never mistaken for cover.
+  b.collider({
+    matrix: new THREE.Matrix4().makeTranslation(x, y + 0.09, z).multiply(new THREE.Matrix4().makeRotationY(yaw)),
+    shape: { kind: 'box', half: new THREE.Vector3(0.86, 0.09, 0.56) },
+    surface: SurfaceId.PaintedMetal,
+    group: CollisionGroup.Prop,
+  });
+}
+
+/**
  * A low boundary wall with a coping and a gap or two. Alleys and courtyards.
  *
  * ROUND 5 — THE FOOT. This is the wall that fills the right two-thirds of
@@ -910,3 +1021,4 @@ export { railing, rock };
 
 const _q = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
 const _identity = new THREE.Matrix4();
+const _cp = new THREE.Vector3();

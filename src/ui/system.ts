@@ -52,6 +52,7 @@ import { HudPass } from './pass';
 import { bakeMinimapPlate, type MinimapPlate } from './minimap-plate';
 import { makeScreenPoint, projectWorld, type GadgetSlot, type HudContext, type RailSlot, type ScreenPoint, type SquadRow } from './context';
 import { COLOUR } from './theme';
+import { installHudProbe, type HudSnapshot } from './probe';
 import type { ClassKind } from './glyphs';
 
 /* ------------------------------------------------------------- scenarios -- */
@@ -118,6 +119,13 @@ class HudImpl implements HudService {
   private readonly screen: ScreenPoint = makeScreenPoint();
   private script: ScriptStep[] = [];
   private scriptCursor = 0;
+  /**
+   * Last frame's camera yaw. The damage-direction arcs are screen-relative and
+   * are raised from an FxBus handler that runs at `RenderStage.Sample`, before
+   * this frame's camera has been read — so they use the frame just drawn, which
+   * is the same one-frame relationship every other world-anchored HUD mark has.
+   */
+  private viewYaw = 0;
 
   constructor(private readonly boot: BootContext) {
     this.state = new HudState(boot.rng);
@@ -168,8 +176,39 @@ class HudImpl implements HudService {
   attach(): void {
     this.state.attach(this.services.fx, {
       localName: () => this.localName(),
+      localEntity: () => this.services.player.localEntity as unknown as number,
+      // The SCREEN's yaw, not the body's: §10.6's sectors are screen-relative
+      // and the camera is what the viewer is looking through.
+      viewYaw: () => this.viewYaw,
       damageOf: (e) => this.estimateDamage(e),
     });
+    installHudProbe({
+      counters: this.state.counters,
+      services: () => this.services,
+      snapshot: () => this.snapshot(),
+    });
+  }
+
+  /**
+   * Plain-data view of everything transient the HUD is showing, for the
+   * behavioural probe. Reads only; builds nothing the frame needs.
+   */
+  private snapshot(): HudSnapshot {
+    return {
+      root: this.state.root,
+      time: this.state.time,
+      hitmarker: this.state.hitmarker ? this.state.hitmarker.kind : null,
+      killfeed: this.state.killfeed.map((row) => ({
+        killer: row.entry.killer,
+        victim: row.entry.victim,
+        headshot: row.entry.headshot,
+        local: row.local,
+      })),
+      clusters: this.state.clusters.map((c) => ({ victim: c.victim, tags: [...c.tags], points: c.points })),
+      activeDamageSectors: this.state.damageSectors.filter((s) => s.active).length,
+      damageChips: this.state.damageChips.length,
+      localName: this.localName(),
+    };
   }
 
   /**
@@ -361,7 +400,11 @@ class HudImpl implements HudService {
     // disagreed with the frame would be worse than no compass at all.
     TMP_EULER.setFromQuaternion(ctx.camera.rotation as THREE.Quaternion, 'YXZ');
     const viewYaw = TMP_EULER.y;
+    this.viewYaw = viewYaw;
     const eye = ctx.camera.position as THREE.Vector3;
+    // Points on a kill cluster come from GAME's own score, one tick behind the
+    // killfeed event that raised it.
+    this.state.syncScore(match.localScore.score);
 
     const self = this;
     const hud: HudContext = {

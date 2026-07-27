@@ -37,8 +37,9 @@ canvas to lock the pointer**. `Esc` releases it.
 | **Prone** | `Z` |
 | **Reload** | `R` |
 | **Lean left / right** | `Q` / `E` |
-| **Use / interact** | `F` |
-| **Swap weapon** | `X`, or `1`–`9` |
+| **Throw grenade** | `G` (hold to cook, release to throw) |
+| **Use / interact** | `F` — resupply at an ammo crate on any capture point |
+| **Swap weapon** | `X`, or `1`–`9` — **currently does nothing**; the loadout stays on the rifle |
 | **Fire mode** | `B` |
 | **Spot** | `T` |
 | **Scoreboard** | `Tab` (hold) |
@@ -53,23 +54,44 @@ Pressing them does nothing:
 
 | | |
 |---|---|
-| **Grenade** `G` | No explosive exists in the loadout. All four weapons are ballistic. |
 | **Melee** `V` | Not wired to the damage model. |
 
 ### What is NOT yet a playable mechanic
 
 Some systems are fully built and visible in the captured shots, but **cannot currently be triggered
-by a player**. Being explicit so the screenshots do not oversell the game:
+by a player**. Being explicit so the screenshots do not oversell the game.
+
+The table below was re-measured by driving the shipped build in a browser with real keyboard and
+mouse events and reading the counters back — not by reading the code. See "How the table was
+checked" underneath.
 
 | System | Built? | Reachable in play? |
 |---|---|---|
 | Bullet impacts, decals, surface-correct debris | yes | **yes** |
-| Destructible cover (Voronoi fracture, debris, dust) | yes | **no** — `applyDamage()` is only called from a test scenario; shooting a wall does nothing |
-| Explosions (fireball, pressure ring, debris, smoke column) | yes | **no** — only fired from a VFX demo scene |
-| Bot combat | yes | **partly** — bots spawn and are wired, but currently wedge on collision and never acquire a target |
+| Destructible cover (collider removed, cover lost, dust) | yes | **yes** — shooting cover damages it and eventually collapses it; a frag breaches it outright |
+| Explosions (fireball, pressure ring, debris, smoke column) | yes | **yes** — `G` throws a frag that arcs, bounces, detonates and lights the world |
+| HUD combat feedback (hitmarkers, killfeed, damage chips, kill banner) | yes | **yes** — driven by real `damage.applied` / `killfeed` events, not by the demo timeline |
+| Ammo resupply | yes | **yes** — a crate on each capture point; `F` or a short dwell |
+| Bot combat | yes | **yes** — bots path, engage and kill each other; 2–6 kills per 60 s 9v9 soak |
+| Melee | no | **no** — `V` reaches the input layer and nothing consumes it |
 
-Connecting the first two is queued work: the systems exist and are tested, what is missing is the
-wiring from a bullet or a grenade to `DestructionService.applyDamage()`.
+Two rough edges that are real but cosmetic, both outside the wiring:
+
+- A collapsed piece of LEVEL cover spawns **no debris chunks** (`chunksSpawned: 0`) — `shardsOf()`
+  only understands the shards `fractureBox` produces, and `src/level/colliders.ts` emits meshes
+  without them. The collider goes, the dust fires, the rubble does not.
+- The **intact mesh of a breached LEVEL wall stays standing**. `StaticColliderDef.destructible`
+  names a def but not the batch instance, so `SceneGraph.hideBatchInstance` is never called. The
+  sightline opens and the collider is gone; the geometry is still drawn.
+
+#### How the table was checked
+
+`DestructionService.reset()` clears its registration table (`byEntity.clear()`) and only
+`PhysicsService.addStatic` ever repopulates it, at world build. That reset runs at the top of every
+`tools/shoot.sh` capture **and** every `tools/soak.sh` run — so **inside both of this repo's
+automated instruments every wall in the map is an inert static collider**, and neither can see
+destruction at all. Live play never resets, so a human is unaffected. Any future claim about
+destruction has to be measured in a live page, or after PHYS re-registers on reset.
 
 ### The map — HARBOUR REACH
 

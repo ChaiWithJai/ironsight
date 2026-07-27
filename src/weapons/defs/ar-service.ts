@@ -6,7 +6,7 @@
  * walks right, and a 195 ms ADS.
  */
 import { FireMode, type AssetKey, type MeshAsset, type RecoilPattern, type SpreadDef, type WeaponDef } from '@/engine/types';
-import { adsBlock, ballistics, muzzleBlock, recoverySpring, soundSet, v3, viewFeel } from '@/weapons/defs/shared';
+import { adsBlock, ballistics, carried, muzzleBlock, recoverySpring, soundSet, v3, viewFeel } from '@/weapons/defs/shared';
 
 const MASS_KG = 3.4;
 
@@ -76,7 +76,9 @@ export function arService(mesh: AssetKey<MeshAsset>): WeaponDef {
     rpm: 720,
     burstCount: 3,
     magazine: 30,
-    reserve: 180,
+    // Seven spare magazines — the rifleman's basic load, and the reference the
+    // other three weapons are balanced against. See `carried` in `shared.ts`.
+    reserve: carried(30, 7),
     pelletsPerShot: 1,
     // Tactical keeps the round in the chamber; empty costs the bolt release.
     // The 0.8 s difference is the whole reason a player counts their shots.

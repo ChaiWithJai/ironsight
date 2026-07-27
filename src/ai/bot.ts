@@ -79,9 +79,38 @@ export class Bot {
   goalStale = 0;
   repathAt = 0;
 
+  /**
+   * Wedge detection.
+   *
+   * A bot writing a full-magnitude wish that the character controller cannot
+   * turn into displacement is INVISIBLE to everything else in this lane: the
+   * corridor is valid, the goal is valid, perception is fine, and the man
+   * simply stands in a doorway leaning on a wall. Measured on HARBOUR REACH
+   * before this existed: two bots held one spot for 3 558 and 2 999 ticks of a
+   * 3 600-tick run — 59 s of a 60 s match — with `moveX/moveZ` at magnitude 1
+   * the whole time. Nothing re-planned, because from the planner's point of
+   * view nothing had gone wrong.
+   *
+   * `stuckAnchor` is the last position at which real progress was made and
+   * `stuckSince` is when it was made. `intent.ts` compares against them every
+   * tick that the bot actually wants to move.
+   */
+  readonly stuckAnchor = new THREE.Vector3();
+  stuckSince = 0;
+  /** Which rung of the escape ladder the current wedge is on. */
+  stuckAttempt = 0;
+  /** Sim time until which the escape heading overrides the goal heading. */
+  unstickUntil = 0;
+
   /** Cover. */
   cover: CoverSlot | null = null;
   coverIndex = -1;
+  /**
+   * When the current slot was claimed. A soldier who picks one wall and stands
+   * behind it for the rest of the round is a statue with a peek animation; the
+   * brain re-claims past `COVER_TENURE_S` so he works a second angle.
+   */
+  coverSince = 0;
   /** 0 = fully behind cover, 1 = fully exposed. Drives the peek rhythm. */
   exposure = 0;
   peekUntil = 0;
@@ -210,10 +239,14 @@ export class Bot {
     this.behaviour = BotBehaviour.Idle;
     this.cover = null;
     this.coverIndex = -1;
+    this.coverSince = 0;
     this.exposure = 0;
     this.corridorIndex = 0;
     this.corridorGeneration = -1;
     this.pathGeneration = -1;
+    this.stuckSince = 0;
+    this.stuckAttempt = 0;
+    this.unstickUntil = 0;
     this.path.status = 'failed';
     this.path.cornerCount = 0;
     this.trigger = false;

@@ -7,7 +7,7 @@
  * hopeless and the twentieth from prone is not.
  */
 import { FireMode, type AssetKey, type MeshAsset, type RecoilPattern, type SpreadDef, type WeaponDef } from '@/engine/types';
-import { adsBlock, ballistics, muzzleBlock, recoverySpring, soundSet, v3, viewFeel } from '@/weapons/defs/shared';
+import { adsBlock, ballistics, carried, muzzleBlock, recoverySpring, soundSet, v3, viewFeel } from '@/weapons/defs/shared';
 
 const MASS_KG = 7.8;
 
@@ -74,7 +74,10 @@ export function lmgSupport(mesh: AssetKey<MeshAsset>): WeaponDef {
     rpm: 650,
     burstCount: 3,
     magazine: 100,
-    reserve: 200,
+    // FOUR BELTS, not seven. The class trade is the opposite of the rifle's:
+    // half the reloads, twice the rounds, and each reload costs 5.2-6.6 s. 500
+    // rounds is a genuine suppression budget and the reason to carry it.
+    reserve: carried(100, 4),
     pelletsPerShot: 1,
     // A belt is not a magazine: there is no tactical reload worth the name, so
     // the two timings are close together and both are punishing.

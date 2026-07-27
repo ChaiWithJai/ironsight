@@ -134,9 +134,24 @@ class Heap {
   }
 }
 
-/** 2D cross product in the XZ plane, Z standing in for Y. */
+/**
+ * 2D cross product in the XZ plane, Z standing in for Y.
+ *
+ * THE SIGN IS PART OF THE CONTRACT, and it cost this project every bot's
+ * corridor. The funnel below is Mononen's, comparison for comparison, and his
+ * `dtTriArea2D` is `(c−a) × (b−a)` — NOT the `(b−a) × (c−a)` that reads more
+ * naturally and that this function used to return. The two differ only by sign,
+ * every one of the four inequalities in `funnel` therefore evaluated backwards,
+ * and the failure is silent: the funnel never tightens on a straight run and
+ * crosses on every portal through a turn, so the "string-pull" emitted one
+ * corner per polygon boundary. Measured on HARBOUR REACH before this line was
+ * corrected: a 116 m route came back as 32 corners zig-zagging 2 m apart whose
+ * LAST corner was still 113 m from the goal — i.e. every bot in the game got a
+ * three-metre corridor, walked it, re-pathed, and orbited its own spawn for the
+ * whole match.
+ */
 function triarea2(ax: number, az: number, bx: number, bz: number, cx: number, cz: number): number {
-  return (bx - ax) * (cz - az) - (cx - ax) * (bz - az);
+  return (cx - ax) * (bz - az) - (bx - ax) * (cz - az);
 }
 
 /**
@@ -375,8 +390,10 @@ function funnel(
     const p1x = g.adjPortal[o + 3];
     const p1y = g.adjPortal[o + 4];
     const p1z = g.adjPortal[o + 5];
-    // Which endpoint is "left" in the XZ convention triarea2 uses.
-    const leftIsZero = triarea2(ax, az, bx, bz, p0x, p0z) > 0;
+    // Which endpoint is "left" in the XZ convention triarea2 uses. With
+    // Mononen's sign, a point on the LEFT of a→b gives a NEGATIVE area; this
+    // test and the four in the sweep below must agree or the funnel inverts.
+    const leftIsZero = triarea2(ax, az, bx, bz, p0x, p0z) < 0;
     lx[np] = leftIsZero ? p0x : p1x;
     ly[np] = leftIsZero ? p0y : p1y;
     lz[np] = leftIsZero ? p0z : p1z;

@@ -321,11 +321,47 @@ export function buildFreighter(b: LevelBuild, rng: Rng): void {
       }
     }
   }
-  // Deck cargo: a few containers still lashed down, and two gone over the side.
-  for (let i = 0; i < 5; i++) {
-    const px = -halfL * 0.62 + i * 8.5;
-    const pz = (i % 2 === 0 ? 1 : -1) * halfB * 0.42;
-    container(b, px, deckY + 1.3, pz, Math.PI / 2 + rng.range(-0.04, 0.04), true, rng.pick(['rust', 'paint', 'steel'] as MatKey[]), rng, false);
+  /**
+   * DECK CARGO — AND THE BUG A PLAYER FOUND IN IT.
+   *
+   * This loop used to read
+   *
+   *     container(b, px, deckY + 1.3, pz, …, rng, false)
+   *
+   * with `px`/`pz` in the SHIP's frame. `dressing.container` is authored in
+   * absolute world space and discards the caller's frame (it says so at the top
+   * of that file), so those five 6 m boxes were not on the ship at all: they
+   * were emitted at the ship's local numbers as world coordinates, which put
+   * them 100 m inland at (−26…0, 4.7, ±2.8) — hanging in clear air over the open
+   * ground at BRAVO with daylight under them. That is the "floating shipping
+   * containers in the container yard" a player photographed; the yard itself was
+   * never wrong. `inFrame` is the fix, and it also means the cargo lists with
+   * the 0.24 rad heel instead of sitting level on a canted deck.
+   *
+   * Positions are now derived from the hatches rather than from a bare stride:
+   * the two INTACT hatches (h = 0 and h = 2 — h = 1 has its covers off and its
+   * hold flooded, which is the whole point of the wreck) each carry one 40 ft
+   * box fore-and-aft plus a 20 ft one outboard of it, and one is double-stacked.
+   * `coverTop` is the pontoon lid's upper face: the coaming stands `deckY +
+   * 1.24` and the folding covers on it are 22 cm thick centred at `deckY + 1.28`.
+   */
+  {
+    const coverTop = deckY + 1.39;
+    const hatch0 = -halfL * 0.55;
+    const cargo: readonly [number, number, number, boolean][] = [
+      [hatch0, -2.30, coverTop, true],
+      [hatch0 + 2.6, 2.40, coverTop, false],
+      [hatch0, -2.30, coverTop + 2.6, true],
+      [hatch0 + 27, -2.30, coverTop, true],
+      [hatch0 + 27 + 2.6, 2.40, coverTop, false],
+    ];
+    for (const [px, pz, py, long] of cargo) {
+      container(
+        b, px, py, pz, rng.range(-0.035, 0.035), long,
+        rng.pick(['rust', 'paint', 'steel'] as MatKey[]), rng,
+        { foot: false, inFrame: true },
+      );
+    }
   }
 
   // ---- deckhouse, funnel and masts -------------------------------------

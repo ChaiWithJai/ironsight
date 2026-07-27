@@ -362,16 +362,22 @@ export function drawKillCluster(ctx: HudContext): void {
       tagX += tw + 0.37 * u;
     }
 
-    skull(batch, tagX + 1.0 * u, bannerY - 0.2 * u, 1.6 * u, COLOUR.white, s3.a, COLOUR.black, 0.6);
-    pen.draw(batch, String(c.points), tagX + 2.2 * u, bannerY + TYPE.t3.cap * u * 0.4, {
-      cap: TYPE.t3.cap * u,
-      weight: TYPE.t3.weight,
-      tracking: TYPE.t3.tracking,
-      colour: COLOUR.white,
-      alpha: s3.a,
-      align: 'left',
-      treatment: 'shadow',
-    });
+    // The skull carries a VALUE, so it is drawn only once there is one. A live
+    // kill raises the cluster the instant the killfeed event lands and GAME
+    // publishes the score a tick later; drawing early put a literal "0" beside
+    // the skull for two frames of every kill.
+    if (c.points > 0) {
+      skull(batch, tagX + 1.0 * u, bannerY - 0.2 * u, 1.6 * u, COLOUR.white, s3.a, COLOUR.black, 0.6);
+      pen.draw(batch, String(c.points), tagX + 2.2 * u, bannerY + TYPE.t3.cap * u * 0.4, {
+        cap: TYPE.t3.cap * u,
+        weight: TYPE.t3.weight,
+        tracking: TYPE.t3.tracking,
+        colour: COLOUR.white,
+        alpha: s3.a,
+        align: 'left',
+        treatment: 'shadow',
+      });
+    }
 
     const s1 = stage(0.08);
     pen.draw(batch, c.victim, left, bottom - 0.6 * u + s1.rise, {

@@ -7,7 +7,7 @@
  * flight time is a third of a second, so leading a moving target is real.
  */
 import { FireMode, type AssetKey, type MeshAsset, type RecoilPattern, type SpreadDef, type WeaponDef } from '@/engine/types';
-import { adsBlock, ballistics, muzzleBlock, recoverySpring, soundSet, v3, viewFeel } from '@/weapons/defs/shared';
+import { adsBlock, ballistics, carried, muzzleBlock, recoverySpring, soundSet, v3, viewFeel } from '@/weapons/defs/shared';
 
 const MASS_KG = 4.6;
 
@@ -58,7 +58,9 @@ export function dmrMarksman(mesh: AssetKey<MeshAsset>): WeaponDef {
     rpm: 380,
     burstCount: 1,
     magazine: 20,
-    reserve: 100,
+    // Seven spares again: a marksman fires far fewer rounds per kill, so the
+    // same magazine count is a much longer fight. 160 rounds total.
+    reserve: carried(20, 7),
     pelletsPerShot: 1,
     reloadTactical: 2.45,
     reloadEmpty: 3.30,

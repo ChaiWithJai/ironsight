@@ -27,6 +27,7 @@ import {
   type WeaponId,
 } from '@/engine/types';
 import { clamp01, EASE } from './theme';
+import { createHudCounters, type HudCounters } from './probe';
 
 export type NoticeKind = 'capture' | 'lost' | 'objective' | 'system';
 export type HitmarkerKind = 'body' | 'head' | 'armour' | 'kill';
@@ -206,6 +207,25 @@ export class HudState {
   private pendingImpact: THREE.Vector3 | null = null;
   private pendingImpactDamage = 0;
   private pendingImpactKey = 0;
+  /**
+   * Who fired the round behind the most recent `impact` in this drain, or null
+   * when no ballistic impact has been seen since the last `advance()`. Tri-state
+   * on purpose — see the hitmarker gate in `attach()`.
+   */
+  private lastImpactShooter: number | null = null;
+
+  /**
+   * The kill cluster raised for the local player's most recent kill, still
+   * waiting for `MatchState.localScore` to catch up with the points it earned.
+   * GAME scores a kill on the sim bus at `TickPhase.Cleanup` and republishes
+   * `localScore` at the TOP of the next `TickPhase.Mode`, so the score is always
+   * at least one tick behind the killfeed event that announced the kill.
+   */
+  private unscoredCluster: KillCluster | null = null;
+  private lastScore = -1;
+
+  /** Behavioural counters. See `probe.ts` — nothing in the HUD reads these. */
+  readonly counters: HudCounters = createHudCounters();
 
   private detach: (() => void)[] = [];
   private rng: Rng;
@@ -220,16 +240,43 @@ export class HudState {
    * Subscribe to the presentation bus. GAME emits `killfeed`, `hitmarker`,
    * `damageTaken` and `banner`; WEAPONS emits `hitmarker` and `impact`. Nothing
    * had to be added to the contract for the HUD to come alive.
+   *
+   * THIS IS THE ONLY WAY REAL GAMEPLAY REACHES THE HUD, and it is deliberately
+   * one-way: presentation subscribes to the `FxBus` and never to the `SimBus`
+   * (§4 of the contract), so nothing drawn here can perturb the simulation and
+   * a capture stays reproducible.
    */
-  attach(fx: FxBus, hooks: { localName: () => string; damageOf: (impact: ImpactEvent) => number }): void {
+  attach(
+    fx: FxBus,
+    hooks: {
+      localName: () => string;
+      localEntity: () => number;
+      viewYaw: () => number;
+      damageOf: (impact: ImpactEvent) => number;
+    },
+  ): void {
     this.release();
     this.detach.push(
       fx.on('impact', (e) => {
+        this.counters.impacts++;
         // §6.23 anchors the marker on the victim, but `FxEventMap.hitmarker`
         // carries no position. `impact` is emitted immediately before it, in the
         // same drain, and does — so the pair is correlated here rather than
         // widening a frozen event map.
-        if ((e.target as unknown as number) === 0) return;
+        //
+        // It also carries the SHOOTER, which is the other half of the pairing:
+        // WEAPONS emits a `hitmarker` for every soldier hit by anybody, so
+        // without this the reticle marks every round two bots trade across the
+        // map. Correlating instead of filtering upstream keeps the fix inside
+        // the lane that owns the symptom.
+        const shooter = e.shooter as unknown as number;
+        this.lastImpactShooter = shooter;
+        if (shooter !== hooks.localEntity() || (e.target as unknown as number) === 0) {
+          this.pendingImpact = null;
+          this.pendingImpactDamage = 0;
+          return;
+        }
+        this.counters.impactsByLocal++;
         this.pendingImpact = (e.point as THREE.Vector3).clone();
         this.pendingImpactKey = e.target as unknown as number;
         this.pendingImpactDamage = hooks.damageOf(e);
@@ -237,26 +284,90 @@ export class HudState {
     );
     this.detach.push(
       fx.on('hitmarker', (e) => {
+        // `lethal` is only ever set by GAME, which already established that the
+        // attacker was the local player, so a lethal mark is trusted outright.
+        // A non-lethal one is suppressed ONLY on positive evidence that the
+        // round belonged to somebody else — a null `lastImpactShooter` means no
+        // ballistic impact preceded it (an explosion, a melee, a fall) and is
+        // let through rather than silently swallowed.
+        if (!e.lethal && this.lastImpactShooter !== null && this.lastImpactShooter !== hooks.localEntity()) {
+          this.counters.hitmarkersSuppressed++;
+          return;
+        }
         const kind: HitmarkerKind = e.lethal ? 'kill' : e.headshot ? 'head' : e.armour ? 'armour' : 'body';
-        this.showHitmarker(kind, this.pendingImpact);
+        this.showHitmarker(kind, this.pendingImpact, 'event');
         if (this.pendingImpact && this.pendingImpactDamage > 0) {
           this.addDamage(this.pendingImpactKey, this.pendingImpact, this.pendingImpactDamage);
+          this.counters.damageChips++;
+          // ONE chip per impact. A single round on a soldier raises TWO
+          // hitmarkers — WEAPONS emits one the moment the round lands, GAME
+          // emits another when it resolves the damage — and the mark is
+          // idempotent but the chip is not: consecutive hits inside 0.6 s
+          // ACCUMULATE (§6.24), so leaving the estimate armed made every damage
+          // number in the game read exactly double.
+          this.pendingImpactDamage = 0;
         }
       }),
     );
     this.detach.push(
       fx.on('damageTaken', (e) => {
-        this.addDamageDirection(e.direction, e.amount);
+        // TWO conversions, and the arc points at nothing without both.
+        // `DamageInfo.direction` runs ATTACKER → TARGET, and §10.6's sector 0 is
+        // straight ahead, so the indicator wants the vector back TOWARDS the
+        // attacker; and the sectors are screen-relative, so it wants the view
+        // yaw as well. Without them a shot from the front lit the rear arc.
+        TOWARDS_THREAT.copy(e.direction as THREE.Vector3).negate();
+        this.addDamageDirection(TOWARDS_THREAT, e.amount, hooks.viewYaw());
         this.addBlood(e.amount);
+        this.counters.damageDirections++;
       }),
     );
-    this.detach.push(fx.on('killfeed', (e) => this.pushKillFeed(e, hooks.localName())));
+    this.detach.push(
+      fx.on('killfeed', (e) => {
+        const localName = hooks.localName();
+        this.pushKillFeed(e, localName, 'event');
+        if (e.victim === localName) this.counters.killfeedLocalDeaths++;
+        if (e.killer !== localName || e.victim === localName) return;
+        // Killing your own side still earns a killfeed row — it happened, and
+        // hiding it is how a player never learns they are shooting through a
+        // squadmate — but never a congratulatory cluster.
+        if (e.killerTeam === e.victimTeam) return;
+        // §6.25. The killfeed row says a kill happened; the cluster is the part
+        // that says YOU made it. Points are patched in by `syncScore` once GAME
+        // publishes the score it earned.
+        this.counters.killfeedLocalKills++;
+        this.counters.killClusters++;
+        this.pushCluster(e.victim, e.victimTeam, e.headshot ? ['HEADSHOT'] : [], 0);
+        this.unscoredCluster = this.clusters[this.clusters.length - 1] ?? null;
+      }),
+    );
     this.detach.push(
       fx.on('banner', (e) => {
         this.pushNotice(e.text, e.tone === 'friendly' ? 'capture' : e.tone === 'hostile' ? 'lost' : 'system');
         if (e.sub.length > 0) this.pushNotice(e.sub, 'objective', 2.0);
+        this.counters.notices++;
       }),
     );
+  }
+
+  /**
+   * Fill in the pending kill cluster's points from the local player's score,
+   * once GAME has published it. Called once per frame from the HUD build.
+   * `PlayerScore.score` is the only score number on the contract, so the award
+   * value is a real delta rather than a HUD-invented constant.
+   */
+  syncScore(score: number): void {
+    if (this.lastScore < 0) {
+      this.lastScore = score;
+      return;
+    }
+    if (score <= this.lastScore) return;
+    const delta = score - this.lastScore;
+    this.lastScore = score;
+    if (this.unscoredCluster && this.clusters.includes(this.unscoredCluster)) {
+      this.unscoredCluster.points = delta;
+      this.unscoredCluster = null;
+    }
   }
 
   release(): void {
@@ -277,7 +388,21 @@ export class HudState {
 
   /* ------------------------------------------------------------ mutators -- */
 
-  showHitmarker(kind: HitmarkerKind, world: Vec3 | null): void {
+  /**
+   * `source` exists only so the behavioural counters can tell a HUD that
+   * REACTED from a HUD that was POSED — the exact distinction a screenshot
+   * cannot make, and the one that let a scripted killfeed pass twelve rounds of
+   * visual review. It changes nothing about what is drawn.
+   */
+  showHitmarker(kind: HitmarkerKind, world: Vec3 | null, source: 'event' | 'scripted' = 'scripted'): void {
+    if (source === 'event') {
+      if (kind === 'kill') this.counters.hitmarkerKill++;
+      else if (kind === 'head') this.counters.hitmarkerHead++;
+      else if (kind === 'armour') this.counters.hitmarkerArmour++;
+      else this.counters.hitmarkerBody++;
+    } else {
+      this.counters.scriptedHitmarkers++;
+    }
     const rank: Record<HitmarkerKind, number> = { body: 0, armour: 1, head: 2, kill: 3 };
     // §10.5 precedence: two arriving in the same frame keep the louder one.
     if (this.hitmarker && this.hitmarker.born === this.time && rank[this.hitmarker.kind] > rank[kind]) return;
@@ -313,10 +438,18 @@ export class HudState {
     });
   }
 
-  /** §10.6: eight fixed 45° sectors, each with one accumulator. */
+  /**
+   * §10.6: eight fixed 45° sectors, each with one accumulator. `direction`
+   * points FROM the player TOWARDS the threat, in world space.
+   *
+   * The yaw term ADDS. `forwardFromYaw` is `(-sin y, 0, -cos y)`, so a threat
+   * dead ahead gives `atan2(d.x, -d.z) = -y`, and only `+ y` cancels it to
+   * sector 0. Subtracting doubled the yaw instead, which reads as correct while
+   * standing at yaw 0 — the pose every HUD screenshot in this repo is taken in.
+   */
   addDamageDirection(direction: Vec3, amount: number, cameraYaw = 0): void {
     const d = direction as THREE.Vector3;
-    const bearing = Math.atan2(d.x, -d.z) - cameraYaw;
+    const bearing = Math.atan2(d.x, -d.z) + cameraYaw;
     const idx = ((Math.floor((bearing + Math.PI / 8) / (Math.PI / 4)) % 8) + 8) % 8;
     const sector = this.damageSectors[idx];
     const alpha = 0.45 + 0.5 * clamp01(amount / 40);
@@ -344,7 +477,9 @@ export class HudState {
     while (this.blood.length > 26) this.blood.shift();
   }
 
-  pushKillFeed(entry: KillFeedEntry, localName: string): void {
+  pushKillFeed(entry: KillFeedEntry, localName: string, source: 'event' | 'scripted' = 'scripted'): void {
+    if (source === 'event') this.counters.killfeedRows++;
+    else this.counters.scriptedKillfeedRows++;
     // A row involving the local player is recoloured white and holds 2 s longer
     // (§6.6). The name comes from `GameMode.nameOf(localEntity)` rather than
     // from a hardcoded literal.
@@ -471,6 +606,7 @@ export class HudState {
 
     this.pendingImpact = null;
     this.pendingImpactDamage = 0;
+    this.lastImpactShooter = null;
   }
 
   /* -------------------------------------------------------------- reads -- */
@@ -596,8 +732,17 @@ export class HudState {
     this.root = 'default';
     this.pendingImpact = null;
     this.pendingImpactDamage = 0;
+    this.lastImpactShooter = null;
+    this.unscoredCluster = null;
+    this.lastScore = -1;
+    // Counters are deliberately NOT cleared here. `resetHud` runs at the top of
+    // every capture, and a soak that reset its own instrument on every shot
+    // would measure nothing. `__HUD__.reset()` is the explicit way to zero them.
   }
 }
+
+/** Scratch for the attacker-relative bearing. Module scope: no per-hit garbage. */
+const TOWARDS_THREAT = new THREE.Vector3();
 
 /** Weapon-class → pictogram class, for the killfeed glyph and the weapon card. */
 export function weaponClassOf(id: WeaponId): 'ar' | 'carbine' | 'smg' | 'dmr' | 'lmg' | 'shotgun' | 'pistol' {

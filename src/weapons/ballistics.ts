@@ -44,7 +44,9 @@ import {
 } from '@/engine/types';
 import { DamageKind, HitZone } from '@/engine/types';
 import { bulletDamage, muzzleEnergyJ } from '@/weapons/damage';
-import { makeHit, resolvePenetration } from '@/weapons/penetration';
+import { makeHit, resolvePenetration, type PenetrationOutcome } from '@/weapons/penetration';
+import { structuralDamage } from '@/weapons/structure';
+import { armWeaponsProving, tickWeaponsProving } from '@/weapons/proving';
 
 /** Hard ceiling on rounds in flight. 384 covers 24 shooters at full rate. */
 const POOL = 384;
@@ -106,7 +108,8 @@ class IronBallistics implements BallisticsService, TickSystem {
     solid: true,
   };
 
-  constructor(private readonly ctx: BootContext) {}
+  /** Not `private`: the lane's reset hook reaches `services` through it. */
+  constructor(readonly ctx: BootContext) {}
 
   private get services(): Services {
     return this.ctx.services;
@@ -306,31 +309,40 @@ class IronBallistics implements BallisticsService, TickSystem {
       kind: 'impact',
     });
 
-    // Anything with a hit zone is a soldier; anything else is the world, and
-    // GAME resolves what damage means either way.
+    // Everything above this line is the impact path that already worked: the
+    // decal and the surface-keyed particle burst both hang off `fx.impact`, and
+    // nothing below may pre-empt them. Cover damage is strictly ADDITIVE to it.
     if (hit.entity !== (0 as EntityId)) {
-      const amount = bulletDamage(full, distance, hit.zone, energyFraction);
-      if (amount > 0) {
-        const info: DamageInfo = {
-          target: hit.entity,
-          attacker: shooterId,
-          amount,
-          kind: DamageKind.Bullet,
-          zone: hit.zone,
-          point: hit.point.clone(),
-          normal: hit.normal.clone(),
-          direction: direction.clone(),
-          surface: hit.surface,
-          weapon,
-          energyJ: this.energy[i]!,
-          penetrated: outcome.kind === 'through',
-        };
-        ctx.sim.emit('damage.applied', info);
-        ctx.fx.emit('hitmarker', {
-          lethal: false,
-          headshot: hit.zone === HitZone.Head,
-          armour: energyFraction < 0.35,
-        });
+      // Only two kinds of thing carry an entity id into a ray hit: a soldier,
+      // and a destructible solid (`PhysicsService.addStatic` mints one only when
+      // the collider has a `DestructibleDef`). Ask destruction first — if it
+      // took the damage, this was cover and not a person, and firing the
+      // soldier path as well would put a false hitmarker on the HUD for every
+      // round that hits a wall.
+      if (!this.damageCover(i, ctx, direction, hit, outcome, weapon, shooterId)) {
+        const amount = bulletDamage(full, distance, hit.zone, energyFraction);
+        if (amount > 0) {
+          const info: DamageInfo = {
+            target: hit.entity,
+            attacker: shooterId,
+            amount,
+            kind: DamageKind.Bullet,
+            zone: hit.zone,
+            point: hit.point.clone(),
+            normal: hit.normal.clone(),
+            direction: direction.clone(),
+            surface: hit.surface,
+            weapon,
+            energyJ: this.energy[i]!,
+            penetrated: outcome.kind === 'through',
+          };
+          ctx.sim.emit('damage.applied', info);
+          ctx.fx.emit('hitmarker', {
+            lethal: false,
+            headshot: hit.zone === HitZone.Head,
+            armour: energyFraction < 0.35,
+          });
+        }
       }
     }
 
@@ -357,6 +369,95 @@ class IronBallistics implements BallisticsService, TickSystem {
     this.vy[i] = outcome.direction.y * newSpeed;
     this.vz[i] = outcome.direction.z * newSpeed;
     this.energy[i] = outcome.energyJ;
+  }
+
+  /**
+   * Route one impact into `DestructionService`. THE SEAM BETWEEN A BULLET AND A
+   * WALL — before this existed, `applyDamage` was called from exactly one place
+   * in the repo (PHYS's own proving-ground scenario) and shooting cover in-game
+   * did nothing at all.
+   *
+   * Returns TRUE when the thing that was hit is a destructible solid, so the
+   * caller can skip the soldier path. Two kinds of body carry an entity id into
+   * a ray hit — a soldier, and a destructible, because `addStatic` mints an
+   * entity only for a collider with a `DestructibleDef` — and telling them apart
+   * matters for more than tidiness: without it every round that hits a wall
+   * pops a hitmarker, which is a lie the HUD has no way to detect.
+   *
+   * HOW THE TWO ARE TOLD APART, using only the public contract. Destruction
+   * exposes no "is this yours" predicate, and `applyDamage` on an unregistered
+   * entity is a documented no-op that returns the same shape as a survived hit.
+   * But `healthFraction` returns exactly 1 for anything it has never heard of,
+   * so a value that MOVED, or that already sits below 1, is proof of
+   * registration. Debris chunks inherit their parent's entity id and therefore
+   * read as 0 — which is the right answer: rubble is cover, not a person.
+   */
+  private damageCover(
+    i: number,
+    ctx: TickCtx,
+    direction: Vec3,
+    hit: RayHit,
+    outcome: Readonly<PenetrationOutcome>,
+    weapon: WeaponId,
+    shooter: EntityId,
+  ): boolean {
+    // A hit zone can only come from `BodyDesc.zone`, which only AI's hitbox rigs
+    // set — so a non-`None` zone is a soldier and there is nothing to ask. Worth
+    // the early-out: it keeps the common case allocation-free.
+    if (hit.zone !== HitZone.None) return false;
+
+    const destruction = ctx.services.destruction;
+    const target = hit.entity;
+    const energyJ = this.energy[i]!;
+    // The round's REAL remaining energy at this range, off the same integrator
+    // that decided where it landed — not a per-weapon constant. See
+    // `structure.ts` for why bore depth rather than deposited energy.
+    const amount = structuralDamage(ctx.services.materials.profile(hit.surface), energyJ, outcome);
+    if (amount <= 0) return destruction.healthFraction(target) < 1;
+
+    const info: DamageInfo = {
+      target,
+      attacker: shooter,
+      amount,
+      kind: DamageKind.Bullet,
+      zone: hit.zone,
+      point: hit.point.clone(),
+      normal: hit.normal.clone(),
+      direction: direction.clone(),
+      surface: hit.surface,
+      weapon,
+      energyJ,
+      penetrated: outcome.kind === 'through',
+    };
+
+    const before = destruction.healthFraction(target);
+    const result = destruction.applyDamage(info);
+    const after = destruction.healthFraction(target);
+    const weakened = after < before - 1e-6;
+    if (!result.destroyed && !weakened) {
+      // Nothing moved. Either a soldier, or cover that is already rubble.
+      return after < 1;
+    }
+
+    // The contract's own "a solid took a hit and survived" event, which until now
+    // had no producer anywhere in the repo. AI reads it to know its cover is
+    // going, HUD to flash the crosshair on a solid it can actually break.
+    ctx.sim.emit('prop.damaged', { entity: target, healthFraction: after, info });
+
+    // `DestructionResult` says what actually happened, and the one case it
+    // reports that nobody downstream can see is a collapse that spawned NO
+    // chunks — the tier's debris budget was already full. PHYS's own dust column
+    // still fires, but the shards that carry the read do not, so the breach
+    // would land silently. Pay for it with a burst of the right surface.
+    if (result.destroyed && result.chunksSpawned === 0) {
+      ctx.fx.emit('debrisBurst', {
+        point: result.position,
+        normal: hit.normal.clone(),
+        surface: result.surface,
+        count: 24,
+      });
+    }
+    return true;
   }
 
   /* ---------------------------------------------------------- predictions -- */
@@ -530,6 +631,13 @@ let instance: IronBallistics | null = null;
 export function createBallisticsService(ctx: BootContext): BallisticsService {
   const ballistics = new IronBallistics(ctx);
   ctx.addTick(ballistics);
+  // The proving ground's observer. Inert until a 'WE' seed arms it, and at
+  // Cleanup so it reads the world AFTER TickPhase.Destruction has flushed.
+  ctx.addTick({
+    name: 'weapons.proving',
+    phase: TickPhase.Cleanup,
+    tick: tickWeaponsProving,
+  });
   instance = ballistics;
   return ballistics;
 }
@@ -544,6 +652,9 @@ export function registerBallisticsBakes(_assets: AssetRegistry, _quality: Readon
  * earlier in the chain; this hook covers the case where the driver reaches the
  * descriptor table without having gone through the named services.
  */
-export function resetBallistics(_seed: number): void {
+export function resetBallistics(seed: number): void {
   instance?.clear();
+  // Every seed passes through here, including the harness's own 0x1205, and a
+  // non-'WE' seed tears the proving ground down. See `proving.ts`.
+  armWeaponsProving(seed, instance?.ctx.services ?? null);
 }

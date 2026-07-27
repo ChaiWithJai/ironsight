@@ -29,6 +29,36 @@ import { muzzleZOf, sightPointOf } from '@/weapons/models/build';
 export const v3 = (x: number, y: number, z: number): Vec3 => new THREE.Vector3(x, y, z);
 
 /**
+ * THE AMMUNITION ECONOMY, in one place, because it was set weapon-by-weapon and
+ * came out unplayable.
+ *
+ * What shipped: the service rifle carried `magazine: 30, reserve: 180` — 210
+ * rounds for an ENTIRE MATCH — and there was no resupply anywhere in the repo,
+ * so a player who fought for a few minutes was permanently dry and had no way
+ * to do anything about it. A human playing reported it in one line: *"need more
+ * ammo, gun runs out too fast."* That is not a tuning nit; it is a hard round
+ * budget on a game mode that has no end of ammunition in it.
+ *
+ * Two halves to the fix and they only work together:
+ *
+ *  1. `carried()` below, applied to all four weapons rather than to the rifle
+ *     alone. A rifleman's basic load is seven spare magazines, so that is what
+ *     the rifle-class weapons get; a belt-fed gunner carries FEWER reloads and
+ *     far more rounds, which is the whole shape of the class and is why the LMG
+ *     is expressed in belts.
+ *  2. Ammo crates on the objectives — `src/level/ammo.ts`, one at every capture
+ *     point, refilling reserve through `WeaponService.resupply`. Without them a
+ *     bigger number only moves the moment you run out; with them the economy
+ *     becomes a reason to hold ground, which is what the game mode is about.
+ *
+ * `spares` is what the soldier carries BESIDES the one in the weapon, so the
+ * total a player deploys with is `magazine * (1 + spares)`.
+ */
+export function carried(magazine: number, spares: number): number {
+  return magazine * spares;
+}
+
+/**
  * Hit-zone multipliers. One table for every weapon in the game: a rifle that
  * headshots for 2.6× and a DMR that headshots for 3.1× is a balance decision
  * nobody can hold in their head, and the brief is not asking for one.

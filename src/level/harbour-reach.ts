@@ -62,8 +62,11 @@ import {
   buildBreakwater, buildContainerYard, buildCrane, buildFuelDepot, buildQuay, buildWarehouse,
 } from '@/level/landmarks/harbour';
 import { buildMarketHall, buildMinaret, buildMosque, buildSquareTerrace } from '@/level/landmarks/town';
+import { ammoCrate } from '@/level/dressing';
 import { buildFort } from '@/level/landmarks/fort';
 import { buildFreighter } from '@/level/landmarks/freighter';
+import { AmmoCrateSystem, describeCrates, installAmmoProbe, type AmmoCrate } from '@/level/ammo';
+import { auditFloaters } from '@/level/audit';
 import { CoverIndex, bakeCoverSlots } from '@/level/cover-bake';
 import { bakeNavmesh, type NavBakeStats } from '@/level/navmesh-bake';
 import { defineChunkAssets, finaliseColliders } from '@/level/colliders';
@@ -77,6 +80,10 @@ const LEVEL_SEED = 0x48524348;
 
 interface BuiltLevel {
   readonly root: THREE.Object3D;
+  /** Props with nothing under them. A worldcraft defect; must stay at zero. */
+  readonly floaters: number;
+  /** Resupply points. One per objective; see `src/level/ammo.ts`. */
+  readonly ammoCrates: readonly AmmoCrate[];
   readonly colliders: readonly StaticColliderDef[];
   readonly destructibles: readonly DestructibleDef[];
   readonly coverSlots: readonly CoverSlot[];
@@ -100,6 +107,8 @@ interface LevelStats {
 
 /** Module-scoped so `resetLevel` can reach it without `create` having run. */
 let built: BuiltLevel | null = null;
+/** Same, for the resupply tick: a re-seeded capture must clear its dwell state. */
+let ammoSystem: AmmoCrateSystem | null = null;
 
 /* ==========================================================================
  * BUILD
@@ -169,9 +178,9 @@ function buildLevel(ctx: BootContext): BuiltLevel {
   // ---- 1. landmarks -------------------------------------------------------
   ctx.report('building level: harbour');
   const rHarbour = fork('harbour');
-  buildQuay(b, ground, rHarbour);
-  for (const c of CRANES) buildCrane(b, c.x, c.z, c.yaw, c.height, rHarbour);
-  buildBreakwater(b, ground, rHarbour);
+  b.tag = 'quay'; buildQuay(b, ground, rHarbour);
+  b.tag = 'crane'; for (const c of CRANES) buildCrane(b, c.x, c.z, c.yaw, c.height, rHarbour);
+  b.tag = 'breakwater'; buildBreakwater(b, ground, rHarbour);
   // Three sheds along the landward edge of the quay apron, and the yard between
   // the western two. Positions are derived from the quay line so they cannot
   // drift off the apron if the coast is ever re-cut.
@@ -233,34 +242,67 @@ function buildLevel(ctx: BootContext): BuiltLevel {
   // open water. 0.82 puts all four corners inside the slab, and the sightline
   // `level_bravo` is staged on only moves by 0.2° of azimuth.
   const shedC = apronAt(0.82, 27);
-  buildWarehouse(b, shedA.x, shedA.z, 16, 9, 0.28, apronGround, rHarbour);
+  b.tag = 'shed'; buildWarehouse(b, shedA.x, shedA.z, 16, 9, 0.28, apronGround, rHarbour);
   buildWarehouse(b, shedB.x, shedB.z, 13, 8, 0.24, apronGround, rHarbour);
   buildWarehouse(b, shedC.x, shedC.z, 11, 7.5, 0.18, apronGround, rHarbour);
   const yard = apronAt(0.33, 13);
-  buildContainerYard(b, yard.x, yard.z, 22, 9, 0.26, apronGround, rHarbour);
-  buildFuelDepot(b, FUEL_DEPOT.x, FUEL_DEPOT.z, FUEL_DEPOT.yaw, ground, rHarbour);
+  b.tag = 'yard'; buildContainerYard(b, yard.x, yard.z, 22, 9, 0.26, apronGround, rHarbour);
+  b.tag = 'fuel'; buildFuelDepot(b, FUEL_DEPOT.x, FUEL_DEPOT.z, FUEL_DEPOT.yaw, ground, rHarbour);
 
   ctx.report('building level: town');
   const rTown = fork('town-landmarks');
-  buildSquareTerrace(b, townGround, rTown);
-  const hall = buildMarketHall(b, townGround, rTown);
-  buildMosque(b, townGround, rTown);
-  buildMinaret(b, townGround, rTown);
+  b.tag = 'terrace'; buildSquareTerrace(b, townGround, rTown);
+  b.tag = 'markethall'; const hall = buildMarketHall(b, townGround, rTown);
+  b.tag = 'mosque'; buildMosque(b, townGround, rTown);
+  b.tag = 'minaret'; buildMinaret(b, townGround, rTown);
 
   ctx.report('building level: fort');
-  const charlieFloorY = buildFort(b, ground, fork('fort'));
+  b.tag = 'fort'; const charlieFloorY = buildFort(b, ground, fork('fort'));
 
   ctx.report('building level: wreck');
-  buildFreighter(b, fork('freighter'));
+  b.tag = 'freighter'; buildFreighter(b, fork('freighter'));
 
   // ---- 2. the town --------------------------------------------------------
   ctx.report('building level: districts');
   const rDistrict = fork('districts');
-  buildStreets(b, townGround, rDistrict);
+  b.tag = 'streets'; buildStreets(b, townGround, rDistrict);
   const plots = generatePlots(townGround, rDistrict);
-  buildTown(b, plots, townGround, rDistrict);
-  buildSquare(b, ALPHA_SQUARE.x, ALPHA_SQUARE.z, ALPHA_SQUARE.hx, ALPHA_SQUARE.hz, ground, rDistrict, hall);
-  dressStreets(b, townGround, rDistrict);
+  b.tag = 'town'; buildTown(b, plots, townGround, rDistrict);
+  b.tag = 'square'; buildSquare(b, ALPHA_SQUARE.x, ALPHA_SQUARE.z, ALPHA_SQUARE.hx, ALPHA_SQUARE.hz, ground, rDistrict, hall);
+  b.tag = 'furniture'; dressStreets(b, townGround, rDistrict);
+
+  /**
+   * ---- AMMO CRATES, one per objective --------------------------------------
+   *
+   * The resupply mechanic (`src/level/ammo.ts`) needs somewhere to be, and the
+   * capture points are the answer for a game-design reason rather than a
+   * convenience one: putting ammunition on the objectives makes holding one
+   * feed you and losing one starve you, which is the same currency Conquest
+   * already trades in. Nowhere else on the map has a crate, so the only way to
+   * top up is to be where the fight is.
+   *
+   * The offsets are small and each one is aimed at the open part of its
+   * objective — the square's paving, the quay apron, the fort courtyard — so no
+   * crate lands inside geometry, and every height comes from the SAME sampler
+   * the surrounding structure was built with. `townGround` for ALPHA (which
+   * returns the paving slab inside the square, not the terrace under it),
+   * `apronGround` for BRAVO (the built slab, not the sea bed 3.5 m below it) and
+   * the fort's own returned floor for CHARLIE. Using `ground` for any of the
+   * three would sink the crate through the floor the player is standing on.
+   */
+  b.tag = 'ammo';
+  const rAmmo = fork('ammo');
+  const crateAt = (label: string, x: number, z: number, y: number, yaw: number): AmmoCrate => {
+    ammoCrate(b, x, y, z, yaw, rAmmo);
+    return { x, y, z, label };
+  };
+  const ammoCrates: AmmoCrate[] = [
+    crateAt('ALPHA', ALPHA_SQUARE.x + 9.5, ALPHA_SQUARE.z - 8.0,
+      townGround(ALPHA_SQUARE.x + 9.5, ALPHA_SQUARE.z - 8.0), 0.42),
+    crateAt('BRAVO', POINTS.bravo.x - 6.0, POINTS.bravo.z - 9.0,
+      apronGround(POINTS.bravo.x - 6.0, POINTS.bravo.z - 9.0), -0.8),
+    crateAt('CHARLIE', POINTS.charlie.x + 5.5, POINTS.charlie.z + 2.5, charlieFloorY, 1.9),
+  ];
 
   // ---- 3. geometry --------------------------------------------------------
   ctx.report('building level: meshes');
@@ -320,8 +362,12 @@ function buildLevel(ctx: BootContext): BuiltLevel {
   // anchored to the rock under it would sit half a storey below the fight.
   CHARLIE_FLOOR_Y = charlieFloorY;
 
+  const floaters = auditFloaters(b.colliders, b.colliderTags, b.navDecks, ground);
+
   return {
     root,
+    floaters,
+    ammoCrates,
     colliders: pass.colliders,
     destructibles: pass.destructibles,
     coverSlots,
@@ -418,6 +464,16 @@ export function createLevelService(ctx: BootContext): LevelService {
     new THREE.Vector3(MACRO_TERRAIN.bounds.maxX, 140, MACRO_TERRAIN.bounds.maxZ),
   );
 
+  /**
+   * The resupply tick. Registered here rather than in `afterBoot` because
+   * `addTick` is a CORE service that exists the moment the factory runs, and the
+   * system resolves `services.weapons` per tick rather than at construction —
+   * so it cannot capture a null service the way a pass registered too early can.
+   */
+  ammoSystem = new AmmoCrateSystem(level.ammoCrates);
+  ctx.addTick(ammoSystem);
+  installAmmoProbe(ctx.services, ammoSystem);
+
   // Everything that has to reach another lane's service happens AFTER boot —
   // `nav` and `vegetation` are constructed after `level` and calling them from
   // the factory body would silently hit the null implementations.
@@ -433,8 +489,12 @@ export function createLevelService(ctx: BootContext): LevelService {
     ctx.report(
       `level: ${s.triangles} tris / ${s.draws} draws, ${s.plots} plots, ` +
       `${s.colliders} colliders (${s.destructibles} destructible, ${s.occluders} occluders), ` +
-      `${s.coverSlots} cover slots, nav ${s.nav.triangles} polys in ${s.nav.regions} regions`,
+      `${s.coverSlots} cover slots, nav ${s.nav.triangles} polys in ${s.nav.regions} regions, ` +
+      `${level.floaters} floating props`,
     );
+    // `[boot]` prefix: `tools/soak.sh` keeps those lines and drops the rest, and
+    // "where can I actually get ammunition" is a question the soak should answer.
+    console.info(`[boot] level · ammo crates ${describeCrates(level.ammoCrates)}`);
   });
 
   return {
@@ -479,6 +539,7 @@ export function registerLevelBakes(assets: AssetRegistry, _quality: Readonly<Qua
  * would be a cache with one entry and two ways to go wrong.
  */
 export function resetLevel(_seed: number): void {
+  ammoSystem?.reset();
   if (!built) return;
   built.root.traverse((o) => {
     o.visible = true;

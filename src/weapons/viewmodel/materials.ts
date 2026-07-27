@@ -31,6 +31,9 @@ import { opticLensChunk, weaponSurfaceChunk } from '@/weapons/viewmodel/surface'
 
 export type RoleMaterials = Readonly<Record<PartRole, THREE.Material>>;
 
+/** Set by `buildViewmodelMaterials`; read by `viewmodelMaterials()`. */
+let built: RoleMaterials | null = null;
+
 /**
  * Divisor on the bake's own repeat rate. The harbour bakes run 1.8–2.6 m; /14
  * puts one repeat at 130–186 mm, so the recipe's coarsest octave (3 per repeat)
@@ -379,5 +382,23 @@ export function buildViewmodelMaterials(materials: MaterialFactory): RoleMateria
     detailScale: 14,
   });
 
-  return { receiver, steel, polymer, glass, reticle, glove, cavity };
+  built = { receiver, steel, polymer, glass, reticle, glove, cavity };
+  return built;
+}
+
+/**
+ * The set built by the last `buildViewmodelMaterials` call, or null before the
+ * viewmodel rig has been built.
+ *
+ * WHY IT IS CACHED RATHER THAN REBUILT ON DEMAND. The thrown grenade
+ * (`src/weapons/models/frag.ts`) draws with `receiver` and `steel`, and the
+ * honest way to get them is to ask for the same set the rig got.
+ * `MaterialFactory.create` dedupes, so calling `buildViewmodelMaterials` twice
+ * would return the same seven materials — but `allocateLayer` would claim seven
+ * more slots in the shared texture arrays and `registerSurface` would be asked
+ * to re-register four chunks, and neither of those is free or obviously
+ * idempotent from outside RCORE. One build, one cache, one reader.
+ */
+export function viewmodelMaterials(): RoleMaterials | null {
+  return built;
 }

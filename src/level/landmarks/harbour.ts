@@ -1171,7 +1171,21 @@ export function buildContainerYard(
       const lz = -hz + (j + 0.5) * (hz * 2 / rows);
       const px = cx + lx * Math.cos(yaw) + lz * Math.sin(yaw);
       const pz = cz - lx * Math.sin(yaw) + lz * Math.cos(yaw);
-      const g = ground(px, pz);
+      /**
+       * SAMPLE THE FOOTPRINT, NOT THE CENTRE. A 40 ft box is 6.06 m long, so a
+       * height taken at its middle leaves one end up to `slope × 3 m` clear of
+       * the ground — which on the inland edge of the apron, where the terrace
+       * starts to climb, is exactly the daylight-under-the-box defect. Taking
+       * the LOW end of the footprint buries the uphill corner instead, and a
+       * buried corner is invisible where a floating one is not.
+       */
+      const g = Math.min(
+        ground(px, pz),
+        ground(px + Math.cos(yaw) * 3.1, pz - Math.sin(yaw) * 3.1),
+        ground(px - Math.cos(yaw) * 3.1, pz + Math.sin(yaw) * 3.1),
+        ground(px + Math.sin(yaw) * 1.3, pz + Math.cos(yaw) * 1.3),
+        ground(px - Math.sin(yaw) * 1.3, pz - Math.cos(yaw) * 1.3),
+      );
       const high = rng.bool(0.42) ? 2 : 1;
       for (let k = 0; k < high; k++) {
         const long = rng.bool(0.75);
@@ -1184,7 +1198,7 @@ export function buildContainerYard(
           long,
           rng.pick(palette),
           rng,
-          k === 0,
+          { foot: k === 0 },
         );
       }
     }

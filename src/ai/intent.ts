@@ -58,8 +58,42 @@ const LOCAL_PROBE_M = 9;
 const DETOUR_FAN: readonly number[] = [
   0.42, -0.42, 0.85, -0.85, 1.27, -1.27, 1.7, -1.7,
 ];
-/** How far to look for walkable ground when a bot ends up off the navmesh. */
-const OFF_MESH_SEARCH_M = 10;
+/**
+ * How far to look for walkable ground when a bot ends up off the navmesh.
+ *
+ * Sized from the map, not from taste: the widest gap between an authored spawn
+ * point and the nearest navmesh polygon on HARBOUR REACH is 15 m (the BRAVO-
+ * linked Coalition spawn at x=40, z=22, which is authored on the quay lip).
+ * At 10 m a bot pushed off the mesh there had no recovery heading in any
+ * direction and stood still for the whole match.
+ */
+const OFF_MESH_SEARCH_M = 18;
+
+/* ============================================================================
+ * WEDGES
+ *
+ * A wedge is "wanted to move, did not move". Detecting it costs one squared
+ * distance per bot per tick and is the only thing in this lane that can see a
+ * bot leaning on a wall — the corridor, the goal and perception all look
+ * perfectly healthy while it happens, which is exactly why it went unnoticed
+ * for the whole project.
+ * ========================================================================= */
+
+/** Progress that counts as "the bot is getting somewhere". */
+const STUCK_PROGRESS_M = 0.55;
+/** Wanting to move for this long without covering that distance arms an escape. */
+const STUCK_ARM_SECONDS = 0.8;
+/** How long one escape heading is held before it is judged. */
+const UNSTICK_SECONDS = 0.85;
+/**
+ * Escape headings, in radians, applied to the blocked heading in order. Slide
+ * along the obstruction first (either shoulder), then peel away from it. Fixed
+ * values in a fixed order: this runs inside the simulation and must not draw
+ * from the RNG stream.
+ */
+const ESCAPE_LADDER: readonly number[] = [Math.PI * 0.5, -Math.PI * 0.5, Math.PI * 0.78, -Math.PI * 0.78];
+/** Escapes tried before the bot throws away the corridor, the cover slot and the goal. */
+const ESCAPES_BEFORE_REPLAN = ESCAPE_LADDER.length;
 
 /**
  * Turn a desired heading into one the ground actually supports.
@@ -217,6 +251,64 @@ export function writeIntent(bot: Bot, world: AiWorld): void {
     DESIRED.copy(along).multiplyScalar(side * (bot.exposure - 0.5) * 1.1);
     if (DESIRED.lengthSq() > 1) DESIRED.normalize();
     distanceToGoal = 0;
+  }
+
+  // ---- wedge escape --------------------------------------------------------
+  // AFTER the cover hold (a man deliberately held behind a wall is not stuck)
+  // and BEFORE separation (which must still push him off a mate while he is
+  // sidestepping). Everything here is a no-op for a bot that is moving.
+  const wantsToMove = !holdingCover && Math.hypot(DESIRED.x, DESIRED.z) > 0.2;
+  if (!wantsToMove) {
+    bot.stuckAnchor.copy(self.state.position);
+    bot.stuckSince = world.time;
+    bot.stuckAttempt = 0;
+    bot.unstickUntil = 0;
+  } else {
+    const dx = self.state.position.x - bot.stuckAnchor.x;
+    const dz = self.state.position.z - bot.stuckAnchor.z;
+    if (dx * dx + dz * dz > STUCK_PROGRESS_M * STUCK_PROGRESS_M) {
+      // Real ground covered: the wedge, if there was one, is over.
+      bot.stuckAnchor.copy(self.state.position);
+      bot.stuckSince = world.time;
+      bot.stuckAttempt = 0;
+      bot.unstickUntil = 0;
+    } else if (world.time - bot.stuckSince > STUCK_ARM_SECONDS && world.time >= bot.unstickUntil) {
+      bot.unstickUntil = world.time + UNSTICK_SECONDS;
+      // The corner we cannot reach is not worth more attempts. Skipping to the
+      // next one is what turns "blocked forever" into "blocked for a stride" on
+      // a corridor that is otherwise perfectly good.
+      if (path.cornerCount > 0 && bot.corridorIndex < path.cornerCount) bot.corridorIndex++;
+      // Ask for a new route as soon as the brain next thinks.
+      bot.repathAt = 0;
+      bot.stuckAttempt++;
+      if (bot.stuckAttempt > ESCAPES_BEFORE_REPLAN) {
+        // The whole plan is wrong, not just the heading. Drop the corridor, the
+        // cover claim and the goal so `chooseGoal` builds a fresh one from
+        // where the bot actually is.
+        bot.corridorIndex = path.cornerCount;
+        bot.cover = null;
+        bot.coverIndex = -1;
+        bot.goal.set(0, 0, 0);
+        bot.stuckAttempt = 0;
+        bot.stuckSince = world.time;
+      }
+    }
+    if (world.time < bot.unstickUntil && bot.stuckAttempt > 0) {
+      // Which shoulder first comes from the spawn slot, so two men wedged on
+      // the same corner peel off it in opposite directions rather than both
+      // choosing the same way. No RNG inside the simulation.
+      const rung = ESCAPE_LADDER[(bot.stuckAttempt - 1) % ESCAPE_LADDER.length];
+      const angle = bot.slot % 2 === 0 ? rung : -rung;
+      const sinE = Math.sin(angle);
+      const cosE = Math.cos(angle);
+      const ex = DESIRED.x * cosE - DESIRED.z * sinE;
+      const ez = DESIRED.x * sinE + DESIRED.z * cosE;
+      DESIRED.set(ex, 0, ez);
+      // The escape heading is a local one, so it gets the local probe the
+      // corridor branch never runs.
+      steerLocally(self.state.position, DESIRED, LOCAL_PROBE_M, world);
+      distanceToGoal = Math.max(distanceToGoal, 2);
+    }
   }
 
   // ---- separation ----------------------------------------------------------

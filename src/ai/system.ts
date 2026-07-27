@@ -38,6 +38,7 @@
 import * as THREE from 'three';
 import {
   BotBehaviour,
+  Btn,
   LAYER_SOLID,
   RenderStage,
   Stance,
@@ -105,8 +106,28 @@ const LOD_LADDER: readonly number[] = [6, 13, 21, 32, 46, 68];
  * How far a spawn point may be nudged to land on walkable navmesh. Wide enough
  * to clear the kerb or planter an authored point sits inside, narrow enough
  * that a bot never enters the map on the wrong side of a wall.
+ *
+ * MEASURED, NOT GUESSED. Nine of HARBOUR REACH's ten spawn points sit 1.4 m
+ * from the nearest polygon — the half-cell quantisation of the field, i.e.
+ * effectively on it. The tenth, the BRAVO-linked Coalition spawn at (40, 22),
+ * is authored on the quay lip and is 15 m from any walkable polygon. At the
+ * old 6 m bound a bot entering there had no walkable heading in any direction,
+ * could not be rescued by the off-mesh recovery either, and stood still for the
+ * entire match — measured 0.04 m travelled in 60 s. A bot 15 m from where LEVEL
+ * meant him to be is a smaller failure than a bot who never moves.
  */
-const SPAWN_SNAP_M = 6;
+const SPAWN_SNAP_M = 18;
+
+/* -------------------------------------------------------------------- spot */
+
+/** Half-angle of the spot reticle, as a cosine. 7° — generous, not a laser. */
+const SPOT_CONE_COS = Math.cos((7 * Math.PI) / 180);
+/** Furthest a player may call a contact. */
+const SPOT_RANGE_M = 260;
+/** How far down the sightline a spot that hit nobody plants its report. */
+const SPOT_BLIND_M = 45;
+/** Squadmates this far from the player are told; the rest read it off the ledger. */
+const SPOT_SHARE_M = 110;
 
 /** Scratch for the spawn snap. Dedicated, so it cannot alias the tick's. */
 const SPAWN_ENTRY = new THREE.Vector3();
@@ -227,6 +248,28 @@ class IronAi implements AiService {
     // contract forbids an emitter from using both, because the same gunshot
     // counted twice puts every hearing threshold out by 6 dB.
     this.unsubscribe.push(this.services.events.on('noise.emitted', (e) => this.onNoise(e)));
+    // CONTACT. A rifle going off is the loudest statement in the game about
+    // where the enemy is, and until now nothing above the individual bot's
+    // hearing did anything with it: a bot flinched, and his squad — and the
+    // squad next to his — carried on walking to a flag on the far side of the
+    // map. Both teams are told, because "my mate is shooting at something over
+    // there" and "someone is shooting at me from over there" are the same
+    // report from opposite ends.
+    this.unsubscribe.push(
+      this.services.events.on('damage.applied', (e) => {
+        const victim = this.services.player.stateOf(e.target);
+        if (!victim) return;
+        // Where the round CAME FROM is what a squad wants, and `direction` is
+        // the unit vector attacker → target, so stepping back along it from the
+        // hit point is the best estimate available without naming the shooter.
+        this.scratch
+          .copy(victim.position)
+          .addScaledVector(this.scratchB.copy(e.direction).setY(0).normalize(), -22);
+        this.squads.noteContact(victim.team, this.scratch, this.world.time, 3);
+        const shooter = this.services.player.stateOf(e.attacker);
+        if (shooter) this.squads.noteContact(shooter.team, victim.position, this.world.time, 2);
+      }),
+    );
     this.unsubscribe.push(
       this.services.events.on('entity.killed', (e) => {
         const bot = this.byEntity.get(e.victim as number);
@@ -569,6 +612,22 @@ class IronAi implements AiService {
   }
 
   private onNoise(event: NoiseEvent): void {
+    // Gunfire and explosions are squad-level intelligence, not just a flinch.
+    // Footsteps are not: a man walking is heard at 12 m and would pin every
+    // squad in the game to wherever its own point man happens to be standing.
+    //
+    // ONLY THE OTHER SIDE IS TOLD. Reporting a gunshot to the shooter's own
+    // team as well looks symmetric and is a trap: the position of my own rifle
+    // is BEHIND me, so every burst my squad fires becomes an attractor to the
+    // rear and the team walks backwards into itself. Measured: doing both
+    // halved the kills (5 → 1) and pushed Regroup from 4.8% to 17.5% of all
+    // bot-ticks. A squad learns that its mates are fighting from
+    // `hasContactPoint` in `squad.ts`, which reports the ENEMY's position and
+    // therefore pulls forward.
+    if (event.kind === 'gunshot' || event.kind === 'explosion') {
+      const enemy = event.team === Team.Coalition ? Team.Insurgent : Team.Coalition;
+      this.squads.noteContact(enemy, event.position, this.world.time, 1.5);
+    }
     for (const bot of this.botList) {
       if (!bot.alive) continue;
       const state = this.services.player.stateOf(bot.entity);
@@ -590,6 +649,101 @@ class IronAi implements AiService {
         }
       }
     }
+  }
+
+  /**
+   * `T` — SPOT. The one place in this lane the human player gives an order.
+   *
+   * `Btn.Spot` reached the input layer and was consumed by nothing, so pressing
+   * it did nothing at all. It is read here rather than in GAME because what a
+   * spot MEANS is entirely an AI concept: it is a contact report, and this lane
+   * owns the ledger those go into.
+   *
+   * What it does NOT do is hand anyone a free kill. The spotted man becomes a
+   * KNOWN position for the player's team — `heardOnly: false`, confidence just
+   * under the sight threshold — so squadmates move on him, take angles and
+   * suppress, but every one of them still has to acquire him visually before
+   * `fireControl` will pull a trigger. A spot that granted `visible` would turn
+   * the whole team into an aimbot on one keystroke.
+   */
+  private pollSpot(): void {
+    const player = this.services.player;
+    const local = player.localEntity;
+    const intent = player.intentOf(local);
+    if (!intent || (intent.pressed & Btn.Spot) === 0) return;
+    const self = player.stateOf(local);
+    if (!self || !self.alive || self.team === Team.Neutral) return;
+    this.applySpot(local, self);
+  }
+
+  /**
+   * The payload of a spot, split from the keypress so it can be exercised
+   * without a keyboard. `pollSpot` above is the edge detector and nothing else.
+   */
+  private applySpot(local: EntityId, self: Readonly<PlayerState>): EntityId | null {
+    const player = this.services.player;
+    const cosPitch = Math.cos(self.pitch);
+    const dirX = -Math.sin(self.yaw) * cosPitch;
+    const dirY = Math.sin(self.pitch);
+    const dirZ = -Math.cos(self.yaw) * cosPitch;
+    const eyeX = self.position.x;
+    const eyeY = self.position.y + self.eyeHeight;
+    const eyeZ = self.position.z;
+
+    // `PlayerService.controlled` rather than `world.actors`: the actor list is
+    // rebuilt at the top of this lane's tick, and a spot must not depend on
+    // having been asked at the right point of the frame.
+    let spotted: EntityId | null = null;
+    let spottedState: Readonly<PlayerState> | null = null;
+    let bestDot = SPOT_CONE_COS;
+    for (const entity of player.controlled) {
+      if (entity === local) continue;
+      const state = player.stateOf(entity);
+      if (!state || !state.alive || state.team === self.team || state.team === Team.Neutral) continue;
+      const actor = { entity, state };
+      const dx = actor.state.position.x - eyeX;
+      const dy = actor.state.position.y + actor.state.eyeHeight * 0.6 - eyeY;
+      const dz = actor.state.position.z - eyeZ;
+      const distance = Math.hypot(dx, dy, dz);
+      if (distance < 1e-3 || distance > SPOT_RANGE_M) continue;
+      const dot = (dx * dirX + dy * dirY + dz * dirZ) / distance;
+      if (dot <= bestDot) continue;
+      this.scratch.set(eyeX, eyeY, eyeZ);
+      this.scratchB.set(actor.state.position.x, actor.state.position.y + actor.state.eyeHeight, actor.state.position.z);
+      if (this.visibility(this.scratch, this.scratchB) <= 0.4) continue;
+      bestDot = dot;
+      spotted = actor.entity;
+      spottedState = actor.state;
+    }
+
+    if (!spotted || !spottedState) {
+      // Nothing under the reticle: still a directional call. "Contact, that
+      // way" is a real thing a squad acts on, and it is what makes the key feel
+      // connected even when the player was a few degrees off.
+      this.scratch.set(eyeX + dirX * SPOT_BLIND_M, eyeY + dirY * SPOT_BLIND_M, eyeZ + dirZ * SPOT_BLIND_M);
+      this.squads.noteContact(self.team, this.scratch, this.world.time, 2);
+      return null;
+    }
+
+    this.squads.noteContact(self.team, spottedState.position, this.world.time, 4);
+    for (const bot of this.botList) {
+      if (!bot.alive || bot.team !== self.team) continue;
+      const state = player.stateOf(bot.entity);
+      if (!state) continue;
+      if (sqDistance(state.position, self.position) > SPOT_SHARE_M * SPOT_SHARE_M) continue;
+      const memory = bot.memoryFor(spotted, this.world.time);
+      memory.lastKnown.copy(spottedState.position);
+      memory.lastVelocity.copy(spottedState.velocity);
+      memory.heardOnly = false;
+      memory.lastSeenTime = this.world.time;
+      memory.staticSince = this.world.time;
+      memory.distance = Math.sqrt(sqDistance(state.position, spottedState.position));
+      // Just under 1: a spot tells the squad WHERE, not that they can see him.
+      // Crossing 1 here would arm `reactionAt` and let a man behind a wall be
+      // shot through it.
+      memory.confidence = Math.max(memory.confidence, 0.92);
+    }
+    return spotted;
   }
 
   private weaponDef(bot: Bot): Readonly<WeaponDef> | null {
@@ -664,6 +818,7 @@ class IronAi implements AiService {
     if (this.botList.length === 0) return;
     this.tickIndex++;
 
+    this.pollSpot();
     this.squads.update(world, this.services.level.capturePoints);
 
     const baseStride = strideFor(ctx.quality.ai.perceptionHz);
@@ -1162,6 +1317,7 @@ class IronAi implements AiService {
   setWeaponsNull(value: boolean): void {
     this.weaponsNull = value;
   }
+
 }
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };

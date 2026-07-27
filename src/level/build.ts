@@ -82,6 +82,14 @@ export class LevelBuild {
   readonly coverBoxes: { matrix: THREE.Matrix4; half: THREE.Vector3; groundY: number }[] = [];
   /** Circles VEG must not grow inside. */
   readonly vegExclusions: { x: number; z: number; radius: number }[] = [];
+  /**
+   * Which builder emitted `colliders[i]`, as a parallel array. Set through
+   * `tag` by `harbour-reach.ts` around each landmark call and read by
+   * `audit.ts`, whose whole value is naming the lane that owns a defect —
+   * "5 floating props" is a shrug, "[freighter] 5 floating props" is a fix.
+   */
+  readonly colliderTags: string[] = [];
+  tag = 'root';
 
   constructor(readonly rng: Rng) {
     const b = {} as Record<MatKey, MeshBuilder>;
@@ -121,6 +129,7 @@ export class LevelBuild {
       group: CollisionGroup.StaticGeo,
       occluder: opts.occluder,
     });
+    this.colliderTags.push(this.tag);
 
     const pos = _pos.setFromMatrixPosition(world);
     const yaw = yawOf(world);
@@ -151,6 +160,7 @@ export class LevelBuild {
   /** A collider with no geometry — invisible floors under stairs, ship hulls. */
   collider(def: StaticColliderDef): void {
     this.colliders.push(def);
+    this.colliderTags.push(this.tag);
   }
 
   /** A walkable deck for the navmesh. Purely data; emit its geometry yourself. */
