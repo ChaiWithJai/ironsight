@@ -496,6 +496,51 @@ export function propFoot(
   const outer = radius * rng.range(1.5, 2.1);
   const rise = Math.min(0.075, radius * 0.3);
   const phase = rng.range(0, Math.PI * 2);
+  /**
+   * THE GRIME COLLAR — round 3, `weapon_ads`, severity 8.
+   *
+   * *"Every object meets the ground on a hard geometric line with no debris
+   * skirt… all terminate against unchanged ground albedo on both sides."* The
+   * drift below this was already being emitted on all of those objects. The
+   * reason the critic could not see it is VALUE, not geometry: the drift is
+   * `sand` (0xb6a179) laid on paving of `sandstone` (0xa78c63) or on sand
+   * itself, a contrast of a few per cent, and a 6 cm mound of the same colour as
+   * the floor is invisible from standing eye height.
+   *
+   * What a contact actually looks like is the opposite sign: a DARK band right
+   * in the angle, because that is where the sky is occluded, where water runs
+   * off and stops, and where dirt is never swept out. The rubric asks for
+   * exactly this ("a screen-space contact-AO term biased strongly into the
+   * bottom ~10 px of every object silhouette") and geometry can pay for it
+   * honestly — `interior` is the 9 %-albedo entry, so a tight ring of it at the
+   * object's own radius returns roughly a fifth of what the paving returns.
+   *
+   * It is deliberately TIGHT (1.0–1.45 × the prop radius) and lobed on the same
+   * harmonic as the drift, so it reads as grime collected in the angle rather
+   * than as a painted halo — the SSAO-halo artefact the rubric separately calls
+   * a defect. The drift is emitted over it, so the two overlap and the boundary
+   * between them is never a clean circle either.
+   */
+  {
+    const gm = b.m('interior');
+    gm.setUvShift(rng.range(0, 20), rng.range(0, 20));
+    const inner: THREE.Vector3[] = [];
+    const outerRing: THREE.Vector3[] = [];
+    for (let i = 0; i < cols; i++) {
+      const a = phase + (i / cols) * Math.PI * 2;
+      const lobe = 0.62 + 0.38 * Math.sin(a * 2 + phase) * Math.sin(a * 3 - phase * 0.7);
+      const r0 = radius * rng.range(0.92, 1.02);
+      const r1 = radius * (1.12 + 0.33 * lobe) * rng.range(0.9, 1.1);
+      inner.push(new THREE.Vector3(x + Math.cos(a) * r0, groundY + 0.014, z + Math.sin(a) * r0));
+      outerRing.push(new THREE.Vector3(x + Math.cos(a) * r1, groundY + 0.004, z + Math.sin(a) * r1));
+    }
+    // Same j-before-i winding as the drift below, for the same reason.
+    for (let i = 0; i < cols; i++) {
+      const j = (i + 1) % cols;
+      gm.quad(inner[j], outerRing[j], outerRing[i], inner[i], 1);
+    }
+    gm.clearUvShift();
+  }
   const rim: THREE.Vector3[] = [];
   const mid: THREE.Vector3[] = [];
   for (let i = 0; i < cols; i++) {

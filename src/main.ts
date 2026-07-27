@@ -124,7 +124,26 @@ async function boot(): Promise<void> {
   // One frame before ready, so the very first thing the capture tool can grab is
   // a rendered image rather than the clear colour.
   engine.stepFrame(1 / 60);
-  engine.setLoopSuspended(false);
+  // PARK IN THE HARNESS HOLD, and do not start free-running here. This is a
+  // DETERMINISM fix, not a policy preference.
+  //
+  // `EngineClock.tick` is deliberately never rewound (see clock.ts), so the tick
+  // a capture STARTS from is whatever the live loop has reached by then — and
+  // between `markReady()` and the tool's first `capture()` call the live loop was
+  // running on wall-clock dt. That window is a page load, a `waitForFunction`
+  // poll and an IPC round trip long, i.e. a machine-dependent number of frames:
+  // measured at 7 ticks here, and one capture in a dozen landed on a different
+  // count and came back with a different frame. `hud_full` is where it showed,
+  // because GAME's scenario is keyed to the absolute tick counter — two runs of
+  // the same build produced different killfeed entries, a different tracer and a
+  // different grass phase, which is precisely the "the frame changed but the code
+  // did not" failure the blind critic loop cannot survive.
+  //
+  // `EngineDriver.setLoopSuspended(false)` is the same HOLD every capture already
+  // leaves behind: rAF keeps turning, no frame accumulates, and the first real
+  // pointer/key event hands the world to the player. Boot now enters it directly,
+  // so the first capture starts from the same tick as every later one.
+  engine.driver.setLoopSuspended(false);
   engine.clock.deterministic = false;
   engine.quality.deterministic = false;
   engine.start();

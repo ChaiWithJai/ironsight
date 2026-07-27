@@ -124,3 +124,27 @@ registerShot({
     ctx.poseCamera([182, 9.2, -96], [-260, 150, -30], 58);
   },
 });
+
+/*
+ * ROUND 4 changed no camera in this file. Three candidate re-stages were shot
+ * and measured and all three were rejected:
+ *
+ *  - YAWING sky_golden off the sun to open a blue quarter of the dome puts a
+ *    warehouse wall across the frame from this standing position (five poses at
+ *    275°–325° captured; every one of them is a flat wall at 12 m).
+ *  - PITCHING UP to reach the elevation where the dome is blue costs §7.2. The
+ *    rule is ±6 % of H on every registered shot camera; this pose sits at 5.0 %
+ *    and the sky first holds measurable blue at ~15° of elevation on the
+ *    cross-sun azimuth and ~45° on the sun's own, which on a 40° lens is 30 % of
+ *    H. Ten pitch/FOV combinations were captured to confirm it. The frames that
+ *    look best (13–17° of pitch on a 56° lens, a dark cloud bank over a burning
+ *    horizon) are exactly the ones that read as a drone camera.
+ *  - MOVING THE CLOUD DECK by changing the shot's wind does nothing: the deck's
+ *    drift is a function of the hour, not of wind speed, so eight wind settings
+ *    from 0.5 to 11 m/s produced eight identical frames.
+ *
+ * So sky_golden is a contre-jour frame at 7° off an 11° sun and its sky is warm
+ * from edge to edge, which is what that sightline is. The round-4 sky work is in
+ * the dome and the cloud march, not here; the shots that show the dome's blue
+ * are the ones that look away from the sun.
+ */

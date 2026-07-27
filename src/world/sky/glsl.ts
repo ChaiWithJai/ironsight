@@ -308,9 +308,30 @@ vec3 ironHazeRadiance(vec3 dir, vec3 sunDir, vec3 sunChroma, float turbidity, fl
   // horizon matters most.
   float sunOcc = mix(0.5 + 0.5 * IRON_HAZE_GOCC, 1.0, aboveEye);
 
+  // THE SUNWARD EXCESS DECAYS FASTER WITH ELEVATION THAN THE DOME DOES, AND
+  // THAT IS THE ROUND-4 PLATEAU FIX.
+  //
+  // §2.4's 9 000 cd/m² is a HORIZON row — "within 20° of the sun AZIMUTH" — and
+  // at the horizon azimuth and angle-from-the-sun are the same quantity, so the
+  // spec cannot distinguish them. Carrying that row up the dome on the same g as
+  // the rest of the anchors does distinguish them, wrongly: it hands the full
+  // sunward excess to every direction at the sun's azimuth regardless of how far
+  // above the sun it is, and Mie forward scattering falls off with the ANGLE FROM
+  // THE SUN, not with azimuth. The visible result was the round-4 finding —
+  // "roughly x700-1500 / y0-400, about 15 % of the frame at near-clip white
+  // carrying no information" — because every contre-jour shot on the roster
+  // frames 0–25° of elevation on the sun's azimuth and all of it was being
+  // handed the horizon row.
+  //
+  // Splitting the sunward anchor into "the cross-sun dome" plus "the forward
+  // scattering excess on top of it", and giving only the EXCESS the tighter
+  // exponent, leaves the horizon exactly on §2.4 (both exponents are 1 at
+  // up = 0) and pulls 20° of elevation above the sun down by a third.
+  float gSun = min(1.0, pow(max(0.0, 1.0 - up), 4.5));
   vec3 anti  = mix(IRON_ANCHOR_ZENITH, IRON_ANCHOR_H_ANTI, g) * groundOcc;
   vec3 cross_ = mix(IRON_ANCHOR_ZENITH, IRON_ANCHOR_H_CROSS, g) * groundOcc;
-  vec3 sunward = mix(IRON_ANCHOR_ZENITH, IRON_ANCHOR_H_SUN, g) * groundOcc;
+  vec3 sunward = (mix(IRON_ANCHOR_ZENITH, IRON_ANCHOR_H_CROSS, g)
+                + (IRON_ANCHOR_H_SUN - IRON_ANCHOR_H_CROSS) * gSun) * groundOcc;
 
   // The azimuthal blend is pow(cos, 5) toward the sun and pow(cos, 1.5) away.
   //
@@ -434,8 +455,19 @@ vec3 ironSkyChroma(vec3 c) {
   float cool = clamp(-bias, 0.0, 1.0);
   // The two branches are separate ramps because the two failures are separate
   // and were measured on different frames — see the COOL BRANCH note above.
+  //
+  // ── ROUND 4 RESCALED THE COOL BRANCH, BECAUSE ITS PREMISE MOVED ────────────
+  //
+  // 2.4 was fitted against a dome whose upper half was sitting two and a half
+  // stops below §2.4's table (see the round-4 note in dome.ts) and whose blue
+  // was therefore being read off a near-black sky. With the level fixed, the
+  // same 2.4 measured S 0.70 at the zenith against §2.4's 0.17 and the corpus'
+  // 0.21 — an expansion designed to undo shoulder compression, applied to a
+  // value that is no longer anywhere near the shoulder. 1.30 restores the
+  // measured target; the warm branch is untouched because the sun-side horizon
+  // genuinely does sit at display 0.95 and genuinely does lose its chroma there.
   float gain = mix(1.0, 2.6, smoothstep(0.02, 0.13, warm))
-             + mix(0.0, 2.4, smoothstep(0.06, 0.34, cool));
+             + mix(0.0, 0.30, smoothstep(0.06, 0.34, cool));
   return max(vec3(0.0), mix(vec3(lum), c, gain));
 }
 `;

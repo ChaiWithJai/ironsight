@@ -28,7 +28,7 @@ import * as THREE from 'three';
 import { CollisionGroup, SurfaceId, type Rng } from '@/engine/types';
 import type { LevelBuild } from '@/level/build';
 import { railing, stairs } from '@/level/kit/detail';
-import { blockChip, groundSkirt, propFoot, rubblePile } from '@/level/kit/ground';
+import { blockChip, groundSkirt, propFoot, rubblePile, seamDebris } from '@/level/kit/ground';
 import { wallPanel, type Opening } from '@/level/kit/wall';
 import { barrel, crateStack, lowWall, marketStall, sandbagWall } from '@/level/dressing';
 import { ALPHA_SQUARE, MARKET_HALL, MINARET, MOSQUE } from '@/level/layout';
@@ -120,7 +120,10 @@ function arcadeRun(
     // calls a hard column-meets-floor line the commonest amateur tell and round
     // 2 found it on every pier in this colonnade.
     b.m(trim).chamferBox(px, 0.075, -thickness / 2, pier / 2 + 0.05, 0.075, thickness / 2 + 0.05, 0.028, 1, rng, 0.14);
-    propFoot(b, px, 0.008, 0.03, pier * 0.62, rng, 'sand', false);
+    // The SQUARE-facing foot carries chips and grit; the inner one does not.
+    // Outside is where spall, gravel and windblown grit actually collect, and it
+    // is the face every frame of this arcade is shot from.
+    propFoot(b, px, 0.008, 0.03, pier * 0.62, rng, 'sand', true);
     propFoot(b, px, 0.008, -thickness - 0.03, pier * 0.55, rng, 'sand', false);
   }
   return piers;
@@ -207,6 +210,40 @@ export function buildMarketHall(b: LevelBuild, ground: Ground, rng: Rng): Footpr
           blockChip(b, rng.bool(0.6) ? 'rubble' : 'sandstone', rx, -0.38, rz, rng.range(0.13, 0.3), rng);
         }
       }
+    }
+  }
+
+  /**
+   * THE PLINTH'S OWN FOOT — round 3, `weapon_ads`, severity 8.
+   *
+   * The plinth stones above are individually shaped, chamfered and phased, and
+   * they still terminated on the paving along one dead-straight line running the
+   * full width of the frame: *"terminate against unchanged ground albedo on both
+   * sides — no dirt buildup, decal, rubble or vegetation breaking any seam"*.
+   * Varying the OBJECT does nothing for the SEAM; the seam needs its own
+   * geometry, which is what `seamDebris` is — a noise-modulated fillet whose
+   * outer edge dies 2 cm below the paving so it terminates by intersection
+   * rather than on an edge, plus spall banked into the angle.
+   *
+   * `y` is the paved surface in the hall's local frame: `floorY = gMax + 0.34`
+   * and the square's slab sits 0.12 above the terrace, so the paving is at
+   * `0.12 − 0.34 = −0.22`. Derived, not measured off a screenshot, so it stays
+   * correct if the plinth height is ever retuned.
+   */
+  {
+    const pavY = 0.12 - 0.34;
+    // Mean outer face of the plinth run: hz/hx + 0.5 + the mean 0.32 projection.
+    const outZ = hz + 0.82;
+    const outX = hx + 0.82;
+    const runX = hx + 0.85;
+    const runZ = hz + 0.85;
+    for (const [ax, az, bx, bz, ix, iz] of [
+      [-runX, outZ, runX, outZ, 0, 1],
+      [runX, -outZ, -runX, -outZ, 0, -1],
+      [outX, runZ, outX, -runZ, 1, 0],
+      [-outX, -runZ, -outX, runZ, -1, 0],
+    ] as const) {
+      seamDebris(b, ax, az, bx, bz, pavY, ix, iz, rng, { amount: 1.35, chipMat: 'sandstone' });
     }
   }
 

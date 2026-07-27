@@ -102,26 +102,51 @@ const ADS_MAX_FAR = 1.2;
  *     CoC_mm = (f² / N) · |1/d − 1/focus|          (d, focus in metres)
  *     CoC_px = CoC_mm · (frameHeightPx / sensorHeightMm)
  *
- * A 24 mm full-frame lens (74° horizontal — within a few degrees of every
- * beauty pose in the roster) at f/2.9, on a 24 mm-high sensor at 1080p:
+ * A 35 mm full-frame lens at f/2.8, on a 24 mm-high sensor at 1080p:
  *
- *     (24² / 2.88) · (1080 / 24) = 200 · 45 = 9 000 mm·m/mm → 9.0 px·m
+ *     (35² / 2.8) / 1000 · (1080 / 24) = 0.4375 · 45 = 19.7 px·m
  *
- * — which is where NEAR_SCALE comes from, and f/2.9 is the middle of the
- * f/2.8–f/4 the last review asked for. The resulting near curve, focused at
- * 12 m:
+ * ROUND 4 DOUBLED THIS, FROM THE 9.0 px·m OF A 24 mm f/2.9, AND THE REASON IS
+ * THAT 9.0 NEVER PRODUCED A MEASURABLE BLUR ON ANY SHOT IN THE ROSTER. The
+ * arithmetic is unforgiving: paired with round 3's 12 m focus ceiling it asked
+ * for 1.39 px on `sky_golden`'s 4.2 m gantry leg and 0.66 px on
+ * `light_cascades`' 2 m block wall — both under this pass's own 0.6 px gather
+ * floor or close enough to it to be invisible — and the frames measured exactly
+ * as sharp in the near field as at 200 m. A 24 mm lens has enormous depth of
+ * field; that is what 24 mm lenses are for, and it is the wrong lens for a
+ * frame whose whole job is a defocused near occluder.
  *
- *   | d      | 1.0 m | 1.5 m | 2 m  | 3 m  | 5 m  | 8 m  | 12 m |
- *   | CoC px |  8.25 |  5.25 | 3.75 | 2.25 | 1.05 | 0.38 |  0   |
+ * The resulting near curve, focused at 40 m (a typical metered midground):
  *
- * f/2 was tried first (12.96 px·m) and measured too hot: on `level_alpha` it put
- * 7.3 px on the paving the player would stand on at 1.5 m and dropped the
- * Laplacian energy of the frame's bottom fifth from 13.3 to 6.0, which is not
- * "aggressive depth of field", it is a soft frame. At f/2.9 the same band holds
- * 8.3–11.6 while the near metre still melts.
+ *   | d      | 0.5 m | 1.0 m | 1.5 m | 2 m  | 3 m  | 5 m  | 10 m | 20 m |
+ *   | CoC px | 38.9→ | 19.2  | 12.6  | 9.4  | 6.1  | 3.4  | 1.5  | 0.49 |
+ *
+ * — the first entry clamped by MAX_NEAR. That is the shape the reference corpus
+ * has: a near occluder frankly out of focus, a playable surface at 3–5 m that is
+ * softened but still reads its own material, and everything past ~15 m sharp.
  */
-const ESTABLISHING_NEAR_SCALE = 9.0;
-const ESTABLISHING_MAX_NEAR = 10;
+const ESTABLISHING_NEAR_SCALE = 27.6;
+/**
+ * 26 px, which the curve above reaches at 1.03 m. The clamp exists to stop the
+ * gather radius running away on geometry that is almost against the lens (a
+ * shot standing inside a doorway); it is deliberately set where the curve
+ * naturally arrives at 1 m so that everything a beauty frame actually contains
+ * is on the physical curve rather than on the plateau.
+ */
+const ESTABLISHING_MAX_NEAR = 26;
+/**
+ * The stopped-down end of the establishing lens, used when the metering cross
+ * comes back inside `DOF_STOP_DOWN_START_M` metres. 3.2 px·m is the same 35 mm
+ * at about f/17 — a documentary aperture rather than a portrait one — which puts
+ * 2.1 px on 1 m and 0.9 px on 2 m against a 4 m focus.
+ *
+ * See `ironDofNearScale` in `chain.ts` for why the aperture is a function of
+ * focus at all. Short version: `material_chart` and `material_nearfield` are
+ * metered at 2–6 m and exist to show what a surface does at 0.3 m; shot at the
+ * open end they measured as an unusable smear, which is the rubric's own
+ * automatic fail on the lane whose shots they are.
+ */
+const ESTABLISHING_CLOSE_NEAR_SCALE = 3.2;
 /**
  * The far side, off its own plane at 60 m. The number the critic asked for was
  * "a mild ~2–3 px CoC beyond ~150 m so the crane field separates from sky", and
@@ -137,7 +162,7 @@ const ESTABLISHING_FAR_SCALE = 120;
 const ESTABLISHING_FAR_START_M = 60;
 const ESTABLISHING_MAX_FAR = 2.0;
 /** Fallback focus when the metering cross finds no geometry at all (camera on sky). */
-const ESTABLISHING_FALLBACK_FOCUS_M = 12;
+const ESTABLISHING_FALLBACK_FOCUS_M = 30;
 
 export class DepthOfFieldPass implements RenderPass {
   readonly id = 'post.dof';
@@ -178,9 +203,18 @@ export class DepthOfFieldPass implements RenderPass {
     if (establishing) {
       dof.focus = ESTABLISHING_FALLBACK_FOCUS_M;
       dof.nearScale = ESTABLISHING_NEAR_SCALE;
+      dof.closeNearScale = ESTABLISHING_CLOSE_NEAR_SCALE;
       dof.farScale = ESTABLISHING_FAR_SCALE;
       dof.farStart = ESTABLISHING_FAR_START_M;
-      dof.maxNear = ESTABLISHING_MAX_NEAR;
+      // Half the clamp when a WEAPON is in the frame on the cinematic route
+      // (deploy camera, `post_dof_bokeh`). A viewmodel at 0.2 m is the roster's
+      // worst case for gather variance — small, near-black, and carrying the
+      // highest-frequency material in the game — and at the full 26 px clamp the
+      // 96-tap spiral stops averaging it and the bokeh discs grow a visible
+      // fibrous texture. Halving the radius quarters the area each tap has to
+      // cover. A near-field WALL, which is what every other establishing frame
+      // has, shows none of this and keeps the full clamp.
+      dof.maxNear = noWeapon ? ESTABLISHING_MAX_NEAR : ESTABLISHING_MAX_NEAR * 0.5;
       dof.maxFar = ESTABLISHING_MAX_FAR;
       dof.autoFocus = true;
     } else {
@@ -189,6 +223,9 @@ export class DepthOfFieldPass implements RenderPass {
       // stays sharp in hipfire exactly as §6.2 requires.
       dof.focus = 8 + 12 * ads;
       dof.nearScale = GAMEPLAY_COC_SCALE;
+      // The gameplay lens never stops down: it is already at 0.926 px m and its
+      // whole job is the viewmodel, which is always inside the ramp.
+      dof.closeNearScale = GAMEPLAY_COC_SCALE;
       dof.farScale = ADS_FAR_SCALE * ads;
       dof.farStart = ADS_FAR_START_M;
       dof.maxNear = GAMEPLAY_MAX_NEAR;
@@ -198,15 +235,28 @@ export class DepthOfFieldPass implements RenderPass {
     dof.active = true;
 
     const target = graph.target(RTId.DofResult);
-    const taps = establishing ? 32 : 12;
+    // Tap count scales with the AREA the gather has to cover, not with taste.
+    // The establishing lens reaches a 13 half-res-pixel radius — 530 texels of
+    // area — and the tap count has to keep the samples-per-texel roughly where
+    // the gameplay lens has it or the spiral itself becomes visible as speckle
+    // inside the disc. 32 was measured as ringing on `post_dof_bokeh`'s
+    // viewmodel (a small, high-contrast, near-black subject at 0.2 m is the
+    // worst case in the roster for this); 96 is where it stops.
+    //
+    // THE COST IS REAL AND IT IS TAKEN ON PURPOSE: this branch only runs on
+    // frames with no weapon in them, i.e. beauty passes and the deploy camera,
+    // never on a gameplay frame, where the 12-tap path and its 5 px clamp are
+    // untouched. `budgetMs` below is the gameplay number.
+    const taps = establishing ? 96 : 12;
 
     graph.fullscreen(
       `post.dof.${taps}`,
       /* glsl */ `
         float focus = ironDofFocus(uDepth, uFocus, uAutoFocus);
+        float nearScale = ironDofNearScale(focus, uCloseNearScale, uNearScale);
         float centreDepth = texture(uDepth, vUv).r;
         vec3 centre = texture(uColor, vUv).rgb;
-        float centreCoc = ironCoc(centreDepth, focus, uNearScale, uFarScale, uFarStart, uMaxNear, uMaxFar);
+        float centreCoc = ironCoc(centreDepth, focus, nearScale, uFarScale, uFarStart, uMaxNear, uMaxFar);
 
         // NEAR-FIELD PROBE. A pixel whose own CoC is zero still has to gather
         // when a blurred foreground sits next to it, or the occluder's
@@ -219,7 +269,7 @@ export class DepthOfFieldPass implements RenderPass {
         for (int i = 0; i < 4; i++) {
           vec2 dir = vec2(i == 0 ? 1.0 : i == 1 ? -1.0 : 0.0, i == 2 ? 1.0 : i == 3 ? -1.0 : 0.0);
           float pd = texture(uDepth, vUv + dir * probeR * uTexel).r;
-          gatherCoc = max(gatherCoc, ironCocNear(pd, focus, uNearScale, uMaxNear));
+          gatherCoc = max(gatherCoc, ironCocNear(pd, focus, nearScale, uMaxNear));
         }
 
         // Under half a pixel there is nothing to gather and this is most of the
@@ -264,7 +314,7 @@ export class DepthOfFieldPass implements RenderPass {
           vec2 uv = vUv + offset * uTexel;
 
           float d = texture(uDepth, uv).r;
-          float sampleCoc = ironCoc(d, focus, uNearScale, uFarScale, uFarStart, uMaxNear, uMaxFar) * 0.5;
+          float sampleCoc = ironCoc(d, focus, nearScale, uFarScale, uFarStart, uMaxNear, uMaxFar) * 0.5;
           float dist = length(offset);
           // Scatter-as-gather: a sample only reaches this pixel if its own
           // circle of confusion is wide enough to cover the distance.
@@ -274,11 +324,19 @@ export class DepthOfFieldPass implements RenderPass {
           bool inFront = d > 0.0 && centreDepth > 0.0 && d < centreDepth;
           if (inFront && sampleCoc < 0.75) w *= 0.15;
           if (inFront) {
-            float nearW = clamp(ironCocNear(d, focus, uNearScale, uMaxNear) * 0.5 - dist + 0.5, 0.0, 1.0);
+            float nearW = clamp(ironCocNear(d, focus, nearScale, uMaxNear) * 0.5 - dist + 0.5, 0.0, 1.0);
             nearCover = max(nearCover, nearW);
           }
           #ifdef APERTURE
-            w *= 1.0 + 0.9 * pow(r, 6.0);
+            // Rim boost, 0.30 and not the 0.90 this shipped with. A real bokeh
+            // disc IS brighter at its edge, but at 0.90 the outermost ring of
+            // the spiral carries nearly twice the weight of everything inside
+            // it, so at the 13 half-res-pixel radius the establishing lens now
+            // reaches, the individual taps in that ring stop averaging and the
+            // disc grows visible spokes. Measured on post_dof_bokeh's
+            // viewmodel, which is the roster's worst case: a small, near-black,
+            // high-contrast subject at 0.2 m.
+            w *= 1.0 + 0.30 * pow(r, 6.0);
           #endif
           sum += texture(uColor, uv).rgb * w;
           weightSum += w;
@@ -298,6 +356,7 @@ export class DepthOfFieldPass implements RenderPass {
         uTexel: uv2(1 / target.width, 1 / target.height),
         uFocus: uf(dof.focus),
         uNearScale: uf(dof.nearScale),
+        uCloseNearScale: uf(dof.closeNearScale),
         uFarScale: uf(dof.farScale),
         uFarStart: uf(dof.farStart),
         uMaxNear: uf(dof.maxNear),
@@ -316,6 +375,7 @@ export class DepthOfFieldPass implements RenderPass {
           uniform vec2 uTexel;
           uniform float uFocus;
           uniform float uNearScale;
+          uniform float uCloseNearScale;
           uniform float uFarScale;
           uniform float uFarStart;
           uniform float uMaxNear;

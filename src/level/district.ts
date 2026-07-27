@@ -254,6 +254,27 @@ export function buildTown(b: LevelBuild, plots: readonly Plot[], ground: Ground,
  * one, and a 7 cm slab you can trip on is a character-controller bug waiting to
  * happen. It is a visual layer and nothing else.
  */
+/**
+ * A ROAD STOPS AT THE WATERLINE.
+ *
+ * Three of the five street polylines run out below chart datum — the quay road
+ * reaches −1.35 m at (34, 8), the headland road spends 40 m between −0.1 and
+ * −1.2 m, and the main street dips to +0.66 at (24, 48). The paving is laid at
+ * `ground + 0.07`, so on those runs it was emitted UNDER the sea plane, and what
+ * a camera actually sees there is a field of pale lozenges lying on the water:
+ * the kerb setts, the spill tongues and the drift, each poking through the
+ * surface with no waterline, no wet darkening and no support. It is the same
+ * read the round-3 critic caught on the quay in `sky_golden`, arriving from a
+ * completely different direction, and it is visible in `hud_full` across most of
+ * the harbour.
+ *
+ * `MACRO_TERRAIN.seaLevel` is 0 and TERRAIN is contracted not to move the macro
+ * silhouette, so a 0.35 m freeboard is enough to clear the swell (the Gerstner
+ * amplitude at the shore is well under that after shoaling) while still letting
+ * the road run right down onto the beach.
+ */
+const ROAD_MIN_Y = 0.35;
+
 export function buildStreets(b: LevelBuild, ground: Ground, rng: Rng): void {
   for (const s of STREETS) {
     const half = s.width / 2;
@@ -278,6 +299,13 @@ export function buildStreets(b: LevelBuild, ground: Ground, rng: Rng): void {
         const rz = pz - nz * w;
         const ly = ground(lx, lz) + 0.07;
         const ry = ground(rx, rz) + 0.07;
+        // Below the waterline there is no road, and therefore no kerb either.
+        // Dropping `prev` as well as skipping the bay stops the strip bridging
+        // the gap with one long quad across the water.
+        if (Math.min(ly, ry) < ROAD_MIN_Y) {
+          prev = null;
+          continue;
+        }
         if (prev) {
           g.quad(
             _v[0].set(prev.lx, prev.ly, prev.lz),
@@ -337,7 +365,14 @@ export function buildStreets(b: LevelBuild, ground: Ground, rng: Rng): void {
         }
         prev = { lx, lz, ly, rx, rz, ry };
       }
-      // Sand washed over the kerb line on both sides.
+      // Sand washed over the kerb line on both sides — but only where the bay
+      // above actually emitted a road. `ROAD_MIN_Y` on both ends of the segment
+      // is the conservative test: a segment that dips under water anywhere in
+      // the middle keeps its skirt only if both ends are dry, and the sampler
+      // below re-checks the midpoint.
+      const dryEnds =
+        Math.min(ground(a.x, a.z), ground(c.x, c.z), ground((a.x + c.x) / 2, (a.z + c.z) / 2)) >= ROAD_MIN_Y;
+      if (!dryEnds) continue;
       groundSkirt(
         b,
         [

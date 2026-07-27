@@ -153,11 +153,65 @@ const AO_PRELUDE = /* glsl */ `
   uniform vec4 uAoParams2;
   /** [ view-space direction TOWARD the sun, contact-march length in metres ] */
   uniform vec4 uSunView;
+  /** World UP in view space. Separates sky occlusion from ground occlusion. */
+  uniform vec4 uUpView;
 
   const float IRON_PI = 3.14159265359;
   const float IRON_HALF_PI = 1.57079632679;
-  /** Receiver-plane rejection threshold, sin(angle above the tangent plane). */
-  const float IRON_AO_PLANE_BIAS = 0.03;
+  /**
+   * Receiver-plane rejection threshold, sin(angle above the tangent plane).
+   *
+   * 0.10 (5.7 deg), up from 0.03 (1.7 deg). The normal fix-up below tilts N by
+   * up to 3.4 deg to keep the slice angle inside +-90 deg, and a rejection
+   * threshold SMALLER than that tilt is no threshold at all: every tap along a
+   * grazing surface lands above its own bent tangent plane and the surface
+   * occludes itself. 5.7 deg clears the tilt with margin and is still far below
+   * the angle at which a real crease opens - a right-angled floor/wall joint
+   * presents its occluders at ~45 deg (plane ~= 0.7), seven times the threshold.
+   */
+  const float IRON_AO_PLANE_BIAS = 0.10;
+  /**
+   * THE SKY HORIZON ONLY COUNTS OCCLUDERS THAT ARE ACTUALLY IN THE SKY.
+   *
+   * G is multiplied into the environment probe, and that probe is DIRECTIONAL:
+   * 'sky-ambient.ts' already puts the sky in the upper hemisphere and the ground
+   * bounce in the lower one, and three's irradiance lookup already weights them
+   * by the surface normal. So a vertical wall standing on open pavement has
+   * already been given exactly the half-dome plus half-bounce it can see. A
+   * full-hemisphere horizon integral then measures the pavement as an OCCLUDER —
+   * it is genuinely in the wall's hemisphere — and multiplies the wall's
+   * irradiance by ~0.5 a second time, for a quantity that was never missing.
+   * Measured on 'light_cascades': the near CMU wall, one flat plane open to the
+   * whole sky, came back at 0.07 sky visibility on its far half, which took the
+   * shaded face to display luma 3 against a sunlit 244 — the 78:1 the round-3
+   * critique measured, and physically impossible under a luma-174 sky.
+   *
+   * So the far horizon weights each occluder by its ELEVATION above the
+   * receiver: something overhead removes sky and counts in full, something at
+   * the receiver's own level counts a little (a facing wall does take the
+   * horizon down), and the floor in front of a wall counts for nothing because
+   * it is not sky and it is already in the cube's lower lobe. This is the
+   * difference between an ambient-occlusion factor and a sky-visibility factor,
+   * and only the second one may touch a directional probe.
+   *
+   * The band is placed so that the horizontal — an occluder at the receiver's
+   * own height, i.e. a facing wall's midline — lands at ~0.25 rather than 0.
+   */
+  const float IRON_SKY_UP_LO = -0.12;
+  const float IRON_SKY_UP_HI = 0.55;
+  /**
+   * Floor on the SKY visibility the horizon march is allowed to report.
+   *
+   * LOOK_SPEC §2.5: an ENCLOSED shadow — an alley, under a truck, a wall base —
+   * bottoms out at 0.15–0.30 sky visibility, and that is the deepest state the
+   * spec contemplates anywhere in an exterior frame. A screen-space estimate
+   * that returns less than that is not measuring a darker place, it is failing:
+   * it has no information about geometry off-screen or behind the depth buffer,
+   * and its errors are all in the same direction because a missed occluder can
+   * only ever be missed, never invented. Clamping here is what makes the AO
+   * ATTENUATE the ambient probe instead of replacing it.
+   */
+  const float IRON_SKY_VIS_FLOOR = 0.16;
   /** Large-radius (sky) occlusion exponent — see the note where it is applied. */
   const float IRON_AO_SKY_EXPONENT = 0.95;
   /** Short-radius (contact) occlusion exponent. Absolute, not a multiple of the sky one. */
@@ -204,6 +258,12 @@ function aoBody(slices: number, steps: number): string {
   vec3 P = ironViewPos( vUv, depth );
   vec3 N = normalize( g.rgb );
   vec3 V = normalize( -P );
+  // The RASTERISED normal, kept unbent. The fix-up below tilts N by up to 3.4°
+  // to keep the slice angle inside ±90°, which is more than the 1.7° receiver-
+  // plane bias — so on any grazing surface the wall's own taps ended up above
+  // its own bent tangent plane and it occluded itself to black. The rejection
+  // test has to run against the plane the rasteriser actually wrote.
+  vec3 Ngeo = N;
 
   // A VISIBLE fragment's normal must face the viewer, and on low-poly geometry
   // seen at a grazing angle it routinely does not — a column's narrow side face
@@ -294,10 +354,11 @@ function aoBody(slices: number, steps: number): string {
         //
         // 0.03 is about 1.7°, enough to swallow half-res depth reconstruction
         // error on a plane and far below the angle at which a real crease opens.
-        float plane = dot( d, N ) / max( len, 1e-4 );
+        float plane = dot( d, Ngeo ) / max( len, 1e-4 );
         if ( plane > IRON_AO_PLANE_BIAS ) {
           float w = clamp( 1.0 - ( len - uAoParams.y ) / uAoParams.z, 0.0, 1.0 );
-          cFarB = max( cFarB, mix( -1.0, c, w ) );
+          float sky = smoothstep( IRON_SKY_UP_LO, IRON_SKY_UP_HI, dot( d, uUpView.xyz ) / max( len, 1e-4 ) );
+          cFarB = max( cFarB, mix( -1.0, c, w * sky ) );
           if ( len <= uAoParams.x ) cNearB = max( cNearB, c );
           if ( len <= uAoParams2.x ) cMicroB = max( cMicroB, c );
         }
@@ -308,10 +369,11 @@ function aoBody(slices: number, steps: number): string {
         vec3 d = ironViewPos( vUv - offset, sa.a ) - P;
         float len = length( d );
         float c = dot( d, V ) / max( len, 1e-4 );
-        float plane = dot( d, N ) / max( len, 1e-4 );
+        float plane = dot( d, Ngeo ) / max( len, 1e-4 );
         if ( plane > IRON_AO_PLANE_BIAS ) {
           float w = clamp( 1.0 - ( len - uAoParams.y ) / uAoParams.z, 0.0, 1.0 );
-          cFarA = max( cFarA, mix( -1.0, c, w ) );
+          float sky = smoothstep( IRON_SKY_UP_LO, IRON_SKY_UP_HI, dot( d, uUpView.xyz ) / max( len, 1e-4 ) );
+          cFarA = max( cFarA, mix( -1.0, c, w * sky ) );
           if ( len <= uAoParams.x ) cNearA = max( cNearA, c );
           if ( len <= uAoParams2.x ) cMicroA = max( cMicroA, c );
         }
@@ -347,7 +409,7 @@ function aoBody(slices: number, steps: number): string {
   // that a real horizon integral does not justify, and it was costing exactly
   // the material readability the blind A/B was losing on. 0.95 is a mild
   // de-exaggeration; the contact band below keeps its own, much stronger, one.
-  aoFar = pow( aoFar, IRON_AO_SKY_EXPONENT );
+  aoFar = max( pow( aoFar, IRON_AO_SKY_EXPONENT ), IRON_SKY_VIS_FLOOR );
   // The contact term carries a stronger exponent than the sky term on purpose.
   // The rubric asks for "darkening ... where every object meets the ground" and
   // for that band to be DARKER than the cast shadow it sits inside; a horizon
@@ -490,7 +552,9 @@ export class Gtao {
     value: new THREE.Vector4(RADIUS_MICRO, 2.6, 0, 0),
   };
   private readonly uSunView: GpuUniform<THREE.Vector4> = { value: new THREE.Vector4(0, 0, -1, 0) };
+  private readonly uUpView: GpuUniform<THREE.Vector4> = { value: new THREE.Vector4(0, 1, 0, 0) };
   private readonly sunView = new THREE.Vector3();
+  private readonly upView = new THREE.Vector3();
   private readonly uGbuffer: GpuUniform<THREE.Texture | null> = { value: null };
   private readonly uAo: GpuUniform<THREE.Texture | null> = { value: null };
   private readonly uBlurRadius: GpuUniform<number> = { value: 1.35 };
@@ -607,6 +671,10 @@ export class Gtao {
     } else {
       this.uSunView.value.set(0, 0, -1, 0);
     }
+    // World up, rotated into view space — the axis the sky/ground split in the
+    // far horizon is measured along. Same direction-only transform as the sun.
+    this.upView.set(0, 1, 0).transformDirection(camera.matrixWorldInverse);
+    this.uUpView.value.set(this.upView.x, this.upView.y, this.upView.z, 0);
     const slices = THREE.MathUtils.clamp(settings.slices, 1, 4);
     const steps = THREE.MathUtils.clamp(settings.stepsPerSlice, 2, 8);
     graph.fullscreen(
@@ -618,6 +686,7 @@ export class Gtao {
         uAoParams: this.uAoParams as GpuUniform,
         uAoParams2: this.uAoParams2 as GpuUniform,
         uSunView: this.uSunView as GpuUniform,
+        uUpView: this.uUpView as GpuUniform,
       },
       raw,
       { prelude: AO_PRELUDE + contactShadowFn(CONTACT_STEPS) },

@@ -116,7 +116,7 @@ export const AGX_CONTRAST_GAMMA = 1.2143;
  * have shadowed content at all, against a corpus median of 2.4 % and §5.2's
  * ceiling of 5 %.
  */
-export const GRADE_BLACK_LIFT = 0.016;
+export const GRADE_BLACK_LIFT = 0.020;
 
 /**
  * THE BLACK POINT, and why it exists as a separate control from the toe lift
@@ -180,7 +180,45 @@ export const GRADE_BLACK_LIFT = 0.016;
  * curve now discriminates between "dark" and "not actually dark, just low",
  * which the sharp knee could not.
  */
-export const GRADE_BLACK_POINT = 0.080;
+/*
+ * ROUND 6 TOOK IT FROM 0.080 TO 0.030, AND THE EVIDENCE IS §5.2's OWN
+ * ACCEPTANCE ROW RATHER THAN AN OPINION ABOUT SHADOWS.
+ *
+ * §5.2: "fraction below display 8 < 5.0 %, target < 2 %", p0.1 in 3-20, p1 in
+ * 5-30. Measured at k = 0.080 on the central 80 % x 62 % crop:
+ *
+ *   | shot           | <8      | p0.1 | p1  | p50  |
+ *   | level_alpha    | 31.0 %  | 0.6  | 2.0 | 31.1 |
+ *   | light_cascades | 11.4 %  | 1.4  | 2.2 | 95.3 |
+ *   | sky_golden     |  9.9 %  | 0.5  | 1.2 | 84.0 |
+ *
+ * — every line out of band, in the same direction. The knee's own comment above
+ * records it being tuned when `level_bravo` measured 2.34 % below 8; the LIGHT
+ * lane has since taken several stops out of the shadow side, so a knee sized to
+ * recover the last few codes of an almost-black frame is now sitting on a third
+ * of the image. At n = 2 the knee is a 52 % darkening at L = 0.105 and a 13 %
+ * one at L = 0.29, and that is far too much authority to hold over content that
+ * is most of the frame.
+ *
+ * At k = 0.050, with GRADE_CONTRAST at 1.22 and against the LIGHT lane's
+ * re-worked ambient, §5.2's whole toe block comes back in band across the
+ * roster:
+ *
+ *   | shot           | <8     | p0.1 | p1   | p25  | p50   | p75   |
+ *   | sky_golden     | 0.81 % |  4.9 |  8.2 | 77.3 |  94.6 | 121.1 |
+ *   | light_cascades | 0.00 % | 16.0 | 24.2 | 54.7 |  99.0 | 160.6 |
+ *   | level_alpha    | 0.20 % |  6.2 | 12.9 | 45.3 |  66.4 | 113.3 |
+ *   | level_bravo    | 0.94 % |  4.2 |  8.2 | 58.9 | 109.0 | 165.2 |
+ *   | hud_full       | 2.59 % |  1.4 |  4.2 | 61.8 | 106.0 | 160.4 |
+ *   | §5.2           | < 5 %  | 3-20 | 5-30 | >= 55| 70-115| <= 150|
+ *
+ * — against 9.9-31.0 % below display 8, and p0.1 of 0.5-1.4, at k = 0.080.
+ * 0.050 rather than 0.030 because the LIGHT lane landed a much stronger sky
+ * fill between the two measurements: at 0.030 `light_cascades` came back with
+ * p0.1 = 19.4 and ZERO pixels under display 8, which is the milky no-blacks
+ * frame this constant exists to prevent, from the other direction.
+ */
+export const GRADE_BLACK_POINT = 0.050;
 /**
  * The knee exponent. 2, and it should not go below it: at n = 1 the rolloff is
  * a Reinhard and its error at the midtone is O(k/L), which is a visible ~10 %
@@ -266,7 +304,29 @@ export const GRADE_BLACK_KNEE_POWER = 2;
  *     d = v^(1/g)                                → 0.5 maps back to pivot
  */
 export const GRADE_CONTRAST_PIVOT = 0.44;
-export const GRADE_CONTRAST = 1.42;
+/*
+ * ROUND 6: 1.42 -> 1.22. The table below is the round-4 integration measurement
+ * and it already showed the trend running the wrong way at the bottom end —
+ * every step down moved p25 toward §5.2's 55 floor and p75 toward its 150
+ * ceiling, and 1.42 was where that walk stopped, not where it arrived.
+ *
+ * Re-measured after the LIGHT lane's shadow work, on the central crop:
+ *
+ *   | contrast | level_alpha p25/p50/p75 | light_cascades p25/p50/p75 | <8 (la/lc) |
+ *   | 1.42     |  5.7 /  31 / 128        | 25.1 /  95 / 189           | 31 % / 11 % |
+ *   | 1.22     | 13.7 /  45 / 117        | 38.7 / 102 / 182           | 7.3 % / 2.4 % |
+ *
+ * (Both rows at k = 0.080 and 0.030 respectively, before the LIGHT lane's
+ * ambient landed; the p75 column is the load-bearing one — §5.2 caps it at 150
+ * and 1.42 was overshooting it on every frame in the roster.)
+ *
+ * §5.2's own framing is the argument: "the image is NOT high-contrast — it is
+ * wide-range with a dense, low-placed midtone. A frame pushed to a crushed
+ * punchy curve reads as a filter, not a renderer." A 1.42 S about a pivot of
+ * 0.44 spends most of its authority below the pivot, which is where these
+ * frames now live.
+ */
+export const GRADE_CONTRAST = 1.22;
 
 /**
  * **The bloom threshold, in scene-linear-after-exposure — derived from the curve

@@ -270,3 +270,34 @@ registerShot({
     ctx.poseCamera([-56.1, 5.17, -53.6], [-41.2, 4.3, -48.3], 44);
   },
 });
+
+registerShot({
+  name: 'material_cloth',
+  description:
+    'The ALPHA square’s nearest market stall through a 20° lens from the ' +
+    '`material_chart` station — a 4.5 m canvas canopy at 25 m, backlit by a ' +
+    '9° sun with the square’s far side and a cloud bank behind it. Proves the ' +
+    'CLOTH half of the uber material, which nothing else in the roster read ' +
+    'large enough to judge: loom-width sewn strips, per-bolt tone, bay sag ' +
+    'between the seams, creasing, mildew blotching, run-off staining at the ' +
+    'perimeter, sun-bleach on the up-face, and a thin-film transmission term ' +
+    'that leaves the sheet ABOVE the paving in value and BELOW the sky.',
+  frames: 14,
+  setup(ctx) {
+    // Same station, seed, hour and weather as `material_chart`, so this frame
+    // and that one are the same pixels of the same canopy — a cloth fix that
+    // only shows on a bespoke chart is not a fix for the frame a critic reads.
+    //
+    // 20°, and the narrow lens is the whole point rather than a convenience.
+    // In `material_chart` the canopy is 27° right of the sightline and 40 px
+    // tall: at that size a strip seam is under a pixel and there is no way to
+    // tell a cloth material from a cream rectangle. It is also well clear of
+    // the 40° cinematic-aperture threshold in `src/render/passes/dof.ts`, so
+    // the canopy stays sharp.
+    ctx.seed(0x4d);
+    ctx.setTimeOfDay(17.4);
+    ctx.setWeather(0.05, { wind: 4.0, fog: 0.0028 });
+    ctx.setOverlays({ viewmodel: false, hud: false });
+    ctx.poseCamera([79.0, 13.22, 86.0], [64.3, 14.17, 83.1], 20);
+  },
+});

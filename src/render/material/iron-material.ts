@@ -347,9 +347,15 @@ const NO_SHEET: SheetProfile = { pitch: 0, depth: 0, plate: 0, rust: 0 };
 
 const SHEET: Partial<Readonly<Record<SurfaceId, SheetProfile>>> = {
   // The harbour's containers, the freighter's hull and every drum on the quay.
-  [SurfaceId.RustedMetal]: { pitch: 0.32, depth: 0.019, plate: 2.35, rust: 0.85 },
+  // Depth is the real ISO profile, not a conservative one. A corrugated
+  // container plate is pressed 30-36 mm deep on a 280-320 mm pitch — a 26°
+  // web, not the 18° a 19 mm depth gives — and under the backlight of
+  // `sky_golden` the web angle IS the read of the object, because the faces
+  // the camera sees have no key on them at all and everything comes from how
+  // much sky each facet of the rib can see.
+  [SurfaceId.RustedMetal]: { pitch: 0.32, depth: 0.030, plate: 2.35, rust: 0.85 },
   // Cranes, bollards, shed cladding: the paint is mostly still on.
-  [SurfaceId.PaintedMetal]: { pitch: 0.32, depth: 0.013, plate: 1.95, rust: 0.34 },
+  [SurfaceId.PaintedMetal]: { pitch: 0.32, depth: 0.021, plate: 1.95, rust: 0.34 },
   // Machined and structural stock — seams and bolts, no rolled rib.
   [SurfaceId.BareMetal]: { pitch: 0, depth: 0, plate: 1.55, rust: 0.16 },
   [SurfaceId.Grating]: { pitch: 0, depth: 0, plate: 1.20, rust: 0.55 },

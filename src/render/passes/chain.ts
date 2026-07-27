@@ -39,8 +39,13 @@ export interface DofParams {
   active: boolean;
   /** Focus distance in metres — the fallback when auto-focus finds no geometry. */
   focus: number;
-  /** px·m, applied where `d < focus`. */
+  /** px·m, applied where `d < focus`, once the lens has racked past `stopDownEnd`. */
   nearScale: number;
+  /**
+   * px·m, the near-side scale the lens uses when it is focused INSIDE
+   * `stopDownStart` metres. See `ironDofNearScale`.
+   */
+  closeNearScale: number;
   /** px·m, applied where `d > farStart`. */
   farScale: number;
   /**
@@ -71,6 +76,7 @@ export function createPostChainState(): PostChainState {
       active: false,
       focus: 8,
       nearScale: 0.926,
+      closeNearScale: 0.926,
       farScale: 0,
       farStart: 60,
       maxNear: 3,
@@ -83,25 +89,61 @@ export function createPostChainState(): PostChainState {
 /**
  * Auto-focus bounds for the establishing lens, in metres.
  *
- * The ceiling is the load-bearing one and it is 12, not the 60 that shipped
- * through three review rounds: the centre pixel is still what the lens meters,
- * but it may not rack PAST the near-mid field. `level_bravo`'s centre ray lands
- * on a quay shed at 48 m, and focusing there put 21 px of CoC on 5 m and 9.5 px
- * on 10 m — the entire deck the player stands on, which is the lower 45 % of
- * that frame. The reference corpus puts its bokeh on a near occluder and keeps
- * the playable surface readable.
+ * ROUND 4 PUT THE CEILING BACK TO 55 m, AND THAT IS ONLY SAFE BECAUSE THE
+ * APERTURE MOVED WITH IT. The 12 m ceiling was round 3's answer to `level_bravo`
+ * melting its own deck, and it worked — by making the lens incapable of putting
+ * bokeh on anything. Focused at 12 m, the 9.0 px·m aperture it shipped with put
+ * 1.4 px on `sky_golden`'s 4.2 m gantry leg and 0.7 px on `light_cascades`'
+ * 2 m block wall, i.e. nothing, and three critics measured exactly that: "there
+ * is zero depth of field", "the nearest object in the frame is the sharpest
+ * thing in it".
  *
- * The FLOOR is 1.0 m rather than 1.5, and that matters for a different reason:
- * the establishing lens is now selected by "this frame has no viewmodel in it"
- * rather than by a 40° FOV, which correctly catches every beauty pass in the
- * roster — including the close-range ones (`material_chart`, `bake_*`) whose
- * subject sits at half a metre. Metering those to 1.5 m would have thrown the
- * chart itself out of focus, which is the one thing those shots exist to show.
+ * The real fault was never the focus distance, it was that the aperture and the
+ * clamp were both set from `level_bravo`'s failure at once. `level_bravo`'s
+ * 21 px at 5 m needs a scale near 110 px·m; the lens now runs at 19.7 (see
+ * `passes/dof.ts`), which at a 48 m focus puts 3.4 px on 5 m and 9.1 px on 2 m —
+ * a readable deck under a soft near edge, which is what the corpus does.
+ *
+ * The FLOOR is 0.40 m. The establishing lens is selected by "this frame has no
+ * viewmodel in it", which correctly catches every beauty pass in the roster —
+ * including the close-range ones (`material_chart`, `bake_*`) whose subject sits
+ * at half a metre. At 19.7 px·m, clamping those up to 1.0 m would put 19 px of
+ * CoC on the chart itself, which is the one thing those shots exist to show.
  */
-export const ESTABLISHING_FOCUS_MIN_M = 1.0;
-export const ESTABLISHING_FOCUS_MAX_M = 12;
+export const ESTABLISHING_FOCUS_MIN_M = 0.4;
+export const ESTABLISHING_FOCUS_MAX_M = 55;
+
+/**
+ * Where the lens starts and finishes stopping down as it focuses closer, in
+ * metres. See `ironDofNearScale`.
+ */
+export const DOF_STOP_DOWN_START_M = 5;
+export const DOF_STOP_DOWN_END_M = 13;
 
 export const GLSL_COC = /* glsl */ `
+/**
+ * The near-side aperture, as a function of where the lens ended up focused.
+ *
+ * A FIXED APERTURE IS THE RIGHT MODEL FOR ONE LENS AND THE WRONG MODEL FOR A
+ * PHOTOGRAPHER, and the roster contains both kinds of frame. A landscape or an
+ * establishing shot is metered at 25-55 m and wants the near field frankly out
+ * of focus; a close study — material_chart, material_nearfield, the bake charts
+ * — is metered at 2-6 m and exists to show what a surface does at 0.3 m. Shot
+ * wide open, the second kind measured as an unusable smear: at 27.6 px m and a
+ * focus of 8 m, a wall at 1 m carries 24 px of CoC, and "surfaces that go smooth
+ * as the camera approaches" is the rubric's own automatic fail.
+ *
+ * Real practice resolves it the same way: you stop down for a close subject and
+ * open up for separation at distance. The ramp is on the METERED FOCUS, which is
+ * the only signal available that says which kind of frame this is, and it is
+ * computed identically here and in the full-resolution composite so the gather
+ * and the composite cannot disagree.
+ */
+float ironDofNearScale(float focus, float closeScale, float farScale) {
+  return mix(closeScale, farScale,
+    smoothstep(${DOF_STOP_DOWN_START_M.toFixed(1)}, ${DOF_STOP_DOWN_END_M.toFixed(1)}, focus));
+}
+
 /**
  * The CoC curve, shared by the gather and the full-resolution composite.
  * d <= 0 is the G-buffer's "no geometry" sentinel and is treated as infinity —

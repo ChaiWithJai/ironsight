@@ -556,8 +556,41 @@ vec4 ironCloudMarch(
     // the shape octave's billows are 267 m, hence 90–340. Sampling detail finer
     // than the stride is aliasing, and aliased lumpy noise is the shredded cloud
     // interior round 1 called texture corruption.
-    float erodeW = 1.0 - smoothstep(18.0, 70.0, dt);
-    float shapeW = 1.0 - smoothstep(90.0, 340.0, dt);
+    //
+    // ── ROUND 4 WIDENED BOTH, AND THE REASON IS THAT THE LIMIT WAS TWO-SIDED ──
+    //
+    // The round-4 blind A/B named the same tell first on both sheets: our cloud
+    // silhouettes are smooth rounded contours with no wispy dissipation at the
+    // margins, against a reference whose every cloud is torn and fibrous at its
+    // edge. That is what the band limit costs, and it was being paid at a
+    // distance where it did not have to be.
+    //
+    // The limit is a Nyquist argument about the stride, but a stride is a length
+    // ALONG THE RAY and a silhouette is structure ACROSS it. Aliasing along the
+    // ray is variance in the integral — which is what TAA converges, and which
+    // ironCloudJitter was built to hand it — while detail across the ray is
+    // resolved at whatever the pixel subtends. At the 4–12 km the deck is seen
+    // at on the roster's first-person shots, the 37 m erosion cell subtends
+    // 0.2–0.5°, i.e. 6–16 px at 1080p on a 40° lens: comfortably resolvable on
+    // screen, and comfortably past a stride that has grown to 200 m by then. The
+    // old thresholds therefore deleted every wisp from every distant cloud on
+    // the roster to suppress an aliasing that the temporal accumulator already
+    // owns.
+    //
+    // 28–110 and 140–470 is 1.5× the old reach on both octaves. 2.5×
+    // (45–180 / 200–620) was captured and compared crop-for-crop first: it
+    // carries visibly more edge detail still, and the faint straight-line hatch
+    // it appeared to introduce turned out on inspection to be present in the 1×
+    // frame too — it is a distant crane lattice ghosting through the deck, not
+    // the octave. 1.5× is kept anyway, as the setting whose extra detail is
+    // worth having at the 4–12 km the roster actually frames the deck at and
+    // which cannot be argued to be past Nyquist even for a stationary camera
+    // with no temporal accumulation. It is not
+    // unlimited: past ~600 m of stride the shape octave still goes to its mean,
+    // because at that point a single sample is spanning two whole billows and no
+    // amount of temporal averaging recovers a signal that was never sampled.
+    float erodeW = 1.0 - smoothstep(28.0, 110.0, dt);
+    float shapeW = 1.0 - smoothstep(140.0, 470.0, dt);
 
     // THE BUDGET IS TAPERED, NOT CUT. The fine march runs 'steps' grid cells
     // from the cell the scan handed it, so where it STOPS tracks the cloud's
@@ -649,18 +682,39 @@ vec4 ironCloudMarch(
     float powder = 1.0 - exp(-tauL * 2.0);
     // 1 at the anti-sun side, 0 once the view ray is inside ~65° of the sun.
     float powderW = 0.25 * smoothstep(0.42, -0.15, cosTheta);
-    // The deepest octave's extinction scale is 0.055, not 0.028, and that is the
-    // OTHER half of round 2's flat cloud. At 0.028 a core at τ ≈ 25 toward the
-    // sun still transmits 50 % of the fourth order, so the fourth order became a
-    // depth-independent floor under the whole cloud and no amount of
-    // self-shadowing could show through it. At 0.055 the same core transmits
-    // 25 %, which keeps the octave doing its job — giving a thick cloud a route
-    // to ~E/π — without letting it paint the base the same value as the crown.
+    // The octave extinction scales, and ROUND 4 MOVED THEM BACK TOWARD HILLAIRE.
+    //
+    // Rounds 2 and 3 walked the deepest octave from 0.028 to 0.055 to stop a
+    // thick core reading as a depth-independent floor. Round 4 measured what
+    // that costs on the ANTI-SUN side, which is where three of the roster's four
+    // cloud complaints live: "cloud sun-facing top at (1230,110) = luma 207.9,
+    // cloud interior core at (1330,180) = luma 207.6 … the underside only falls
+    // to 166.7".
+    //
+    // Measured against the corpus rather than against intuition. In
+    // reference/gameplay/bfv_gp_036 — the low-sun anchor, cumulus bank lit from
+    // behind — the CLOUD reads mean 132–158 against a CLEAR SKY at 210–222, i.e.
+    // a side-lit cumulus at low sun is roughly HALF the display value of the sky
+    // it sits against. Ours measured 211 against a sky at 205: brighter than the
+    // sky, which is the "flat white billboard" read stated as a number.
+    //
+    // At 100–140° from the sun the single-scatter lobe is worth ~0.019 sr⁻¹ and
+    // contributes almost nothing, so a back-lit cloud's radiance is ENTIRELY the
+    // multiple-scattering octaves plus the sky fill — and 0.055 gave the fourth
+    // octave 2.3× the reach Hillaire's own 0.5ⁿ schedule allows (0.125 at n = 3).
+    // The octaves were carrying a thick anti-sun interior to ~4 500 cd/m² against
+    // a 2 200–3 400 cd/m² sky.
+    //
+    // 0.40 / 0.17 / 0.095 is still two thirds of the way from the standard
+    // schedule toward the round-3 values — the fourth octave keeps 1.3× its
+    // textbook reach, which is what stops a genuinely thick SUN-SIDE core going
+    // hollow — while a back-lit interior lands under the sky it is seen against,
+    // as the corpus says it must.
     vec3 sun = sunIrradiance * (
         ph0 * exp(-tauL) * mix(1.0, powder * 1.7, powderW)
-      + ph1 * exp(-tauL * 0.320)
-      + ph2 * exp(-tauL * 0.115)
-      + ph3 * exp(-tauL * 0.055));
+      + ph1 * exp(-tauL * 0.400)
+      + ph2 * exp(-tauL * 0.170)
+      + ph3 * exp(-tauL * 0.095));
 
     // Sky fill, and it is NOT a constant across the cloud. A cloud top sees the
     // whole hemisphere; a base sees it through a kilometre of its own body. The
@@ -715,7 +769,18 @@ vec4 ironCloudMarch(
     // flatness of a very near, very thick cloud BASE is a real open defect; see
     // the report.
     float buried = 1.0 / (1.0 + tauL * 0.32 + upTau * 0.85);
-    float skyOcc = mix(0.44, 1.0, hh * hh) * (0.42 + 0.58 * buried);
+    // ROUND 4 LOWERED BOTH TERMS. 0.44/0.42 put a fully buried cloud BASE at
+    // 26 % of the horizon-band fill, i.e. ~1 360 cd/m² of sky light on top of
+    // whatever the octaves delivered, and the round-4 critics measured the
+    // consequence on two shots: "the underside at (1150,290) only falls to
+    // 166.7, a 20 % drop where a real cumulus shows 3-4x". Against the corpus
+    // (bfv_gp_036, cumulus bank at low sun) a base runs p2 = 22 against a p98 of
+    // 245 on the same cloud, so a real base is genuinely near-black and it is
+    // the FILL, not the sun march, that was preventing ours from getting there.
+    // 0.34/0.30 puts a buried base at 10 % of the fill; a crown is untouched
+    // (hh = 1 sends the first factor to 1 and an unburied sample sends the
+    // second to 1).
+    float skyOcc = mix(0.34, 1.0, hh * hh) * (0.30 + 0.70 * buried);
     // ── WHICH SKY, NOT JUST HOW MUCH OF IT ──────────────────────────────────
     // A crown sees the zenith hemisphere; a base sees the horizon band and the
     // ground under it, which at an 11° sun is three to four times brighter and

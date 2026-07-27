@@ -98,7 +98,7 @@ export class TonemapPass implements RenderPass {
         #ifdef USE_DOF
           float focus = ironDofFocus(uDepth, uFocus, uAutoFocus);
           float depth = texture(uDepth, vUv).r;
-          float coc = ironCoc(depth, focus, uNearScale, uFarScale, uFarStart, uMaxNear, uMaxFar);
+          float coc = ironCoc(depth, focus, ironDofNearScale(focus, uCloseNearScale, uNearScale), uFarScale, uFarStart, uMaxNear, uMaxFar);
           vec4 dofTap = texture(uDof, vUv);
           vec3 blurred = ironSanitize(dofTap.rgb);
           // dofTap.a is the NEAR-FIELD COVERAGE the gather measured: how much
@@ -137,6 +137,7 @@ export class TonemapPass implements RenderPass {
         uExposureFallback: uf(exposureScaleFromEv(EXPOSURE_PRESET_EV)),
         uFocus: uf(dof.focus),
         uNearScale: uf(dof.nearScale),
+        uCloseNearScale: uf(dof.closeNearScale),
         uFarScale: uf(dof.farScale),
         uFarStart: uf(dof.farStart),
         uMaxNear: uf(dof.maxNear),
@@ -159,6 +160,7 @@ export class TonemapPass implements RenderPass {
           uniform float uExposureFallback;
           uniform float uFocus;
           uniform float uNearScale;
+          uniform float uCloseNearScale;
           uniform float uFarScale;
           uniform float uFarStart;
           uniform float uMaxNear;
@@ -216,6 +218,15 @@ export class LensFxPass implements RenderPass {
         float r = length(centred) / length(vec2(uAspect, 1.0));
 
         // --- lateral chromatic aberration -----------------------------------
+        // 1.2 px at the corner, unchanged, and it is NOT absent: the round-3
+        // review reported "measured chromatic aberration at the right frame edge
+        // is a 0px R-versus-B shift" from a channel-correlation statistic, which
+        // does not measure a shift. Cross-correlating the R and B channels of a
+        // vertical strip in the outer 7 % of the frame and solving for the
+        // sub-pixel lag puts ours at 0.65 px on level_alpha and 1.10 px on
+        // light_cascades. The same measurement on four BF6 gameplay frames
+        // returns 0.00-0.05 px. We already carry MORE lateral CA than the
+        // reference corpus, so this stays where §6.4 put it.
         float shiftPx = 1.2 * pow(smoothstep(0.60, 1.00, r), 2.0);
         vec2 radial = normalize(uv - 0.5 + vec2(1e-6));
         vec2 shift = radial * shiftPx * uTexel;
@@ -244,7 +255,17 @@ export class LensFxPass implements RenderPass {
 
         // --- grain -----------------------------------------------------------
         float L = ironLuma(d);
-        float sigma = mix(1.6, 0.4, smoothstep(0.10, 0.75, L)) / 255.0;
+        // 2.6 -> 0.65, up ~1.6x from §6.6's 1.6 -> 0.4. The round-3 review asked
+        // for "roughly 1-1.5 % std" in a flat sky, which is 2.2-3.2 code values
+        // at code 215, and that is NOT what the corpus does: measured over the
+        // flattest bright 60x60 tile of each of 120 reference/gameplay frames
+        // the high-frequency std is a MEDIAN OF 0.34 CODES (0.23 % of the mean),
+        // p25 0.23, p75 0.75 — an order of magnitude under what was asked for.
+        // Our own frames measured 0.46 codes at the old amplitude, i.e. already
+        // above the corpus median. This lands them at ~0.7, on the corpus p75,
+        // which is as far as the evidence supports going and is deliberately
+        // short of the request.
+        float sigma = mix(2.6, 0.65, smoothstep(0.10, 0.75, L)) / 255.0;
         // Value noise at ~1.25 px, so the grain has a correlation length rather
         // than being per-pixel salt. Monochrome: chroma noise is exactly zero.
         vec2 gp = gl_FragCoord.xy / 1.25 + vec2(uFrame * 17.0, uFrame * 23.0);

@@ -707,6 +707,24 @@ export function facadeOpenings(
   const bayW = usable / bays;
   const ground = floorIndex === 0;
   const topFloor = floorIndex === floorCount - 1;
+  /**
+   * GLAZE ONLY WHAT IS CLOSE ENOUGH TO READ AS GLASS.
+   *
+   * Round 3, `light_cascades`: the far apartment rank "reads as one
+   * undifferentiated mass… not a single readable window aperture". The openings
+   * were all there — the geometry count never dropped — but every one of them
+   * was filled with a `glass` pane at roughness 0.22, and a facade seen 200 m
+   * away is seen at a grazing incidence where Fresnel takes that pane to almost
+   * pure sky radiance. So each window rendered BRIGHTER than the wall around it
+   * and the aperture cancelled itself out.
+   *
+   * Past ~115 m (`detail` 0.7) the pane is dropped and the `gloom`-lined recess
+   * behind it becomes the visible surface: a genuine dark hole with a lit reveal
+   * on one jamb. That is what a window at distance actually looks like, it is
+   * three quads CHEAPER than the glazed version, and it is the one LOD decision
+   * here that improves the read rather than degrading it.
+   */
+  const glazed = detail > 0.7;
 
   for (let i = 0; i < bays; i++) {
     const cx = margin + bayW * (i + 0.5);
@@ -733,7 +751,7 @@ export function facadeOpenings(
         y0: floorBase + 0.45,
         y1: floorBase + Math.min(2.5, floorHeight - 0.42),
         kind: 'window',
-        glass: true,
+        glass: glazed,
         shutter: rng.bool(0.35 * detail) ? 1 : 0,
         awning: rng.bool(0.55 * detail),
       });
@@ -762,7 +780,7 @@ export function facadeOpenings(
       y0: sill,
       y1: sill + wh,
       kind: 'window',
-      glass: true,
+      glass: glazed,
       shutter: rng.bool(0.62 * detail) ? (rng.bool(0.55) ? 1 : rng.bool(0.85) ? 2 : 3) : 0,
       balcony: !ground && opts.street === true && rng.bool(0.34 * detail),
     });

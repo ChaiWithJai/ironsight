@@ -531,9 +531,29 @@ export const IRON_SURFACE = /* glsl */ `
 
     // Pixel footprint in world metres, so the fine bands can be faded out
     // before they alias instead of being resolved by TAA into a shimmer.
-    float fp = max( length( fwidth( vIronWorld ) ), 1e-5 );
+    //
+    // THE GEOMETRIC MEAN OF THE TWO SCREEN DERIVATIVES, not the length of their
+    // sum, and on the rib that is the difference between a container and a
+    // cardboard box. length(fwidth(world)) is the LONG axis of the pixel
+    // footprint, and a container stack across a harbour is seen at 70-85°
+    // incidence — so that measure reported 60-90 mm on a box whose ribs were
+    // still 7-8 px wide on screen, and switched the corrugation off at 40 m.
+    // Round 4's sky_golden finding is exactly that: "the containers are worse,
+    // no corrugation, no corner castings — under this backlight the ribs are
+    // the entire read of the object". sqrt(lx·ly) is the isotropic-equivalent
+    // radius the anisotropic sampler actually resolves.
+    vec3 ironSdx = dFdx( vIronWorld );
+    vec3 ironSdy = dFdy( vIronWorld );
+    float fp = max( sqrt( length( ironSdx ) * length( ironSdy ) ), 1e-5 );
     float fineFade = 1.0 - smoothstep( 0.0035, 0.011, fp );   // bolts, bead crest
-    float ribFade  = 1.0 - smoothstep( 0.020, 0.060, fp );    // the rib itself
+    // …and the rib's guard is quoted against ITS OWN PITCH rather than against
+    // two constants, because a 32 cm rolled rib and a 12 cm one do not stop
+    // being resolvable at the same distance. Nyquist on a periodic feature is
+    // half its period; the band starts thinning at a sixth of it and is gone by
+    // a third, which leaves a comfortable margin and still carries a 32 cm rib
+    // out past 90 m — where it is 4 px and still the thing that says "steel".
+    float ironRibPitch = max( uIronClass.z, 0.02 );
+    float ribFade  = 1.0 - smoothstep( ironRibPitch * 0.17, ironRibPitch * 0.36, fp );
 
     /* ---- 1 the rolled rib ------------------------------------------------ */
     // A TRAPEZOID, not a sine. Container corrugation is a folded profile: a flat
@@ -1215,6 +1235,10 @@ export const IRON_SURFACE = /* glsl */ `
    */
   float ironPit = 0.0;
   vec2 ironPitSlope = vec2( 0.0 );
+  // Cloth relief, filled by the CLOTH block below and consumed by the normal
+  // assembly. Declared here because the assembly is a long way further down and
+  // GLSL has no forward declarations for locals.
+  vec2 ironClothSlope = vec2( 0.0 );
   // THE DERIVATIVES ARE TAKEN OUTSIDE THE BRANCH BELOW, and that is not style.
   // dFdx/dFdy inside divergent control flow is undefined in GLSL ES: a quad
   // straddling the 11 m cut would have two of its four fragments skip the
@@ -1391,7 +1415,29 @@ export const IRON_SURFACE = /* glsl */ `
     // at 0.83 × 0.72 = 0.60 of its surround instead of 0.30. Mean-removed at
     // the new ~0.10 coverage so switching the band on does not darken every
     // near-field surface in the game.
-    ironAlbedo *= ( 1.0 + 0.55 * ironPit ) * ( 1.0 - 0.17 * ( ironPitMask - 0.10 * nearW ) );
+    /* THE LAST FOUR METRES GET MORE OF THE BAND ON THE TWO CARRIERS THAT
+     * SURVIVE BEING IN SHADOW, and that is round 4's finding answered.
+     *
+     * The split above — small on albedo, large on roughness and slope — is
+     * right for a SUNLIT surface, where roughness shows as a broken specular
+     * and slope shows as self-shadowing. It is worth nothing at all on a
+     * shadowed one: the quay in the foreground of sky_golden and the paving
+     * at the bottom of level_bravo are both in the umbra of the near-field
+     * mass that frames the shot, so the only light on them is sky ambient, and
+     * under sky ambient a roughness change is invisible and a 5° slope change
+     * is worth about one per cent. Both frames therefore measured a nearest
+     * surface with no more high-frequency energy per pixel than a wall eight
+     * times further away.
+     *
+     * Albedo and cavity occlusion are the two carriers that do not care whether
+     * there is a key light, so inside 6 m the band moves its weight onto them.
+     * It is a ramp rather than a step so there is no iso-distance ring on a
+     * receding plane, and it is bounded at 6 m so the sunlit mid-field — which
+     * measured correctly and looks right — is untouched.
+     */
+    float closeW = 1.0 - smoothstep( 1.5, 6.0, ironDist );
+    ironAlbedo *= ( 1.0 + mix( 0.55, 1.20, closeW ) * ironPit )
+      * ( 1.0 - mix( 0.17, 0.25, closeW ) * ( ironPitMask - 0.10 * nearW ) );
     // Roughness rides the SAME field with the sign the physics asks for: the
     // low points hold dust and scatter, the ridges between them have been
     // rubbed. This is the carrier that survives into the shadowed half of the
@@ -1400,7 +1446,8 @@ export const IRON_SURFACE = /* glsl */ `
     // Cavity: the pits see less sky. One-sided — a ridge is not brighter than
     // open surface, it is merely unoccluded — which is the difference between
     // an occlusion term and a lighting artefact.
-    ironAo *= ( 1.0 - 0.30 * max( 0.0, -ironPit ) ) * ( 1.0 - 0.28 * ironPitMask );
+    ironAo *= ( 1.0 - mix( 0.30, 0.62, closeW ) * max( 0.0, -ironPit ) )
+            * ( 1.0 - mix( 0.28, 0.42, closeW ) * ironPitMask );
 
     /* ---- HAIRLINE CRACKS -------------------------------------------------- *
      *
@@ -2047,7 +2094,202 @@ export const IRON_SURFACE = /* glsl */ `
 
     // The seam gap is a slot, not a stain: it occludes and it is black.
     ironAlbedo *= 1.0 - 0.55 * ironSeamGap;
-    ironAo *= ( 1.0 - 0.45 * ironSeamGap ) * ( 1.0 - 0.22 * ( 1.0 - ironRib ) );
+    // TROUGH OCCLUSION AND CREST POLISH — the two carriers that survive when
+    // the plate has no key on it. A container photographed against the sun
+    // shows its corrugation almost entirely through these: the trough sees a
+    // narrower cone of sky than the crest, and the crest is the arris that
+    // every spreader, every fender and every dockside rub has burnished, so it
+    // returns a grazing sheen off a bright horizon while the trough stays dead.
+    // 0.22 was not enough to read through 60 m of aerial perspective; 0.42 is.
+    ironAo *= ( 1.0 - 0.45 * ironSeamGap ) * ( 1.0 - 0.42 * ( 1.0 - ironRib ) );
+    ironRoughness = clamp( ironRoughness - 0.16 * ( ironRib - 0.5 ), 0.045, 1.0 );
+  }
+  #endif
+
+  /* ======================= WOVEN CLOTH ==================================== *
+   *
+   * WHY THIS EXISTS. Round 4's material finding measured the market awning at
+   * 3.94 % relative micro-detail against the brick pier's 11.63 % and the wall
+   * frieze's 18.73 %, and noted that in greyscale it was the brightest
+   * non-sky object in the frame — so the composition pointed the eye at the
+   * least-informative surface in the image. It was a flat cream sheet, and the
+   * rubric's calibration note 7 (nothing is clean) was being violated on a hero
+   * object.
+   *
+   * The reason nothing else in this shader was reaching it is that every
+   * mesoscale layer above is built for MINERAL: the block lattice lays courses,
+   * the grain band lays sedimentary laminae, the sheet block lays rolled ribs.
+   * None of those is what cloth is. Cloth is a woven sheet, sewn from loom-width
+   * strips, hung between supports, bleached where the sun lands and filthy where
+   * water runs off it — five features, none of which any other band draws.
+   *
+   * ALL OF IT IS IN OBJECT-LOCAL METRES (ironPlane - ironOriginPlane) rather
+   * than world, for the same reason the pitting band is: a canopy MOVES, and a
+   * field locked to world coordinates crawls across anything that moves through
+   * it. Subtracting the instance origin also gives two stalls different cloth
+   * without a second uniform.
+   */
+  #ifdef IRON_THIN_CLOTH
+  {
+    // SCALED BY THE MATERIAL'S OWN DETAIL SCALE, exactly the way the pitting
+    // band is and for the same reason: SurfaceId.Fabric is the awning AND the
+    // soldier's uniform AND the viewmodel glove, and a 0.86 m loom strip across
+    // a glove 30 cm from the eye is absurd. uIronTiling.y is DETAIL_BASE_FREQ
+    // x spec.detailScale, so dividing by the base recovers the lane's
+    // "this is hand-sized" signal without a new uniform, and the knee at 3-6
+    // leaves architectural cloth (detailScale 2.5) at its authored size.
+    float ironClothDet = uIronTiling.y * 0.05;
+    float ironClothK = mix( 1.0, max( ironClothDet, 1.0 ),
+                            smoothstep( 3.0, 6.0, ironClothDet ) );
+    vec2 cp = ( ironPlane - ironOriginPlane ) * ironClothK;
+    // Isotropic-equivalent pixel radius. Same measure as the pitting band, and
+    // for the same reason: an awning is nearly always seen at a raking angle,
+    // so the long axis of the footprint is a lie about what is resolvable.
+    float cfp = max( sqrt( length( ddxW ) * length( ddyW ) ), 1e-5 ) * ironClothK;
+
+    /* ---- 1 SEWN STRIPS, the feature that survives to 15 m ---------------- *
+     * Awning duck comes off the loom 0.86 m wide and is sewn selvedge to
+     * selvedge, so a canopy is a set of parallel double-stitched seams. That is
+     * the ONLY cloth feature still legible from across a square — the weave is
+     * sub-pixel past about 2 m — and it is why a real awning never reads as one
+     * continuous sheet the way ours did. The run wanders because a sewn seam
+     * is not a machined line.
+     */
+    float ironStripPh = cp.x / 0.86 + 0.22 * ( ironNoise2( cp * 0.55 ) - 0.5 );
+    float ironStripD = abs( fract( ironStripPh ) - 0.5 ) * 2.0;
+    // 2.4 cm of doubled cloth and thread, faded out before it aliases.
+    float ironSeamFade = 1.0 - smoothstep( 0.010, 0.030, cfp );
+    float ironSeam = smoothstep( 0.945, 1.0, ironStripD ) * ironSeamFade;
+
+    /* ---- 2 BAY SAG. Cloth hung between two seams sags into a catenary, and
+     * the seams are stiffer than the field between them, so the profile is
+     * scalloped rather than flat. d(height)/dx of a parabola is linear in the
+     * offset from the bay centre — this is that derivative, with a per-bay
+     * depth so no two bays sag the same amount. About 12 mm over 0.86 m, which
+     * is a 5.5 % slope: invisible as displacement, and under an 11° sun it is
+     * the difference between a sheet and a canopy.
+     */
+    float ironBay = ironHash13( vec3( floor( ironStripPh ), 0.0, 0.0 ) );
+    ironClothSlope.x += ( fract( ironStripPh ) - 0.5 ) * 2.0
+      * ( 0.055 + 0.045 * ironBay ) * ironSeamFade;
+    // …and a slow cross-bay billow, because the far edge of an awning is not
+    // held by anything. 40 cm wavelength, small amplitude, on the second plane
+    // axis so it runs ACROSS the strips.
+    vec3 ironBillow = ironNoiseD2( cp * 2.5 + vec2( 13.7, 41.9 ) );
+    ironClothSlope += ironBillow.yz * 0.075;
+
+    /* ---- 2b CREASES, and per-bolt tone ----------------------------------- *
+     * A canopy has been folded, rolled up in a storm and put back wrong, so it
+     * carries a set of soft creases that do not follow the seams. Ridged noise
+     * on a warped coordinate, ~28 cm, contributing slope and a thin dirt line
+     * along the fold — dust collects in a crease the way it collects in any
+     * cavity. And every strip is off a different bolt of cloth, so each fades
+     * to its own value; that per-strip step is what stops the canopy reading as
+     * one printed sheet even where the seams themselves are sub-pixel.
+     */
+    {
+      float ironCrWarp = ironNoise2( cp * 1.7 + vec2( 22.9, 8.1 ) ) - 0.5;
+      vec3 ironCr = ironNoiseD2( cp * vec2( 3.6, 2.9 ) + ironCrWarp * 0.9 + vec2( 71.3, 15.1 ) );
+      float ironCrR = 1.0 - abs( ironCr.x * 2.0 - 1.0 );
+      float ironCrS = sign( ironCr.x * 2.0 - 1.0 );
+      float ironCrFade = 1.0 - smoothstep( 0.020, 0.060, cfp );
+      ironClothSlope += - ironCrS * ironCr.yz * 0.14 * ironCrFade;
+      ironAlbedo *= 1.0 - 0.17 * ironCrR * ironCrFade;
+      ironRoughness = clamp( ironRoughness + 0.10 * ironCrR * ironCrFade, 0.045, 1.0 );
+    }
+    ironAlbedo *= 0.94 + 0.12 * ironBay;
+
+    /* ---- 3 THE WEAVE, 2.6 mm ------------------------------------------- *
+     * A plain weave is two interleaved corduroys at 90°, not a noise field:
+     * the warp rides over the weft and back under it, so the surface is a
+     * quilt of alternating cylinders. Two rectified sines at right angles
+     * reproduce that at three instructions, and — the point — the slope is
+     * ANALYTIC, so the weave self-shades against a raking key instead of
+     * reading as a printed pattern.
+     */
+    float ironWeaveFade = 1.0 - smoothstep( 0.0016, 0.0040, cfp );
+    if ( ironWeaveFade > 0.002 ) {
+      const float kWeave = 2416.0;   // 2π / 2.6 mm
+      float warp = sin( cp.x * kWeave );
+      float weft = sin( cp.y * kWeave * 0.86 );  // weft yarn is the heavier one
+      ironClothSlope += vec2( cos( cp.x * kWeave ), cos( cp.y * kWeave * 0.86 ) )
+        * 0.085 * ironWeaveFade;
+      // The crossings are where the yarn is proud and the light catches; the
+      // interstices are where the dirt is.
+      ironAlbedo *= 1.0 + 0.055 * ( warp * weft ) * ironWeaveFade;
+      ironRoughness = clamp( ironRoughness - 0.06 * warp * weft * ironWeaveFade, 0.045, 1.0 );
+    }
+
+    /* ---- 4 SUN BLEACH on the up-face ------------------------------------- *
+     * Six summers of a Mediterranean sun takes the dye out of the top of a
+     * canopy and leaves the underside its original colour. Unevenly: the
+     * bleaching front follows where the cloth actually faces the sky, so it is
+     * modulated by a 70 cm field rather than being a constant lift.
+     */
+    float ironBleach = smoothstep( 0.30, 0.85, ironUp )
+      * ( 0.55 + 0.45 * ironNoise2( cp * 1.4 + vec2( 61.3, 7.7 ) ) );
+    // Toward a DUSTY warm grey, not toward white. Bleaching takes the dye out,
+    // and the same up-face that gets bleached is the one every bit of street
+    // dust lands on — LOOK_SPEC §4.4's N·up dust rule — so the net move on a
+    // pale canopy is down in value and toward ochre, never up.
+    ironAlbedo = mix( ironAlbedo,
+      vec3( ironLuminance( ironAlbedo ) ) * vec3( 0.96, 0.90, 0.80 ), ironBleach * 0.60 );
+    ironRoughness = clamp( ironRoughness + 0.10 * ironBleach, 0.045, 1.0 );
+
+    /* ---- 5 RUN-OFF AND POST GRIME ---------------------------------------- *
+     * Water leaves a canopy at its LOW edge, so that edge carries a dark
+     * tide-line of everything the sheet collected, and the underside is sooty
+     * where it has been over a street. Height is measured against the instance
+     * origin, which for a canopy is at its own centre, so this needs no extent
+     * uniform and works on a sail and a tarp as well as on an awning.
+     */
+    // TWO fall terms, because a canopy and a sail shed water differently and
+    // the material has to serve both. Height below the instance origin catches
+    // the hanging case (a sail, a tarp over a rail); in-plane distance from the
+    // origin catches the near-horizontal case, where every drop that lands on
+    // the sheet leaves at the PERIMETER and the outer 1.2 m carries a tide-line
+    // of everything the cloth collected. Neither needs an extent uniform.
+    float ironFall = max(
+      smoothstep( 0.30, -0.35, vIronWorld.y - vIronOrigin.y ),
+      smoothstep( 0.95, 2.30, length( cp ) ) * ironUp );
+    // The height test is in real metres whatever the feature scale is.
+    // Streaks are long down the fall line and short across it — 9:1, which is
+    // what run-off on a sheet actually looks like.
+    float ironClothStreak = ironNoise2( vec2( cp.x * 7.5, cp.y * 0.85 ) + vec2( 3.1, 29.7 ) );
+    // MILDEW. The one thing every real awning in a warm climate is covered in
+    // and no procedural cloth ever has: irregular 30-50 cm blotches, darker and
+    // markedly rougher, densest where the sheet stays damp longest. Two
+    // octaves so the blotch edges are ragged rather than round.
+    float ironMildew = smoothstep( 0.52, 0.86,
+      ironNoise2( cp * 2.6 + vec2( 88.1, 4.7 ) ) * 0.72
+      + ironNoise2( cp * 7.1 + vec2( 12.9, 55.3 ) ) * 0.28 );
+    float ironGrime = clamp( ironFall * ( 0.35 + 0.85 * ironClothStreak )
+      + 0.22 * ( 1.0 - ironUp ) * ironClothStreak
+      + 0.55 * ironMildew, 0.0, 1.0 );
+    // Toward a warm-grey street dirt, never toward black: LOOK_SPEC §4.3's
+    // floor is 0.035 and a filthy awning is nowhere near it.
+    ironAlbedo = mix( ironAlbedo, ironAlbedo * vec3( 0.55, 0.52, 0.47 ), ironGrime * 0.85 );
+    ironRoughness = clamp( ironRoughness + 0.12 * ironGrime, 0.045, 1.0 );
+    ironAo *= 1.0 - 0.30 * ironSeam - 0.10 * ironGrime;
+
+    // The seam last, so the grime and the bleach do not wash it out.
+    ironAlbedo *= 1.0 - 0.20 * ironSeam;
+    ironRoughness = clamp( ironRoughness + 0.07 * ironSeam, 0.045, 1.0 );
+    // A stitched seam stands about 1.5 mm proud on each side of its own line.
+    ironClothSlope.x += sign( fract( ironStripPh ) - 0.5 ) * ironSeam * 0.16;
+
+    /* ---- 6 THE VALUE CEILING --------------------------------------------- *
+     * LOOK_SPEC §4.3 puts fresh white paint at 0.82 and that is the ceiling for
+     * the whole material system — but nothing in a street is fresh white paint,
+     * and a lane that authors an awning as 0xffffff is asking for a diffuse
+     * albedo of 1.0. Bleached cotton duck measures 0.55-0.62; a canopy that has
+     * been up a season is under that. Capping the LUMINANCE rather than each
+     * channel keeps the lane's hue and its chroma intact and only takes the
+     * value down, which is the part that was making a market stall the
+     * brightest object in a frame containing the sun.
+     */
+    float ironClothL = ironLuminance( ironAlbedo );
+    ironAlbedo *= min( 1.0, 0.60 / max( ironClothL, 1e-4 ) );
   }
   #endif
 
@@ -2172,7 +2414,7 @@ export const IRON_SURFACE = /* glsl */ `
   // copy of the material's own masonry. One octave rather than two because the
   // micro band already sits a further 6× up and covers what a second octave here
   // would have, at half the hashes.
-  vec2 ironSlope = ( ironPitSlope + ironLamSlope ) * ironNStr;
+  vec2 ironSlope = ( ironPitSlope + ironLamSlope + ironClothSlope ) * ironNStr;
   if ( ironDetailFade > 0.002 ) {
     ironSlope += ironNoiseD2( ironDetUv * ironDetailFreq ).yz
       * uIronDetail.x * ironDetailFade * ironNStr;
@@ -2522,7 +2764,7 @@ export const IRON_TRANSLUCENCY = /* glsl */ `
       // of doubled canvas duck. It is also the only guard against the stall's
       // SOLID cloth-wrapped goods — same material, one bale thick — rendering as
       // glowing white bricks; at 0.62 they clipped.
-      ironThrough *= 0.40;
+      ironThrough *= 0.17;
     #endif
     reflectedLight.directDiffuse += ironTL.color * ironThrough * diffuseColor.rgb * 1.35;
   }

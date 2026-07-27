@@ -285,3 +285,4 @@ registerShot({
     ctx.poseCamera([152, 236, 300], [-70, 10, 2], 45);
   },
 });
+

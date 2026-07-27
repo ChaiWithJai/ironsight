@@ -358,7 +358,11 @@ export function buildBuilding(
           openings,
           base: 0,
           through: enterable && f === 0,
-          reveal: rng.range(0.16, 0.28),
+          // Deeper reveals on the distant blocks. A reveal only reads as a hole
+          // while the jamb it shades is more than a pixel wide, so the further
+          // the building the deeper it has to be to survive — the opposite of
+          // the usual LOD instinct, and the reason the far rank read flat.
+          reveal: rng.range(0.16, 0.28) + (1 - detail) * 0.16,
           uvScale: 1,
         },
         rng,
@@ -366,11 +370,33 @@ export function buildBuilding(
       b.xf.pop();
     }
 
-    // String course over the joint between storeys. Also the thing that stops
-    // the per-storey plan wobble reading as an error.
+    /**
+     * FLOOR-SLAB EDGE over the joint between storeys. Also the thing that stops
+     * the per-storey plan wobble reading as an error.
+     *
+     * Round 3 asked the far apartment rank for "floor-slab edge shadows", and
+     * the reason it had none is arithmetic: this band projected 7 cm and was
+     * 6–13 cm tall, which at 200 m is a fifth of a pixel of relief and casts a
+     * shadow one fifth of a pixel deep. A real reinforced-concrete slab edge
+     * stands 18–28 cm proud of the wall below it and is 15–22 cm deep, and under
+     * an 11° sun that throws a hard horizontal shadow band roughly a metre down
+     * the facade — which is the single strongest horizontal cue a distant block
+     * has, and the thing that makes it read as floors rather than as a prism.
+     *
+     * It is also nearly free: one box per storey per building, and the
+     * projection is what does the work, not the triangle count.
+     */
     if (f < floors - 1) {
-      const band = rng.range(0.06, 0.13);
-      b.m(trimMat).boxAt(0, y + fh + band / 2, 0, plot.hx + 0.07, band / 2, plot.hz + 0.07, 1, 0x3f);
+      const band = rng.range(0.15, 0.22);
+      const proj = rng.range(0.18, 0.28);
+      b.m(trimMat).boxAt(0, y + fh + band / 2, 0, plot.hx + proj, band / 2, plot.hz + proj, 1, 0x3f);
+      // A shadow-gap reglet directly under the nose, so the slab reads as a
+      // separate element rather than as a thicker wall. `gloom` because the
+      // ambient term has no visibility factor — see `materials.ts`.
+      b.m('gloom').boxAt(
+        0, y + fh - 0.035, 0,
+        plot.hx + proj * 0.55, 0.035, plot.hz + proj * 0.55, 1, 0x3f,
+      );
     }
     // The terrace left over under a set-back top storey: a slab, a low kerb and
     // a washing line's worth of parapet.

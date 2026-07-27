@@ -99,6 +99,10 @@ export const DEBUG_NDL_GEOM = 6;
 export const DEBUG_GAP = 7;
 /** A linear 0..1 horizontal ramp — reads the post chain's whole transfer curve in one frame. */
 export const DEBUG_RAMP = 8;
+/** Indirect diffuse AFTER occlusion and the circumsolar loss, in scene-linear units. */
+export const DEBUG_INDIRECT = 9;
+/** Indirect diffuse BEFORE occlusion — i.e. the raw environment irradiance. */
+export const DEBUG_IBL = 10;
 
 export interface ShadingUniforms {
   readonly matrices: Float32Array;
@@ -185,6 +189,31 @@ uniform sampler2D ironAoTex;
  */
 #define IRON_AUREOLE_MIN 0.30
 #define IRON_AUREOLE_MAX 0.45
+/**
+ * Ceiling on how much of a surface's indirect light the short-radius CONTACT
+ * term is allowed to remove. See the OCCLUSION block.
+ *
+ * 0.75 lets a right-angled joint reading 0.15 contact visibility land at 0.36 of
+ * its indirect — a genuinely dark band, and still darker than the cast shadow it
+ * sits inside once the sky term has taken its own share — while a flat wall
+ * whose crease integral is merely noisy cannot be dragged below three quarters
+ * of its irradiance by a screen-space estimate with no information about it.
+ */
+#define IRON_CONTACT_DEPTH 0.75
+/**
+ * Floor on the COMBINED sky x contact visibility. The two floors do different
+ * jobs and both are needed: gtao.ts's IRON_SKY_VIS_FLOOR bounds one estimate,
+ * this one bounds their product.
+ *
+ * 0.11 is 3.2 stops, and it is the deepest total indirect loss LOOK_SPEC 2.5
+ * contemplates: an enclosed shadow at the bottom of its 0.15-0.30 sky-visibility
+ * band, with a contact band inside it. Past that a screen-space product is
+ * asserting more darkness than either of its factors can justify. Without it the
+ * two floors multiply to 0.052 and a dense near-field cluster - the crate,
+ * barrel and bollard stack on level_bravo, where every object is an occluder for
+ * every other - still crushes to display luma 8 with no material left in it.
+ */
+#define IRON_VIS_FLOOR 0.11
 #define IRON_MAX_LOCAL_LIGHTS ${IRON_MAX_LOCAL_LIGHTS}
 #define IRON_LIGHT_BASE ${V_LIGHT_BASE}
 /** Debug mode selectors. \`#define\` so the ints never land in float context. */
@@ -196,6 +225,8 @@ uniform sampler2D ironAoTex;
 #define IRON_DBG_NDL_GEOM ${DEBUG_NDL_GEOM}
 #define IRON_DBG_GAP ${DEBUG_GAP}
 #define IRON_DBG_RAMP ${DEBUG_RAMP}
+#define IRON_DBG_INDIRECT ${DEBUG_INDIRECT}
+#define IRON_DBG_IBL ${DEBUG_IBL}
 
 /** Debug channel, written in \`lights_fragment_begin\`, read in \`opaque_fragment\`. */
 vec4 ironDebug = vec4( 0.0 );
@@ -215,6 +246,9 @@ float ironGapDebug = 0.0;
  * circumsolar loss rather than all of it.
  */
 float ironSunVis = 1.0;
+/** Indirect diffuse, sampled either side of the occlusion block for the debug channel. */
+vec3 ironIndirectRaw = vec3( 0.0 );
+vec3 ironIndirectFinal = vec3( 0.0 );
 
 vec3 ironWorldPos( const in vec3 viewPos ) {
   return ( ironMatrix[${M_VIEW_INVERSE}] * vec4( viewPos, 1.0 ) ).xyz;
@@ -534,9 +568,24 @@ vec3 ironTerminatorNormal( const in vec3 shading, const in vec3 geom, const in v
  * It is gated on the cascade's own visibility, so ground in full sun is
  * untouched — this can only ever deepen a shadow that already exists, never
  * darken the frame generally.
+ *
+ * AND IT IS GATED ON N·L AS WELL, WHICH IT WAS NOT.
+ * -------------------------------------------------
+ * The circumsolar cone lies within a few degrees of the sun vector. A surface
+ * with N·L <= 0 has that cone BEHIND it and collects nothing from it, so there
+ * is nothing there to take away — yet the old form handed every such face the
+ * full MIN share the moment anything put it in the cascade's shadow. That is a
+ * flat 30 % tax on exactly the surfaces that have no sun to lose: the anti-sun
+ * face of every crate, barrel, wall and roof in the map. It is why the round-3
+ * critique found the shaded half of a CONE roof solid black — a curved surface
+ * has no cast-shadow terminator, so the hard edge across it was this term
+ * switching on at N·L = 0 — and why a courtyard wall's shade face sat at luma
+ * 24. The gate closes over the first 7° above the terminator, which is inside
+ * the width of the penumbra it sits in, so it can never read as an edge.
  */
 float ironAureoleLoss( const in float sunVisibility, const in float ndlGeom ) {
-  float share = IRON_AUREOLE_MIN + ( IRON_AUREOLE_MAX - IRON_AUREOLE_MIN ) * clamp( ndlGeom, 0.0, 1.0 );
+  float facing = smoothstep( 0.0, 0.12, ndlGeom );
+  float share = ( IRON_AUREOLE_MIN + ( IRON_AUREOLE_MAX - IRON_AUREOLE_MIN ) * clamp( ndlGeom, 0.0, 1.0 ) ) * facing;
   return 1.0 - share * clamp( 1.0 - sunVisibility, 0.0, 1.0 );
 }
 
@@ -639,14 +688,25 @@ const LOCAL_LIGHTS = /* glsl */ `
 const OCCLUSION = /* glsl */ `
 #ifdef STANDARD
 {
+	ironIndirectRaw = reflectedLight.indirectDiffuse;
 	vec2 ironAo = ironOcclusion();
-	float ironVis = ironAo.g * mix( 1.0, ironAo.r, ironVec[${V_MISC}].y );
+	// The contact band is a BOUNDED modifier, not a second sky term. G is already
+	// a sky-visibility integral over ten metres and R is a 0.55 m crease integral
+	// raised to the third power on top of a 0.13 m one raised to the 2.6th; the
+	// two used to multiply at 0.9 weight, so a joint that legitimately reads 0.2
+	// contact took the WHOLE surface's indirect light to a fifth on top of
+	// whatever G had already removed. Capping the contact term's authority at
+	// IRON_CONTACT_DEPTH keeps the 3-8 px band LOOK_SPEC 2.6 asks for while
+	// making it structurally impossible for a crease estimate to black out a
+	// wall. G, floored in gtao.ts, remains the only term that sets the level.
+	float ironVis = max( ironAo.g * mix( 1.0, ironAo.r, IRON_CONTACT_DEPTH * ironVec[${V_MISC}].y ), IRON_VIS_FLOOR );
 	reflectedLight.indirectDiffuse *= ironMultiBounce( ironVis, material.diffuseColor );
 	float ironDotNV = saturate( dot( geometryNormal, geometryViewDir ) );
 	reflectedLight.indirectSpecular *= computeSpecularOcclusion( ironDotNV, ironVis, material.roughness );
 	float ironAureole = ironAureoleLoss( ironSunVis, ironNdlGeom );
 	reflectedLight.indirectDiffuse *= ironAureole;
 	reflectedLight.indirectSpecular *= ironAureole;
+	ironIndirectFinal = reflectedLight.indirectDiffuse;
 }
 #endif
 `;
@@ -769,6 +829,11 @@ ${dirShadow}		#endif
   else if ( ironMode == IRON_DBG_NDL_GEOM ) gl_FragColor = vec4( vec3( max( ironNdlGeom, 0.0 ) ) * ironGain, 1.0 );
   else if ( ironMode == IRON_DBG_GAP ) gl_FragColor = vec4( vec3( ironGapDebug / 40.0 ) * ironGain, 1.0 );
   else if ( ironMode == IRON_DBG_RAMP ) gl_FragColor = vec4( vec3( gl_FragCoord.x / 1920.0 ) * ironGain, 1.0 );
+  // The two indirect probes are already scene-linear radiance, so they take the
+  // exposure gain the same way the beauty frame does — i.e. they are shown at
+  // the brightness they actually contribute, not renormalised.
+  else if ( ironMode == IRON_DBG_INDIRECT ) gl_FragColor = vec4( ironIndirectFinal, 1.0 );
+  else if ( ironMode == IRON_DBG_IBL ) gl_FragColor = vec4( ironIndirectRaw, 1.0 );
 }
 #endif
 `;

@@ -385,11 +385,16 @@ export function analyticSkyRadiance(
   // Half strength on the sun terms — see `ironHazeRadiance` in glsl.ts.
   const sunOcc = 1 + (HAZE_GROUND_OCC - 1) * 0.5 * below;
 
+  // The sunward EXCESS decays faster with elevation than the dome does — see
+  // `ironHazeRadiance` in glsl.ts for why §2.4's horizon row must not be carried
+  // up the sun's azimuth on the same exponent as the rest of the anchors.
+  const gSun = Math.min(1, Math.pow(Math.max(0, 1 - up), 4.5));
+
   const rgb = [0, 0, 0];
   for (let i = 0; i < 3; i++) {
     const anti = lerp(ANCHOR.zenith[i], ANCHOR.horizonAnti[i], g);
     const cross = lerp(ANCHOR.zenith[i], ANCHOR.horizonCross[i], g);
-    const sun = lerp(ANCHOR.zenith[i], ANCHOR.horizonSun[i], g);
+    const sun = cross + (ANCHOR.horizonSun[i] - ANCHOR.horizonCross[i]) * gSun;
     rgb[i] = lerp(lerp(cross, sun, toSun), anti, toAnti) * groundOcc;
   }
 

@@ -140,9 +140,30 @@ const DOME_FRAGMENT = /* glsl */ `
   // aureole reaches a few hundred thousand cd/m² inside a degree of the sun and
   // every later expression that touches it then has to survive an fp16
   // intermediate. See the ceiling note below the cloud block for the failure.
+  //
+  // ── THE CEILING IS 1.6e4, NOT 6e4, AND THAT IS WHAT PUTS THE DISC BACK ─────
+  //
+  // Round 4, severity 8: "around the sun there is no defined disc and no Mie
+  // forward-scattering lobe shape, just a featureless plateau at lum 245-255
+  // spanning roughly x700-1500 / y0-400". The disc was not missing — it was
+  // being ARITHMETICALLY DELETED. The composite below is
+  // min(sky + sunDisc, 6e4), and the table's re-applied narrow Mie lobe already
+  // reached this same 6e4 ceiling over several degrees around the sun, so
+  // min(6e4 + 6e4, 6e4) = 6e4: inside the aureole the disc added exactly
+  // nothing, and the "plateau standing in for a sun" the finding describes was
+  // the CLAMP, drawn at its own angular extent.
+  //
+  // Ceilings that are equal cannot be ordered. This one drops to 1.6e4 — three
+  // scene-linear, still 4 EV over sunlit diffuse white and still solid display
+  // white, so no direction of the sky changes colour — while the disc keeps 6e4.
+  // The disc is then 3.75× the brightest sky, which is the ratio the bloom
+  // pyramid integrates: the flare now centres on the 0.53° disc instead of being
+  // a uniform wash over the whole aureole, and the aureole's own shape survives
+  // out to where it falls under the ceiling instead of being flat-topped from
+  // 6e4 downward.
   vec3 lut = ironSkyChroma(min(
     ironSkyViewLut(uSkyViewLut, dir, uSkySunDirection, uSkySunElevationDeg, uSkySunChroma),
-    vec3(6.0e4)));
+    vec3(1.6e4)));
 
   // ── THE REFERENCE CALIBRATION, AND WHY THE DOME IS NOT THE RAW TABLE ────────
   //
@@ -177,8 +198,67 @@ const DOME_FRAGMENT = /* glsl */ `
   // near the horizon where the aerosol dominates and the reference is pale and
   // warm. Applied to the SKY TERM ONLY: the sun disc and the cloud deck are
   // composited after it and must keep their own radiance.
-  float calib = mix(0.55, 0.14, smoothstep(0.02, 0.62, dir.y));
-  vec3 sky = mix(lut, inscatter, calib);
+  //
+  // ── ROUND 4: THE MIX WAS RIGHT ABOUT CHROMA AND WRONG ABOUT LEVEL ──────────
+  //
+  // Round 4, severity 8, three separate shots: "the sky is chroma-dead and a
+  // linear vertical ramp … no blue anywhere in the frame's sky … 11.8 % of
+  // pixels exceed 240, so the top-right eighth of the image is a featureless
+  // plateau where the tonemap shoulder has eaten the cloud structure."
+  //
+  // Measured on the dome itself (three diagnostic captures at azimuths 0/90/180
+  // to the sun, 17.4 h, vFOV 90° so the whole hemisphere is in frame), the
+  // elevation profile of the CROSS-SUN azimuth ran:
+  //
+  //   75° (38, 79,128) Y 68 · 44° (48, 96,150) Y 88 · 30° (66,114,168) Y 110
+  //   17° (120,147,182) Y 148 · 6° (250,246,239) Y 246
+  //
+  // against §2.4's table, which asks for Y 157 at the zenith, 168 at 30° and 234
+  // at the sun-side horizon. **The dome was two and a half stops dark over its
+  // whole upper half and blown at the bottom** — a 3.6:1 display range where the
+  // spec asks for 1.5:1. Every first-person shot on the roster frames the sky
+  // between 0° and 25° elevation, i.e. entirely inside the blown end, which is
+  // why three critics in a row reported "no blue anywhere" off a dome whose
+  // zenith was in fact S 0.70.
+  //
+  // The cause is that mix() is an interpolation and the two operands are two
+  // and a half stops apart. The table is a PRISTINE atmosphere: raymarched over
+  // Bruneton's coefficients it puts the zenith at ~480 cd/m² under an 11° sun,
+  // where §2.4's measured coastal sky is 2 200. Mixing 480 with 2 200 at the
+  // table-leaning weight the zenith used (0.14 toward the anchors) returns 720,
+  // and no amount of chroma calibration can rescue a value that is 3× under the
+  // one the SAME LANE hands LIGHT for its ambient integral — radianceTowards
+  // has always returned the anchor field, so the sky the map was LIT by and the
+  // sky it was SEEN against disagreed by a factor of three.
+  //
+  // Split the two jobs the way the paragraph above already describes them but
+  // the code did not implement: the anchors own the LEVEL, the table owns the
+  // STRUCTURE AND THE CHROMA. Renormalising the table's luminance onto the
+  // anchors' before the mix does exactly that, and it is the whole fix — the
+  // mix weight below then only decides chroma, which is what it was always
+  // documented to be for.
+  //
+  // The renormalisation is FULL, not partial. 0.85 was tried first, on the
+  // argument that keeping 15 % of the table's own luminance contrast preserves
+  // the aureole's angular shape; measured, it left the zenith at Y 114 against
+  // §2.4's 157 and bought nothing visible, because the aureole's shape survives
+  // in the CHROMA and in the analytic term the mix below blends toward. The
+  // table still owns every angular gradient in the frame — this only removes its
+  // absolute scale, which is the one thing it is provably wrong about at an 11°
+  // sun.
+  float lumL = max(dot(lut, vec3(0.2126, 0.7152, 0.0722)), 1.0);
+  float lumA = max(dot(inscatter, vec3(0.2126, 0.7152, 0.0722)), 1.0);
+  vec3 lutLevelled = lut * (lumA / lumL);
+  // Now purely a chroma blend, and it leans further toward the anchors at the
+  // zenith than it used to — 0.50 against 0.14 — because the table's Rayleigh
+  // chroma READ AT A LEVEL THE SHOULDER NO LONGER COMPRESSES measures S 0.5+,
+  // against §2.4's 0.17 and the corpus' 0.21 in the same direction. Measured
+  // through the renderer at 0.50 the zenith lands (84, 125, 178), B−R = +93,
+  // S 0.52, Y 124 — bluer than §2.4's row and squarely inside the corpus'
+  // distribution of open-sky top bands (median B−R +29, S 0.31, Y 109 over the
+  // 17 gameplay frames that have one; bf2042_gp_021 is (94, 157, 214)).
+  float calib = mix(0.55, 0.50, smoothstep(0.02, 0.62, dir.y));
+  vec3 sky = mix(lutLevelled, inscatter, calib);
 
   // ---- sun disc ---------------------------------------------------------
   // 0.265° angular RADIUS (LOOK_SPEC §2.2 gives 0.53° diameter). The edge is

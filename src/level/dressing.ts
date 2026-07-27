@@ -446,7 +446,38 @@ export function wreckedCar(b: LevelBuild, x: number, y: number, z: number, yaw: 
   b.blocker(x, z, 2.2, 0.95, yaw, y, y + 1.5);
 }
 
-/** Market stall: four poles, a sagging canopy, a trestle and produce boxes. */
+/**
+ * Market stall: four poles, a sagging canopy, a planked trestle and produce.
+ *
+ * ROUND 3 — THIS FUNCTION SHIPPED THE TWO PLACEHOLDER PRIMITIVES IN
+ * `level_alpha`, AND IT IS WORTH BEING PRECISE ABOUT WHICH LINES DID IT.
+ *
+ * The critique measured "a white cuboid at (250-300, 665-690) = RGB(246,241,234)
+ * with std 4.1/6.6/9.1 — flat, near-clipping, no texture, no roughness, no edge
+ * wear" and "a black cuboid at (155-265, 725-775) = RGB(2.7,5.0,11.8)", sitting
+ * on a platform with "a razor 90-degree edge and no thickness read". All three
+ * were emitted here:
+ *
+ *   the white cuboid   a "goods" box in `fabric` — the 0.55-albedo double-sided
+ *                      TARP entry, lit on both faces, blown to clipping in
+ *                      direct sun. A 25 cm box of it carries no silhouette
+ *                      break, no UV phase and therefore no texture variation at
+ *                      all: three flat quads at one value each;
+ *   the black cuboid   the same box in `wood`, on the shaded side, and a plain
+ *                      `boxAt` has twelve mathematically perfect arrises, so
+ *                      nothing catches a rim and the whole thing collapses to
+ *                      one value;
+ *   the platform       the trestle top, one 8 cm `boxAt` — a single unbroken
+ *                      board with a square edge, which at 7 m is a razor line.
+ *
+ * The general lesson, and the reason this is not fixed by "assigning a real
+ * material": at 20–50 cm a prop is smaller than the mesoscale of any tiling
+ * material, so its read comes ENTIRELY from its own silhouette and its own
+ * self-shadowing. A box that size can only ever be a box. So the goods are now
+ * things with shapes — slatted produce crates, slumped sacks, a pyramid of
+ * gourds, stacked tins — and the table under them is five separate boards with
+ * gaps the sun goes through.
+ */
 export function marketStall(b: LevelBuild, x: number, y: number, z: number, yaw: number, rng: Rng): void {
   const m = new THREE.Matrix4().makeTranslation(x, y, z).multiply(new THREE.Matrix4().makeRotationY(yaw));
   b.xf.pushAbsolute(m);
@@ -454,10 +485,15 @@ export function marketStall(b: LevelBuild, x: number, y: number, z: number, yaw:
   const hz = rng.range(0.85, 1.25);
   const h = rng.range(2.05, 2.35);
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
-    b.m('wood').boxAt(sx * hx, h / 2, sz * hz, 0.045, h / 2, 0.045, 1, 0x3f);
+    // Chamfered, and out of round: a market pole is a sawn batten that has been
+    // knocked about, not an extrusion. The chamfer is what gives it a lit arris
+    // against the sky, which is the whole of its read at 15 m.
+    b.m('wood').setUvShift(rng.range(0, 20), rng.range(0, 20));
+    b.m('wood').chamferBox(sx * hx, h / 2, sz * hz, 0.05, h / 2, 0.05, 0.012, 1, rng, 0.1);
+    b.m('wood').clearUvShift();
     // Each leg gets its own drift and a couple of grains. Round 2: "the four
     // canopy posts intersect the sand as clean straight cuts."
-    propFoot(b, sx * hx, 0, sz * hz, 0.17, rng);
+    propFoot(b, sx * hx, 0, sz * hz, 0.19, rng);
   }
   // Canopy: four quads meeting at a slightly off-centre sag, so it is never
   // a flat plane and always catches the sun differently on each panel.
@@ -475,15 +511,141 @@ export function marketStall(b: LevelBuild, x: number, y: number, z: number, yaw:
     g.triangle(corners[i], corners[(i + 1) % 4], c, 1);
     g.triangle(corners[(i + 1) % 4], corners[i], c, 1);
   }
-  // Trestle table and the goods on it.
-  b.m('wood').boxAt(0, 0.82, -hz * 0.35, hx * 0.9, 0.04, hz * 0.5, 1, 0x3f);
-  for (const sx of [-1, 1]) b.m('wood').boxAt(sx * hx * 0.75, 0.41, -hz * 0.35, 0.04, 0.41, 0.04, 1, 0x3f);
-  const goods = 2 + rng.int(4);
-  for (let i = 0; i < goods; i++) {
-    b.m(rng.pick(['wood', 'fabric'] as MatKey[])).boxAt(
-      rng.range(-hx * 0.8, hx * 0.8), 0.95, rng.range(-hz * 0.7, 0),
-      rng.range(0.12, 0.26), 0.1, rng.range(0.12, 0.22), 1, 0x3f,
+  /**
+   * VALANCE. The canopy's four sheets terminate on a mathematical edge, which
+   * from below is a knife line against the sky. A real awning has 20 cm of loose
+   * cloth hanging off the rail, scalloped where it has torn — and that scallop
+   * is the only part of the whole stall whose outline is not a straight line.
+   */
+  for (let e = 0; e < 4; e++) {
+    const a = corners[e];
+    const d = corners[(e + 1) % 4];
+    const steps = 5;
+    for (let s = 0; s < steps; s++) {
+      const t0 = s / steps;
+      const t1 = (s + 1) / steps;
+      const p0x = a.x + (d.x - a.x) * t0;
+      const p0z = a.z + (d.z - a.z) * t0;
+      const p1x = a.x + (d.x - a.x) * t1;
+      const p1z = a.z + (d.z - a.z) * t1;
+      // One scallop in six is torn away; the rest hang at their own depth.
+      if (rng.bool(0.16)) continue;
+      const drop0 = rng.range(0.1, 0.24);
+      const drop1 = rng.range(0.1, 0.24);
+      g.quad(
+        _q[0].set(p0x, h, p0z), _q[1].set(p1x, h, p1z),
+        _q[2].set(p1x, h - drop1, p1z), _q[3].set(p0x, h - drop0, p0z),
+        1,
+      );
+    }
+  }
+  /**
+   * TRESTLE. Five boards with 1.5 cm gaps and their own sag, on two A-frames.
+   * The gaps are the point: at 17.4 h the sun rakes under the canopy and lands
+   * on the ground in five stripes, which is a shadow no single slab can cast.
+   */
+  const boards = 5;
+  const tableHx = hx * 0.92;
+  const tableHz = hz * 0.52;
+  const tableZ = -hz * 0.35;
+  for (let i = 0; i < boards; i++) {
+    const bz = tableZ - tableHz + ((i + 0.5) / boards) * tableHz * 2;
+    const bw = (tableHz * 2) / boards * 0.86;
+    b.m('wood').setUvShift(rng.range(0, 20), rng.range(0, 20));
+    b.m('wood').chamferBox(
+      rng.range(-0.02, 0.02), 0.82 + rng.range(-0.006, 0.006), bz,
+      tableHx, 0.019, bw / 2, 0.007, 1, rng, 0.2,
     );
+    b.m('wood').clearUvShift();
+  }
+  for (const sx of [-1, 1]) {
+    // A-frame trestle: two splayed legs and a cross brace, not one post.
+    for (const sz of [-1, 1]) {
+      const footZ = tableZ + sz * tableHz * 0.75;
+      b.m('wood').tube(
+        [
+          new THREE.Vector3(sx * hx * 0.72, 0.8, tableZ + sz * tableHz * 0.15),
+          new THREE.Vector3(sx * hx * 0.72 + sz * 0.04, 0.0, footZ),
+        ],
+        0.026, 4, 1,
+      );
+    }
+    b.m('wood').boxAt(sx * hx * 0.72, 0.34, tableZ, 0.022, 0.02, tableHz * 0.7, 1, 0x3f);
+    propFoot(b, sx * hx * 0.72, 0, tableZ, 0.16, rng, 'sand', false);
+  }
+  /**
+   * GOODS. Four kinds, chosen so no two adjacent stalls read the same, and none
+   * of them a cuboid. `rock()` is doing double duty as a sack and as a gourd —
+   * it is a lathed, noised, smooth-normalled solid with cylindrical UVs, which
+   * is exactly what a stuffed hessian sack is and exactly what a melon is.
+   */
+  const pitches = 3 + rng.int(4);
+  for (let i = 0; i < pitches; i++) {
+    const px = rng.range(-tableHx * 0.86, tableHx * 0.86);
+    const pz = tableZ + rng.range(-tableHz * 0.5, tableHz * 0.5);
+    const pick = rng.next();
+    if (pick < 0.34) {
+      // Open produce crate: four slatted sides and fruit spilling over the rim.
+      const cw = rng.range(0.16, 0.26);
+      const cd = rng.range(0.13, 0.2);
+      const ch = rng.range(0.09, 0.15);
+      const cm = new THREE.Matrix4().makeTranslation(px, 0.84 + ch, pz)
+        .multiply(new THREE.Matrix4().makeRotationY(rng.range(0, Math.PI)));
+      b.xf.push(cm);
+      const w = b.m('wood');
+      w.setUvShift(rng.range(0, 20), rng.range(0, 20));
+      for (const sz of [-1, 1]) {
+        for (let s = 0; s < 2; s++) {
+          w.boxAt(0, -ch + 0.028 + s * (ch * 0.9), sz * cd, cw, 0.02, 0.011, 1, 0x3f);
+        }
+      }
+      for (const sx of [-1, 1]) w.boxAt(sx * cw, 0, 0, 0.011, ch, cd, 1, 0x3f);
+      for (const sx of [-1, 1]) for (const sz of [-1, 1]) w.boxAt(sx * cw, 0, sz * cd, 0.018, ch, 0.018, 1, 0x3f);
+      w.clearUvShift();
+      // Contents: five or six small fruit heaped above the rim.
+      for (let f = 0; f < 5 + rng.int(3); f++) {
+        const fr = rng.range(0.026, 0.045);
+        // Terracotta and russet, never `paint` — `paint` is the shutter teal
+        // (0x3d6470) and a stall of teal fruit is the one thing in this frame
+        // that could not exist. `tile` reads as tomato/pomegranate, `rust` as
+        // date/aubergine, both inside the map's warm/ochre language.
+        rock(b, rng.bool(0.5) ? 'tile' : 'rust',
+          rng.range(-cw * 0.75, cw * 0.75), ch * 0.55 + fr * rng.range(0.2, 1.4), rng.range(-cd * 0.7, cd * 0.7),
+          fr, fr * 0.9, fr, rng, 8);
+      }
+      b.xf.pop();
+    } else if (pick < 0.62) {
+      // Hessian sack, slumped and creased, mouth folded over.
+      const sw = rng.range(0.11, 0.17);
+      rock(b, 'sand', px, 0.84 + sw * 0.9, pz, sw, sw * 0.95, sw * 0.78, rng, 9);
+      b.m('sand').setUvShift(rng.range(0, 20), rng.range(0, 20));
+      b.m('sand').chamferBox(px, 0.84 + sw * 1.7, pz, sw * 0.44, sw * 0.3, sw * 0.34, 0.012, 1, rng, 0.4);
+      b.m('sand').clearUvShift();
+    } else if (pick < 0.82) {
+      // A pyramid of gourds, three then one.
+      const gr = rng.range(0.045, 0.07);
+      const base: [number, number][] = [[-gr, -gr * 0.6], [gr, -gr * 0.6], [0, gr]];
+      const gourd: MatKey = rng.bool(0.5) ? 'sand' : 'tile';
+      for (const [ox, oz] of base) {
+        rock(b, gourd, px + ox, 0.84 + gr, pz + oz, gr, gr * 1.15, gr, rng, 9);
+      }
+      rock(b, gourd, px, 0.84 + gr * 2.7, pz, gr * 0.95, gr * 1.1, gr * 0.95, rng, 9);
+    } else {
+      // A short stack of tins, one knocked over.
+      const tr = rng.range(0.032, 0.048);
+      const n = 2 + rng.int(3);
+      for (let s = 0; s < n; s++) {
+        b.m('steel').cylinder(px + rng.range(-0.01, 0.01), 0.84 + s * tr * 2.3, pz + rng.range(-0.01, 0.01),
+          tr, tr, tr * 2.2, 9, 1, true, false);
+      }
+      if (rng.bool(0.5)) {
+        const rm = new THREE.Matrix4().makeTranslation(px + rng.range(0.08, 0.16), 0.84 + tr, pz + rng.range(-0.06, 0.06))
+          .multiply(new THREE.Matrix4().makeRotationZ(Math.PI / 2));
+        b.xf.push(rm);
+        b.m('steel').cylinder(0, 0, 0, tr, tr, tr * 2.2, 9, 1, true, false);
+        b.xf.pop();
+      }
+    }
   }
   b.xf.pop();
   b.collider({

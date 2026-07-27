@@ -102,20 +102,43 @@ export function buildQuay(b: LevelBuild, ground: Ground, rng: Rng): void {
       const p1x = a.x + (c.x - a.x) * t1;
       const p1z = a.z + (c.z - a.z) * t1;
       const d = QUAY.depth;
-      // Apron top.
+      /**
+       * APRON TOP — AND THE WINDING THAT MADE THE WHOLE QUAY INVISIBLE.
+       *
+       * `MeshBuilder.quad(a,b,c,d)` takes its normal from `(b−a) × (d−a)`. The
+       * edge tangent `t` runs west→east and the inland normal `n` is `(−t.z, t.x)`,
+       * so ordering the corners `p0 → p1 → …` walks ALONG the edge first and
+       * inland second, and `t × n = (0,−1,0)`: the slab was emitted facing
+       * DOWNWARDS and back-face culled from every camera above it.
+       *
+       * The failure is silent and it is enormous. The apron is the ground BRAVO
+       * stands on; with it culled, every frame that looked at the quay saw
+       * straight through 34 × 120 m of deck to the sea plane underneath, and
+       * everything that legitimately sits ON the deck — expansion joints, patched
+       * excavations, swept grit, armour stone — read as debris hovering over open
+       * water with no support, no contact shadow and no reflection. That is
+       * exactly the round-3 severity-9 on `sky_golden` ("a ~5 m brick platform
+       * floats unsupported over the water… two rocks are also suspended").
+       *
+       * Corners now walk INLAND first and along second, so the normal is `n × t`
+       * = +Y. Anything horizontal in this lane must satisfy that test.
+       */
       slab.quad(
         _v[0].set(p0x, deck, p0z),
-        _v[1].set(p1x, deck, p1z),
+        _v[1].set(p0x + nx * d, deck, p0z + nz * d),
         _v[2].set(p1x + nx * d, deck, p1z + nz * d),
-        _v[3].set(p0x + nx * d, deck, p0z + nz * d),
+        _v[3].set(p1x, deck, p1z),
         0.4,
       );
       // Seawall face, dropped to −4 m so it is buried whatever the seabed does.
+      // Wound so the normal is −n, i.e. SEAWARD: `t × (−Y) = (t.z, 0, −t.x) = −n`.
+      // The old order started at `p1` and gave +n, which pointed the only face
+      // the sea ever sees at the back of the apron.
       wall.quad(
-        _v[0].set(p1x, deck, p1z),
-        _v[1].set(p0x, deck, p0z),
-        _v[2].set(p0x, -4, p0z),
-        _v[3].set(p1x, -4, p1z),
+        _v[0].set(p0x, deck, p0z),
+        _v[1].set(p1x, deck, p1z),
+        _v[2].set(p1x, -4, p1z),
+        _v[3].set(p0x, -4, p0z),
         0.5,
       );
       /**
@@ -147,21 +170,22 @@ export function buildQuay(b: LevelBuild, ground: Ground, rng: Rng): void {
         const by = bandTop(u1);
         // Weed band: irregular top, running down to well below the surface.
         algae.setUvShift((p0x + q) * 0.7, p0z * 0.7);
+        // Seaward-facing, same winding rule as the wall behind it.
         algae.quad(
-          _v[0].set(bx - nx * 0.03, by, bz - nz * 0.03),
-          _v[1].set(ax - nx * 0.03, ay, az - nz * 0.03),
-          _v[2].set(ax - nx * 0.03, -1.6, az - nz * 0.03),
-          _v[3].set(bx - nx * 0.03, -1.6, bz - nz * 0.03),
+          _v[0].set(ax - nx * 0.03, ay, az - nz * 0.03),
+          _v[1].set(bx - nx * 0.03, by, bz - nz * 0.03),
+          _v[2].set(bx - nx * 0.03, -1.6, bz - nz * 0.03),
+          _v[3].set(ax - nx * 0.03, -1.6, az - nz * 0.03),
           0.7,
         );
         algae.clearUvShift();
         // Bleached splash band above it, 0.5–0.9 m tall, fading into the wall.
         salt.setUvShift((p0z + q) * 0.9, p0x * 0.9);
         salt.quad(
-          _v[0].set(bx - nx * 0.02, by + 0.62, bz - nz * 0.02),
-          _v[1].set(ax - nx * 0.02, ay + 0.62, az - nz * 0.02),
-          _v[2].set(ax - nx * 0.02, ay, az - nz * 0.02),
-          _v[3].set(bx - nx * 0.02, by, bz - nz * 0.02),
+          _v[0].set(ax - nx * 0.02, ay + 0.62, az - nz * 0.02),
+          _v[1].set(bx - nx * 0.02, by + 0.62, bz - nz * 0.02),
+          _v[2].set(bx - nx * 0.02, by, bz - nz * 0.02),
+          _v[3].set(ax - nx * 0.02, ay, az - nz * 0.02),
           0.7,
         );
         salt.clearUvShift();
@@ -1294,15 +1318,35 @@ export function buildBreakwater(b: LevelBuild, ground: Ground, rng: Rng): void {
       _v[3].set(p0x + nx * w0, deckY, p0z + nz * w0),
       0.4,
     );
-    // Flanks down to the seabed, or to the pier line.
+    /**
+     * Flanks down to the seabed, or to the pier line.
+     *
+     * The corner order has to FLIP with the side. `quad` normals are
+     * `(b−a) × (d−a)`; walking `p0 → p1` then down gives `+n`, which is outward
+     * on the `s = +1` flank and INTO the arm on `s = −1`. The old code used one
+     * fixed order for both, so half the breakwater's batter was back-face culled
+     * and the arm read as a slab floating on the water from the north side.
+     */
     for (const s of [1, -1]) {
-      stone.quad(
-        _v[0].set(p1x + s * nx * w1, deckY, p1z + s * nz * w1),
-        _v[1].set(p0x + s * nx * w0, deckY, p0z + s * nz * w0),
-        _v[2].set(p0x + s * nx * (w0 + 2.2), -6, p0z + s * nz * (w0 + 2.2)),
-        _v[3].set(p1x + s * nx * (w1 + 2.2), -6, p1z + s * nz * (w1 + 2.2)),
-        0.5,
-      );
+      const q0x = p0x + s * nx * w0;
+      const q0z = p0z + s * nz * w0;
+      const q1x = p1x + s * nx * w1;
+      const q1z = p1z + s * nz * w1;
+      const f0x = p0x + s * nx * (w0 + 2.2);
+      const f0z = p0z + s * nz * (w0 + 2.2);
+      const f1x = p1x + s * nx * (w1 + 2.2);
+      const f1z = p1z + s * nz * (w1 + 2.2);
+      if (s > 0) {
+        stone.quad(
+          _v[0].set(q0x, deckY, q0z), _v[1].set(q1x, deckY, q1z),
+          _v[2].set(f1x, -6, f1z), _v[3].set(f0x, -6, f0z), 0.5,
+        );
+      } else {
+        stone.quad(
+          _v[0].set(q1x, deckY, q1z), _v[1].set(q0x, deckY, q0z),
+          _v[2].set(f0x, -6, f0z), _v[3].set(f1x, -6, f1z), 0.5,
+        );
+      }
     }
     // Seaward parapet, broken in places by storms.
     if (!rng.bool(0.12)) {
