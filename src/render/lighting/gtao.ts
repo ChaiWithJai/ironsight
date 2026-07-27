@@ -156,6 +156,12 @@ const AO_PRELUDE = /* glsl */ `
 
   const float IRON_PI = 3.14159265359;
   const float IRON_HALF_PI = 1.57079632679;
+  /** Receiver-plane rejection threshold, sin(angle above the tangent plane). */
+  const float IRON_AO_PLANE_BIAS = 0.03;
+  /** Large-radius (sky) occlusion exponent — see the note where it is applied. */
+  const float IRON_AO_SKY_EXPONENT = 0.95;
+  /** Short-radius (contact) occlusion exponent. Absolute, not a multiple of the sky one. */
+  const float IRON_AO_CONTACT_EXPONENT = 3.0;
 
   vec3 ironViewPos( vec2 uv, float depth ) {
     vec2 ndc = uv * 2.0 - 1.0;
@@ -269,13 +275,32 @@ function aoBody(slices: number, steps: number): string {
         vec3 d = ironViewPos( vUv + offset, sb.a ) - P;
         float len = length( d );
         float c = dot( d, V ) / max( len, 1e-4 );
-        // RANGE CHECK: an occluder further away than the search radius fades out
-        // instead of stopping abruptly. Without this a foreground silhouette
-        // paints a hard grey outline onto everything behind it.
-        float w = clamp( 1.0 - ( len - uAoParams.y ) / uAoParams.z, 0.0, 1.0 );
-        cFarB = max( cFarB, mix( -1.0, c, w ) );
-        if ( len <= uAoParams.x ) cNearB = max( cNearB, c );
-        if ( len <= uAoParams2.x ) cMicroB = max( cMicroB, c );
+        // RECEIVER-PLANE REJECTION. A sample lying in or below this pixel's own
+        // tangent plane cannot occlude the hemisphere ABOVE that plane, so it is
+        // not an occluder at any angle. Without the test, a wall seen at a
+        // grazing angle occludes ITSELF: every tap along the wall is a point of
+        // the same plane, and the horizon it reports is the tangent plane, which
+        // is exactly the borderline the arc integral is least able to resolve.
+        // The normal fix-up twenty lines up makes it worse rather than better —
+        // bending N toward V to keep the slice angle inside ±90° tilts the
+        // tangent plane by the same few degrees, so the wall's own taps land
+        // INSIDE the bent hemisphere and register as real occluders. Measured on
+        // \`light_cascades\`: the near stucco wall, a single flat surface open to
+        // the whole sky, came back with 0.58 sky visibility on its sunlit half
+        // and 0.30 on its shaded half — a 2:1 occlusion gradient across one
+        // plane, which is a screen-space artefact and nothing else. It is what
+        // took that wall's shadow side to 20:1 below its lit side against
+        // LOOK_SPEC §2.5's 5–9:1 acceptance band.
+        //
+        // 0.03 is about 1.7°, enough to swallow half-res depth reconstruction
+        // error on a plane and far below the angle at which a real crease opens.
+        float plane = dot( d, N ) / max( len, 1e-4 );
+        if ( plane > IRON_AO_PLANE_BIAS ) {
+          float w = clamp( 1.0 - ( len - uAoParams.y ) / uAoParams.z, 0.0, 1.0 );
+          cFarB = max( cFarB, mix( -1.0, c, w ) );
+          if ( len <= uAoParams.x ) cNearB = max( cNearB, c );
+          if ( len <= uAoParams2.x ) cMicroB = max( cMicroB, c );
+        }
       }
 
       vec4 sa = texture( uGbuffer, vUv - offset );
@@ -283,10 +308,13 @@ function aoBody(slices: number, steps: number): string {
         vec3 d = ironViewPos( vUv - offset, sa.a ) - P;
         float len = length( d );
         float c = dot( d, V ) / max( len, 1e-4 );
-        float w = clamp( 1.0 - ( len - uAoParams.y ) / uAoParams.z, 0.0, 1.0 );
-        cFarA = max( cFarA, mix( -1.0, c, w ) );
-        if ( len <= uAoParams.x ) cNearA = max( cNearA, c );
-        if ( len <= uAoParams2.x ) cMicroA = max( cMicroA, c );
+        float plane = dot( d, N ) / max( len, 1e-4 );
+        if ( plane > IRON_AO_PLANE_BIAS ) {
+          float w = clamp( 1.0 - ( len - uAoParams.y ) / uAoParams.z, 0.0, 1.0 );
+          cFarA = max( cFarA, mix( -1.0, c, w ) );
+          if ( len <= uAoParams.x ) cNearA = max( cNearA, c );
+          if ( len <= uAoParams2.x ) cMicroA = max( cMicroA, c );
+        }
       }
     }
 
@@ -307,7 +335,19 @@ function aoBody(slices: number, steps: number): string {
   float aoFar = clamp( visibilityFar * inv, 0.0, 1.0 );
   float aoNear = clamp( visibilityNear * inv, 0.0, 1.0 );
   float aoMicro = clamp( visibilityMicro * inv, 0.0, 1.0 );
-  aoFar = pow( aoFar, uAoParams.w );
+  // THE SKY EXPONENT IS BELOW 1 AND THE CONTACT EXPONENT IS ABSOLUTE, AND THEY
+  // ARE SEPARATE FOR A REASON. The two terms had one intensity between them, so
+  // deepening a contact band also deepened every large-radius sky occlusion, and
+  // the large radius is the one that reaches whole shaded walls. Measured on
+  // \`light_cascades\` against \`bfv_gp_031\`, the corpus frame the reference index
+  // names for adjacent lit and shaded walls: the reference's shaded concrete
+  // holds its grain, joints and streaking, ours went to a flat black slab at
+  // 0.045 display against a 0.92 lit face — 20:1, against LOOK_SPEC §2.5's
+  // 5–9:1. A sky-visibility estimate raised to 1.25 is an artistic exaggeration
+  // that a real horizon integral does not justify, and it was costing exactly
+  // the material readability the blind A/B was losing on. 0.95 is a mild
+  // de-exaggeration; the contact band below keeps its own, much stronger, one.
+  aoFar = pow( aoFar, IRON_AO_SKY_EXPONENT );
   // The contact term carries a stronger exponent than the sky term on purpose.
   // The rubric asks for "darkening ... where every object meets the ground" and
   // for that band to be DARKER than the cast shadow it sits inside; a horizon
@@ -320,7 +360,7 @@ function aoBody(slices: number, steps: number): string {
   // Checked on light_interior with the AO channels written to the framebuffer:
   // a column/floor joint reads the same 0.20 visibility it did, while the
   // arcade soffit's SKY visibility has gone from 0.30 to 0.10.
-  aoNear = pow( aoNear, uAoParams.w * 2.4 );
+  aoNear = pow( aoNear, IRON_AO_CONTACT_EXPONENT );
   // The micro term is COMPOSITED, not averaged: a pebble occludes the 13 cm
   // around it and nothing beyond, so its occlusion is a separate event from the
   // 0.55 m crease term rather than a noisier estimate of the same one, and the

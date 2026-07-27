@@ -212,6 +212,36 @@ const RELIEF_SURFACES: ReadonlySet<SurfaceId> = new Set([
 ]);
 
 /**
+ * Surfaces THIN ENOUGH FOR LIGHT TO GET THROUGH, decided by the factory for the
+ * same reason `RELIEF_SURFACES` is: it is a property of the substance, not of
+ * the mesh, and no emitting lane should have to remember a feature bit for it.
+ *
+ * The round-3 material critique asked for "a cloth with transmission — the
+ * awning", and the awning was in frame the whole time. It rendered as a
+ * featureless dark slab because the sun is BEHIND it: a canopy staged against a
+ * low sun is lit almost entirely from the far side, so with no transmission term
+ * the only thing reaching the camera is ambient, and 0.6 m² of warm tan canvas
+ * comes back as a black rectangle. A market awning at golden hour is one of the
+ * brightest objects in a real frame, and the difference between those two
+ * outcomes is this set.
+ *
+ * Sandbag and kevlar are deliberately NOT in it. They take the sheen lobe
+ * (SHEEN_SURFACES above) because their surface scatters, but they are 200 mm of
+ * packed sand and 20 plies of aramid respectively, and nothing goes through
+ * either of them.
+ */
+const THIN_SURFACES: ReadonlySet<SurfaceId> = new Set([
+  SurfaceId.Fabric,
+  SurfaceId.Tarp,
+  SurfaceId.Foliage,
+]);
+
+/** Translucency is either asked for, or implied by the substance. */
+function wantsTranslucency(spec: MaterialSpec): boolean {
+  return (spec.features & MaterialFeature.Translucency) !== 0 || THIN_SURFACES.has(spec.surface);
+}
+
+/**
  * THE CHROMA CEILING, per surface — the maximum saturation a material's LINEAR
  * albedo is allowed to reach, whatever the emitting lane authored.
  *
@@ -397,7 +427,15 @@ function definesFor(
   if (f & MaterialFeature.AlphaFromHeight) d.IRON_ALPHA_FROM_HEIGHT = '1';
   if (f & MaterialFeature.SoftParticle) d.IRON_SOFT_PARTICLE = '1';
   if (f & MaterialFeature.DitherFade) d.IRON_DITHER_FADE = '1';
-  if (f & MaterialFeature.Translucency) d.IRON_TRANSLUCENCY = '1';
+  if (wantsTranslucency(spec)) {
+    d.IRON_TRANSLUCENCY = '1';
+    // Woven cloth gets the thickness map inside the transmission term. Foliage
+    // does not: a leaf lamina is one thickness and VEG's own frond mask already
+    // carries its variation.
+    if (spec.surface === SurfaceId.Fabric || spec.surface === SurfaceId.Tarp) {
+      d.IRON_THIN_CLOTH = '1';
+    }
+  }
   if (f & MaterialFeature.Anisotropic) d.IRON_ANISO = '1';
   return d;
 }
@@ -644,7 +682,7 @@ export function buildIronMaterial(opts: IronMaterialOptions): IronMaterialResult
     fs = fs.replace('#include <normal_fragment_maps>', IRON_NORMAL_APPLY);
     fs = fs.replace(
       '#include <aomap_fragment>',
-      `${IRON_AO_AND_SHEEN}\n${f & MaterialFeature.Translucency ? IRON_TRANSLUCENCY : ''}`,
+      `${IRON_AO_AND_SHEEN}\n${wantsTranslucency(spec) ? IRON_TRANSLUCENCY : ''}`,
     );
     fs = fs.replace(
       '#include <opaque_fragment>',

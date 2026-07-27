@@ -153,20 +153,38 @@ uniform sampler2D ironAoTex;
 #define IRON_MAX_PLANE_SLOPE 8.0
 /**
  * How much of the geometric cosine the normal map is allowed to add or take
- * away. See \`ironTerminatorNormal\`. 0.6 lets the relief modulate the sun by
- * ±60 % — visually a strong, clearly readable raking texture — while capping the
- * lit:shaded ratio inside one pixel's worth of relief at 4:1 instead of the
- * infinity a hard \`max(N·L, 0)\` allows.
+ * away where the sun is square on the surface. See \`ironTerminatorNormal\`.
+ * ±30 % is a strong, clearly readable raking texture and caps the lit:shaded
+ * ratio inside one pixel's worth of relief at 1.9:1 instead of the infinity a
+ * hard \`max(N·L, 0)\` allows.
  */
 #define IRON_TERMINATOR_CAP 0.30
+/**
+ * Where the cap starts closing, in geometric cosine. See \`ironTerminatorNormal\`
+ * — the cap is a FRACTION of \`ndlGeom\`, so on its own it still lets the relief
+ * halve and double the sun's contribution a hair's width from a terminator,
+ * which is what turns a magnified normal map into the blocky mosaic with
+ * detached islands that round 3 measured on \`light_cascades\`. Shrinking the
+ * fraction as well as the absolute limit is what makes the terminator resolve as
+ * a ramp with relief inside it rather than a two-tone mask.
+ */
+#define IRON_TERMINATOR_KNEE 0.30
 /**
  * Fraction of a surface's SKY irradiance that arrives from the circumsolar cone,
  * and is therefore lost when something up-sun puts it in shadow. See
  * \`ironAureoleLoss\`. MIN is the near-horizontal-ground case (the cone is caught
  * at a glancing 11°), MAX a face square to the sun.
+ *
+ * Round 3 raised these from 0.12/0.35. They are the half of the key:fill fix
+ * that only touches surfaces the sun is actually blocked from, so unlike the
+ * sky-diffuse anchor they cost nothing on a face that never sees the sun in the
+ * first place — which is most of what a shaded alley or a north wall is made of.
+ * The pair is deliberately flatter than it was (0.30–0.45 rather than
+ * 0.12–0.35): the sun-square end was taking a face already sitting at the bottom
+ * of §2.5's 5–9:1 band and pushing it out of the band entirely.
  */
-#define IRON_AUREOLE_MIN 0.12
-#define IRON_AUREOLE_MAX 0.35
+#define IRON_AUREOLE_MIN 0.30
+#define IRON_AUREOLE_MAX 0.45
 #define IRON_MAX_LOCAL_LIGHTS ${IRON_MAX_LOCAL_LIGHTS}
 #define IRON_LIGHT_BASE ${V_LIGHT_BASE}
 /** Debug mode selectors. \`#define\` so the ints never land in float context. */
@@ -456,9 +474,24 @@ vec3 ironTerminatorNormal( const in vec3 shading, const in vec3 geom, const in v
   float ndlG = dot( geom, lightDir );
   float ndlS = dot( shading, lightDir );
   float perturbation = ndlS - ndlG;
-  // The floor keeps a face that is exactly edge-on from losing its normal map
-  // discontinuously; 0.012 is about a degree of tilt and is invisible.
-  float limit = IRON_TERMINATOR_CAP * max( ndlG, 0.0 ) + 0.012;
+  // THE FRACTION CLOSES AS WELL AS THE LIMIT. A pure CAP-times-ndlG cap holds the
+  // RELATIVE modulation at ±CAP all the way down to ndlG = 0, so a pixel one
+  // texel from a terminator still swings the sun by 1.9:1 — and since a normal
+  // map magnified over a near wall changes in blocks, that is exactly the
+  // rectangular mosaic and the detached islands round 3 measured on the
+  // light_cascades foreground wall. Weighting by ndlG/(ndlG + KNEE),
+  // renormalised so a sun-facing surface still gets the full ±CAP, takes the
+  // relative modulation to ±13 % at ndlG = 0.19 (flat ground under an 11° sun,
+  // where the relief still reads) and to ±3 % at ndlG = 0.03, where the mosaic
+  // used to live. The floor keeps a face that is exactly edge-on from losing its
+  // normal map discontinuously; 0.0015 is a tenth of a degree of tilt. It has to be
+  // this small: at 0.008 it was larger than the tapered limit itself for every
+  // ndlG under 0.03, so the last stripe before a terminator still crossed zero
+  // and the edge kept a residual normal-map staircase after the taper had
+  // removed the mosaic behind it.
+  float g = max( ndlG, 0.0 );
+  float taper = ( g / ( g + IRON_TERMINATOR_KNEE ) ) * ( 1.0 + IRON_TERMINATOR_KNEE );
+  float limit = IRON_TERMINATOR_CAP * g * taper + 0.0015;
   float t = clamp( limit / max( abs( perturbation ), 1e-4 ), 0.0, 1.0 );
   vec3 mixed = mix( geom, shading, t );
   float len = length( mixed );
@@ -674,7 +707,6 @@ export function installShadingModel(quality: Readonly<QualitySettings>): void {
 			float ironS = ironSunShadow( ironWp, ironWn, -geometryPosition.z, ironNdl );
 			ironDebug.x = ironS;
 			ironSunVis = ironS;
-			ironDebug.y = dot( normalize( ironWorldDir( geometryNormal ) ), ironVec[${V_SUN}].xyz );
 			ironDebug.w = ironContactSun();
 			directLight.color *= ironS * ironDebug.w;
 			// Park the shading normal and shade the sun through the clamped one.
@@ -682,6 +714,12 @@ export function installShadingModel(quality: Readonly<QualitySettings>): void {
 			// reads it — the sky ambient must keep the full normal map.
 			ironNormalSaved = geometryNormal;
 			geometryNormal = ironTerminatorNormal( geometryNormal, nonPerturbedNormal, directLight.direction );
+			// DEBUG_NDL reports the cosine the sun is ACTUALLY shaded through, i.e.
+			// after the terminator clamp. Reporting the raw perturbed cosine (which
+			// is what it used to do) makes the clamp invisible to the one tool that
+			// exists to check it, and cost a round of chasing a shadow-map bug that
+			// was really a normal-map terminator.
+			ironDebug.y = dot( normalize( ironWorldDir( geometryNormal ) ), ironVec[${V_SUN}].xyz );
 		}
 		#else
 ${dirShadow}		#endif

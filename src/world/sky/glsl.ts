@@ -396,11 +396,47 @@ vec3 ironHazeRadiance(vec3 dir, vec3 sunDir, vec3 sunChroma, float turbidity, fl
  * being applied to an object that is not one.
  *
  * Luminance is preserved by construction, so no radiance in §2.4's table moves.
+ *
+ * ── THE COOL BRANCH, AND WHY THE ASYMMETRY DID NOT SURVIVE ROUND 3 ──────────
+ *
+ * Round 3, severity 8, on 'level_alpha': "the sky is achromatic. At zenith it
+ * measures RGB(198.5, 201.2, 202.2), a saturation of 1.8 %. A physical Rayleigh
+ * sky at this elevation should be 25–45 % saturated overhead … the horizon
+ * warming is already directionally correct, R > B at y = 240, so the Mie lobe is
+ * doing something; the failure is entirely in the Rayleigh term at high zenith
+ * angles."
+ *
+ * The Rayleigh term is not the failure — the same dome measures 55 % at the
+ * zenith on 'sky_clouds', where the sun is 11° higher and the sky lands two
+ * stops lower on the transfer. What changes between those two frames is WHERE ON
+ * THE SHOULDER the sky sits, and that is the exact mechanism this function was
+ * written for. It was only ever wired to the warm half.
+ *
+ * The asymmetry was defensible when it was written: the one frame it had been
+ * measured on put the anti-sun sky at S 0.19 against the corpus' 0.21, i.e.
+ * already right, and an unconditional expansion would have overshot it. It is
+ * not defensible across the roster, because a sky at display 0.77 is high enough
+ * on AgX's shoulder to lose three quarters of its chroma whichever side of
+ * neutral it sits on, and a WARM-ONLY correction guarantees that every frame
+ * whose sky is blue rather than gold comes back grey.
+ *
+ * The cool ramp is deliberately the gentler of the two — 2.1× against 2.6×, and
+ * it starts at |B−R| = 0.06·Y rather than 0.02·Y — so the achromatic horizon
+ * band §3.1 measures at S 0.04 is untouched by construction and only genuinely
+ * blue sky is expanded. It also lands on the right side of §3.2's third property
+ * ("anti-sun distance goes BLUER and more saturated than the horizon sky it sits
+ * against"), because the aerial-perspective chunk shares this function.
  */
 vec3 ironSkyChroma(vec3 c) {
   float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
-  float warm = clamp((c.r - c.b) / max(lum, 1.0), 0.0, 1.0);
-  return max(vec3(0.0), mix(vec3(lum), c, mix(1.0, 2.6, smoothstep(0.02, 0.13, warm))));
+  float bias = (c.r - c.b) / max(lum, 1.0);
+  float warm = clamp(bias, 0.0, 1.0);
+  float cool = clamp(-bias, 0.0, 1.0);
+  // The two branches are separate ramps because the two failures are separate
+  // and were measured on different frames — see the COOL BRANCH note above.
+  float gain = mix(1.0, 2.6, smoothstep(0.02, 0.13, warm))
+             + mix(0.0, 2.4, smoothstep(0.06, 0.34, cool));
+  return max(vec3(0.0), mix(vec3(lum), c, gain));
 }
 `;
 

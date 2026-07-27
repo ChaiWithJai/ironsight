@@ -29,6 +29,9 @@ const _c = new THREE.Vector3();
 const _n = new THREE.Vector3();
 const _e1 = new THREE.Vector3();
 const _e2 = new THREE.Vector3();
+/** Orthonormal in-plane texture frame. See `quad`. */
+const _tu = new THREE.Vector3();
+const _tv = new THREE.Vector3();
 
 /** Shared transform stack. One per build; every `MeshBuilder` reads it. */
 export class Xform {
@@ -128,9 +131,48 @@ export class MeshBuilder {
   }
 
   /**
+   * Build the ORTHONORMAL in-plane texture frame for a polygon whose first two
+   * edge vectors are already in `_e1` (a→b) and `_e2` (a→d or a→c). Leaves the
+   * unit face normal in `_n`, the u axis in `_tu` and the v axis in `_tv`.
+   *
+   * ROUND 3 — THIS IS THE BUG THAT PUT BLACK SPIKES AROUND EVERY ARCH IN THE
+   * LEVEL, AND IT WAS IN THE BUILDER, NOT IN ANY OF THE CALLERS.
+   *
+   * What this used to do was measure u along a→b and v along a→d and project
+   * the remaining corners onto THOSE TWO VECTORS. That is only a texture frame
+   * if the two edges are perpendicular. On a rectangle they are, which is why
+   * 95 % of the level looked right. On the spandrel cells of an arch head near
+   * the springing, the a→b chord is within a few degrees of vertical and a→d is
+   * exactly vertical: the two "axes" are nearly PARALLEL, so u and v measure the
+   * same direction, the uv triangle collapses to a line, and its screen-space
+   * derivatives — which is what the uber material uses to pick a mip and to
+   * build its tangent frame — go to infinity. The result is a perturbed normal
+   * pointing anywhere at all, and under any sun a good half of those faces land
+   * past the terminator and shade black. Twenty-four black slivers fanning out
+   * of every arch head, which round 2 measured on `material_chart` as "~8
+   * disconnected flat trapezoids forming a serrated sawtooth… hard V-notches…
+   * degenerate stretched vertical streak triangles". The geometry was never
+   * disconnected and there was never a gap; the texture frame was degenerate.
+   *
+   * Gram–Schmidt against the face normal fixes it for every shape at once:
+   * `u = â`, `v = n̂ × û`, both unit, always perpendicular, both measuring true
+   * metres in the plane. On a rectangle it is bit-for-bit what the old code
+   * produced, so nothing that was already correct moves.
+   */
+  private texFrame(): void {
+    _n.crossVectors(_e1, _e2);
+    if (_n.lengthSq() < 1e-18) _n.set(0, 0, 1);
+    else _n.normalize();
+    if (_e1.lengthSq() > 1e-12) _tu.copy(_e1).normalize();
+    else if (_e2.lengthSq() > 1e-12) _tu.copy(_e2).normalize();
+    else _tu.set(1, 0, 0);
+    _tv.crossVectors(_n, _tu).normalize();
+  }
+
+  /**
    * A planar quad, wound a→b→c→d (counter-clockwise seen from the front). The
-   * normal is the face normal; UVs run along the a→b and a→d edges in metres, so
-   * a rectangle never stretches no matter how it is proportioned.
+   * normal is the face normal; UVs are true metres in the plane of the face, so
+   * neither a rectangle nor a trapezoid nor a sliver can stretch or shear.
    */
   quad(
     a: THREE.Vector3,
@@ -143,29 +185,29 @@ export class MeshBuilder {
   ): void {
     _e1.subVectors(b, a);
     _e2.subVectors(d, a);
-    _n.crossVectors(_e1, _e2).normalize();
-    const uLen = _e1.length() * uvScale;
-    const vLen = _e2.length() * uvScale;
-    // The c corner is not necessarily at (uLen, vLen) if the quad is a
-    // trapezoid, so project it rather than assuming a parallelogram.
+    this.texFrame();
+    const ub = _e1.dot(_tu) * uvScale;
+    const vb = _e1.dot(_tv) * uvScale;
+    const ud = _e2.dot(_tu) * uvScale;
+    const vd = _e2.dot(_tv) * uvScale;
     _c.subVectors(c, a);
-    const uc = _e1.lengthSq() > 1e-9 ? (_c.dot(_e1) / _e1.length()) * uvScale : uLen;
-    const vc = _e2.lengthSq() > 1e-9 ? (_c.dot(_e2) / _e2.length()) * uvScale : vLen;
+    const uc = _c.dot(_tu) * uvScale;
+    const vc = _c.dot(_tv) * uvScale;
     const i0 = this.vertex(a.x, a.y, a.z, _n.x, _n.y, _n.z, uOffset, vOffset);
-    const i1 = this.vertex(b.x, b.y, b.z, _n.x, _n.y, _n.z, uOffset + uLen, vOffset);
+    const i1 = this.vertex(b.x, b.y, b.z, _n.x, _n.y, _n.z, uOffset + ub, vOffset + vb);
     const i2 = this.vertex(c.x, c.y, c.z, _n.x, _n.y, _n.z, uOffset + uc, vOffset + vc);
-    const i3 = this.vertex(d.x, d.y, d.z, _n.x, _n.y, _n.z, uOffset, vOffset + vLen);
+    const i3 = this.vertex(d.x, d.y, d.z, _n.x, _n.y, _n.z, uOffset + ud, vOffset + vd);
     this.index.push(i0, i1, i2, i0, i2, i3);
   }
 
-  /** Triangle with a flat normal. */
+  /** Triangle with a flat normal and the same orthonormal texture frame. */
   triangle(a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3, uvScale = 1): void {
     _e1.subVectors(b, a);
     _e2.subVectors(c, a);
-    _n.crossVectors(_e1, _e2).normalize();
+    this.texFrame();
     const i0 = this.vertex(a.x, a.y, a.z, _n.x, _n.y, _n.z, 0, 0);
-    const i1 = this.vertex(b.x, b.y, b.z, _n.x, _n.y, _n.z, _e1.length() * uvScale, 0);
-    const i2 = this.vertex(c.x, c.y, c.z, _n.x, _n.y, _n.z, _e1.dot(_e2) / Math.max(_e1.length(), 1e-6) * uvScale, _e2.length() * uvScale);
+    const i1 = this.vertex(b.x, b.y, b.z, _n.x, _n.y, _n.z, _e1.dot(_tu) * uvScale, _e1.dot(_tv) * uvScale);
+    const i2 = this.vertex(c.x, c.y, c.z, _n.x, _n.y, _n.z, _e2.dot(_tu) * uvScale, _e2.dot(_tv) * uvScale);
     this.index.push(i0, i1, i2);
   }
 

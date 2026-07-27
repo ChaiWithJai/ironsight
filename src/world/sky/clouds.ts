@@ -397,8 +397,37 @@ float ironCloudPhase(float c, float e) {
  * Deliberately NOT an ordered dither, not Bayer, and not interleaved gradient
  * noise: all three are regular lattices, and a regular lattice used to offset a
  * ray start prints itself over the cloud as structured blocks — the round-1
- * defect this file exists to have fixed. This is white in screen space and a
- * pure function of the pixel, so it is stable frame to frame and cannot crawl.
+ * defect this file exists to have fixed. This is white in screen space.
+ *
+ * ── IT IS NO LONGER STATIC, AND THAT IS THE ROUND-3 DENOISE ─────────────────
+ *
+ * A ray start jittered over a FULL stride is the only thing keeping the geometric
+ * schedule from printing iso-distance contours through the deck, and a full
+ * stride at 24–40 m is a large fraction of the distance over which a cloud edge
+ * goes from transparent to opaque. So the jitter buys a smooth interior at the
+ * price of per-pixel variance concentrated exactly on the silhouette, which is
+ * what rounds 2 and 3 both measured: |∇²L| at a cloud rim ran 25× the clear-sky
+ * noise floor, visible unmagnified as a 4–6 px stipple band around every cloud.
+ *
+ * Raising the raw step count is the expensive wrong answer — the variance falls
+ * as 1/N and the cost rises as N. The cheap answer is that the estimator is
+ * unbiased, so AVERAGING IT OVER TIME converges it, and RCORE already ships the
+ * accumulator: 'taa.resolve' blends 1/taaSamples of the current frame into a
+ * reprojected history every frame. All it needed was for successive frames to
+ * draw different samples, which a hash of 'gl_FragCoord' alone never does.
+ *
+ * 'ironCloudJitter' therefore advances the offset by the golden-ratio conjugate
+ * per frame. That sequence is the standard low-discrepancy choice: any window of
+ * n consecutive frames is spread near-uniformly over [0,1) for every n, so the
+ * running mean converges from the first few frames rather than after a full
+ * period, and it never repeats a lattice with the spatial hash. TAA's
+ * neighbourhood clamp cannot reject it — the clip box is ±1.45σ of the LOCAL
+ * SPATIAL variance, which for a noisy region is exactly the width the temporal
+ * samples span — so the history keeps averaging instead of being reset.
+ *
+ * The sky is static in world space and the camera's own motion is what TAA
+ * reprojects, so this is the cheapest possible denoise: no extra buffer, no
+ * bilateral pass, and the cost of the march is unchanged.
  */
 float ironCloudHash(vec2 p) {
   vec3 q = fract(vec3(p.x, p.y, p.x) * 0.1031);
@@ -406,17 +435,24 @@ float ironCloudHash(vec2 p) {
   return fract((q.x + q.y) * q.z);
 }
 
+/** Spatial hash advanced by the golden-ratio conjugate once per frame. */
+float ironCloudJitter(vec2 p, float frame) {
+  return fract(ironCloudHash(p) + frame * 0.61803399);
+}
+
 /**
  * March the slab. Returns transmittance in .a and scattered radiance (cd/m²) in
  * .rgb. 'steps' comes from the tier table; 'sunIrradiance' is the illuminance on
  * a plane normal to the sun ABOVE the deck, in lux — NOT divided by 4π, the
  * phase above is a real sr⁻¹ phase function and carries the solid angle itself.
- * 'skyFill' is the hemispherical sky irradiance the deck floats in, in cd/m²,
- * computed once per frame on the CPU. 'jitter' is a per-pixel [0,1) offset.
+ * 'skyFillTop' and 'skyFillBase' are the sky radiance a cloud CROWN and a cloud
+ * BASE respectively float in, in cd/m², two separate quadratures computed once
+ * per state change on the CPU (see FILL_BASE_DIRS in system.ts).
+ * 'jitter' is a per-pixel [0,1) offset that advances once per frame.
  */
 vec4 ironCloudMarch(
-  vec3 origin, vec3 dir, vec3 sunDir, vec3 sunIrradiance, vec3 skyFill,
-  int steps, float density, float jitter
+  vec3 origin, vec3 dir, vec3 sunDir, vec3 sunIrradiance, vec3 skyFillTop,
+  vec3 skyFillBase, int steps, float density, float jitter
 ) {
   float t0, t1;
   if (!ironCloudSlab(origin, dir, t0, t1)) return vec4(0.0, 0.0, 0.0, 1.0);
@@ -555,11 +591,41 @@ vec4 ironCloudMarch(
     // afford a smoother density than the silhouette it falls on, and matching
     // the MEAN is what keeps the sun march and the view march agreeing on how
     // much medium there is between them.
+    //
+    // ── THE FIRST TWO SEGMENTS NOW CARRY THE SHAPE OCTAVE, AND THAT IS WHERE
+    //    A CUMULUS GETS ITS INSIDES ────────────────────────────────────────
+    //
+    // Round 3, severity 9: "the right cloud body holds one value across ~250 px
+    // of interior — no billow, no darker base, no brighter core". The density
+    // field was never the reason. Everything the eye reads as internal structure
+    // on a real cumulus is SHADING — one lobe shadowing the next — and this
+    // march is the entire shading term, so if it runs on a smoothed density the
+    // cloud has smooth insides no matter how much detail the silhouette carries.
+    // With both octaves at their mean the only thing the sun ray could see was
+    // the coverage/profile field, whose cells are 2.9 km across: at the 4–12 km
+    // the deck is seen at that is a gradient over a third of the frame and
+    // nothing else. Hence one flat value per cloud.
+    //
+    // The band limit is still respected, and it is what decides WHICH segments
+    // get it. The shape octave's dominant feature is a 267 m billow, so Nyquist
+    // allows it at a step of ~130 m and no more; the schedule below runs 85,
+    // 170, 340, 680 m, so the first segment is comfortably inside that, the
+    // second is at the limit and is faded, and the last two are not and stay at
+    // the mean — sampling a 267 m billow at 680 m is aliasing, and aliased
+    // shadow noise is worse than no shadow detail. The erosion octave's 37 m
+    // cells are past the limit on every segment and stay at the mean throughout.
+    //
+    // Weighting the near segments is also the right approximation physically:
+    // the first 255 m of the sun ray is where the density gradient that
+    // separates one billow from its neighbour actually lives, and it is what
+    // decides whether this sample sits on a lit shoulder or in the trough
+    // behind it. The far segments only set the overall depth of the cloud.
+    const float LIGHT_SHAPE_W[4] = float[4](1.0, 0.55, 0.0, 0.0);
     float lightTau = 0.0;
     float ls = 85.0;
     float lt = 0.0;
     for (int j = 0; j < 4; j++) {
-      lightTau += ironCloudDensity(p + sunDir * (lt + ls * 0.5), 0.0, 0.0) * density * ls;
+      lightTau += ironCloudDensity(p + sunDir * (lt + ls * 0.5), LIGHT_SHAPE_W[j], 0.0) * density * ls;
       lt += ls;
       ls *= 2.0;
     }
@@ -569,7 +635,20 @@ vec4 ironCloudMarch(
     // seen against the sun is DARKER than Beer alone predicts and a thick one
     // brighter. Only the single-scatter octave gets it; the higher orders are
     // diffuse by construction and powdering them flattens the whole cloud.
+    //
+    // GATED ON BACK-SCATTER GEOMETRY, WHICH IS THE OTHER HALF OF THE MISSING
+    // SILVER LINING. The powder approximation models the deficit of multiply
+    // scattered light near an illuminated boundary — it belongs to a cloud lit
+    // FROM THE CAMERA'S SIDE, where the eye and the sun see the same face. On a
+    // BACK-LIT edge the physics runs the other way: a thin rim between the eye
+    // and the sun is the brightest thing in the sky precisely because the
+    // forward lobe dumps almost all of its energy straight down the view ray,
+    // and darkening it by 25 % is what has been deleting the silver lining from
+    // every golden-hour frame this lane has shipped. sky_golden's clouds sit
+    // within 20° of the sun and were getting the full penalty.
     float powder = 1.0 - exp(-tauL * 2.0);
+    // 1 at the anti-sun side, 0 once the view ray is inside ~65° of the sun.
+    float powderW = 0.25 * smoothstep(0.42, -0.15, cosTheta);
     // The deepest octave's extinction scale is 0.055, not 0.028, and that is the
     // OTHER half of round 2's flat cloud. At 0.028 a core at τ ≈ 25 toward the
     // sun still transmits 50 % of the fourth order, so the fourth order became a
@@ -578,7 +657,7 @@ vec4 ironCloudMarch(
     // 25 %, which keeps the octave doing its job — giving a thick cloud a route
     // to ~E/π — without letting it paint the base the same value as the crown.
     vec3 sun = sunIrradiance * (
-        ph0 * exp(-tauL) * mix(1.0, powder * 1.7, 0.25)
+        ph0 * exp(-tauL) * mix(1.0, powder * 1.7, powderW)
       + ph1 * exp(-tauL * 0.320)
       + ph2 * exp(-tauL * 0.115)
       + ph3 * exp(-tauL * 0.055));
@@ -620,8 +699,36 @@ vec4 ironCloudMarch(
     // half of why the underside read as smoke.
     float upTau = ironCloudDensity(p + vec3(0.0, 300.0, 0.0), 0.0, 0.0)
                 * density * 300.0 * IRON_CLOUD_SIGMA;
-    float buried = exp(-(tauL * 0.32 + upTau * 0.85));
+    // A DIFFUSION FALLOFF, NOT BEER'S LAW. This term is how much SKY FILL — i.e.
+    // multiply-scattered light — reaches a buried sample, and multiply-scattered
+    // light does not obey exp(-tau); it diffuses, and the thick-medium limit of a
+    // diffusion solution goes as 1/tau, not e^-tau. Beer's law also saturates
+    // numerically here: under a kilometre of cloud tauL is past 20 and exp(-17) is
+    // zero in float, so every sample on a thick base returned the same zero
+    // regardless of what stood above it.
+    //
+    // HONEST RESULT: measured, this deepens a thick base by about 0.01 display and
+    // moves its internal standard deviation by under 0.001 — the base's radiance
+    // is dominated by the multiple-scattering octaves and by the sky transmitted
+    // through it, not by this term. It is kept because it is the more correct
+    // model at no cost, not because it fixed anything visible. The remaining
+    // flatness of a very near, very thick cloud BASE is a real open defect; see
+    // the report.
+    float buried = 1.0 / (1.0 + tauL * 0.32 + upTau * 0.85);
     float skyOcc = mix(0.44, 1.0, hh * hh) * (0.42 + 0.58 * buried);
+    // ── WHICH SKY, NOT JUST HOW MUCH OF IT ──────────────────────────────────
+    // A crown sees the zenith hemisphere; a base sees the horizon band and the
+    // ground under it, which at an 11° sun is three to four times brighter and
+    // markedly warmer. Interpolating the two by depth in the slab is what puts
+    // the WARM-BASE / COOL-CROWN inversion into the deck — the property that
+    // separates a golden-hour cloud from a midday one, and the clearest single
+    // tell against the corpus' low-sun anchor before this landed. See
+    // FILL_BASE_DIRS in system.ts for the two quadratures.
+    //
+    // hh^0.7 rather than hh: the transition belongs LOW in the cloud, because the
+    // horizon band stops being the dominant source as soon as a sample has any
+    // appreciable body above it, which on a cumulus is most of its height.
+    vec3 skyFill = mix(skyFillBase, skyFillTop, pow(hh, 0.7));
     // CLAMPED HERE, PER SAMPLE, AND NOT ONLY ON THE ACCUMULATED TOTAL. Inside
     // ~2° of the sun the narrow lobe of ironCloudPhase reaches 6.5 sr⁻¹, and
     // 6.5 × the 55 200 lx red channel is 1.4e5 cd/m² — past fp16's 65 504. The
@@ -654,7 +761,9 @@ vec4 ironCloudMarch(
   // integral that came out darker than (that floor × the opacity it
   // accumulated) is an artefact of the march and not a shadow.
   scatter = min(scatter, vec3(6.0e4));
-  scatter = max(scatter, skyFill * 0.030 * (1.0 - transmittance));
+  // The floor takes the DIMMER of the two fills so it can never lift a crown; it
+  // is a march artefact guard, not a light source.
+  scatter = max(scatter, min(skyFillTop, skyFillBase) * 0.030 * (1.0 - transmittance));
   return vec4(scatter, transmittance);
 }
 `;

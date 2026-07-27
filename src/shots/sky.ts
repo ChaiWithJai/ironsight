@@ -24,10 +24,12 @@ registerShot({
   description:
     'GOLDEN, 17.4 h, sun at 11°: the physical Rayleigh/Mie dome read THROUGH a ' +
     'gantry lattice, with a crane leg at 4.2 m carrying the near-field bokeh, ' +
-    'the sun disc inside the second crane at 38 m, and the CHARLIE headland ' +
-    'dissolving into the aerial-perspective ladder behind it. Proves hue-locked ' +
-    'sky, a bright horizon that warms toward the sun azimuth, and distance that ' +
-    'desaturates into the same colour as the sky above it.',
+    'the sun disc inside the second crane at 38 m, and a five-layer aerial ' +
+    'ladder running truss / warehouse / container stack / crane portal / veiled ' +
+    'coast. Proves hue-locked sky, a bright horizon that warms toward the sun ' +
+    'azimuth, distance that desaturates into the same colour as the sky above ' +
+    'it, and that the near-field haze is gated by how much sky the medium can ' +
+    'actually see rather than being applied at open-sky strength inside a shed.',
   frames: 24,
   setup(ctx) {
     ctx.seed(0x5c1);
@@ -50,19 +52,32 @@ registerShot({
     // gameplay restraint (CoC ≤ 3 px) to a real 7-blade aperture at
     // `fovDeg <= 40`; §7.1 puts the cinematic lens at 38° and the player's own
     // slider bottoms out at 60, so this cannot leak into gameplay. Auto-focus
-    // reads the CENTRE pixel's depth clamped to [1.5, 60] m — the sightline is
-    // pitched 2.2° down so the ray reaches apron level 42 m out and lands on
-    // solid quay rather than on sky or on open water, either of which drops the
-    // focus to its 4 m fallback and melts the frame. At that focus the near leg
-    // carries the full 32 px of CoC and everything past 30 m is sharp.
+    // reads the CENTRE pixel's depth clamped to [1.5, 60] m, so the centre ray has
+    // to land on solid geometry — on sky or open water the focus falls back to
+    // 4 m and the whole frame melts. At this pitch it lands on the container
+    // stack at ~55 m; the near leg carries the full 32 px of CoC and everything
+    // past 30 m is sharp.
     //
-    // Sightline 268°. The sun is 7° right at 11° elevation and the MIDDLE crane
-    // is 4° right at 38 m, whose portal spans ±13.5° from here — so the disc
-    // sits inside the lattice and the beams are cut by real geometry rather than
-    // being a radial blur off a sprite. The far crane adds a second lattice at
-    // 65 m, the headland closes the centre at 228 m, and the coast beyond it is
-    // the aerial ladder. Horizon 5.5 % above the centreline, inside §7.2's ±6 %.
-    ctx.poseCamera([16.0, 5.17, -41.0], [-83.94, 1.33, -44.49], 40);
+    // ROUND 3 RE-PITCHED IT, +2.0° INSTEAD OF −2.2°, AND THAT IS THE ONLY POSE
+    // CHANGE. LEVEL re-dressed this quay between rounds: the sightline that used
+    // to close on the CHARLIE headland at 228 m now closes on a container stack
+    // at 55 m, which took the far half of the aerial-perspective ladder — the
+    // thing this shot exists to prove — out of frame along with most of the sky.
+    // Pitching up recovers 4.2° of dome and puts the stack's crowns against it,
+    // so the ladder now runs near truss → warehouse → stack → crane portal → the
+    // veiled coast through the portal, five layers separable by value alone.
+    //
+    // +2.0° IS THE CEILING, NOT A CHOICE. §7.2 holds the horizon inside ±6 % of
+    // the centreline; on a 40° lens that is ±2.4° of pitch, and this lands the
+    // horizon 5.0 % BELOW it (it was 5.5 % above). Any more sky costs the rule.
+    //
+    // Sightline 268°, i.e. 7° off the sun at 11° elevation — deliberately still
+    // contre-jour. The disc sits inside the middle crane's portal (±13.5° from
+    // here at 38 m) so the shafts are cut by real lattice rather than being a
+    // radial blur off a sprite. The cloud deck is a set of dark patches in the
+    // blown sun-side sky here and that is the honest answer for a lens pointed
+    // 7° off the sun; `sky_clouds` is the shot that proves the deck.
+    ctx.poseCamera([16.0, 5.17, -41.0], [-83.94, 8.66, -44.49], 40);
   },
 });
 

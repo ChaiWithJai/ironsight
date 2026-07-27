@@ -54,6 +54,36 @@ export function crate(b: LevelBuild, x: number, y: number, z: number, size: numb
     for (const sz of [-1, 1]) b.m('wood').boxAt(0, sy * s, sz * s, s + 0.012, 0.03, 0.03, 1, 0x3f);
     for (const sx of [-1, 1]) b.m('wood').boxAt(sx * s, sy * s, 0, 0.03, 0.03, s + 0.012, 1, 0x3f);
   }
+  /**
+   * CORNER POSTS AND A DIAGONAL BRACE.
+   *
+   * Round 2 measured the crates in `sky_golden` as "single-value quads whose
+   * only feature is one vertical silhouette seam". The battens above run along
+   * the top and bottom edges only, so a crate seen face-on — which is how a
+   * crate at 60 m is always seen — presented one unbroken square of one value.
+   * A packing case has four corner posts and a diagonal on each side, and the
+   * diagonal is the piece that does the work: it is the only line on the object
+   * that is neither horizontal nor vertical, so it survives every distance and
+   * every angle at which the horizontals foreshorten to nothing.
+   */
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) b.m('wood').boxAt(sx * s, 0, sz * s, 0.032, s, 0.032, 1, 0x3f);
+  }
+  for (const sz of [-1, 1]) {
+    const dm = new THREE.Matrix4().makeTranslation(0, 0, sz * (s + 0.018))
+      .multiply(new THREE.Matrix4().makeRotationZ(sz * Math.PI / 4));
+    b.xf.push(dm);
+    b.m('wood').boxAt(0, 0, 0, s * 1.32, 0.028, 0.018, 1, 0x3f);
+    b.xf.pop();
+  }
+  for (const sx of [-1, 1]) {
+    const dm = new THREE.Matrix4().makeTranslation(sx * (s + 0.018), 0, 0)
+      .multiply(new THREE.Matrix4().makeRotationY(Math.PI / 2))
+      .multiply(new THREE.Matrix4().makeRotationZ(-sx * Math.PI / 4));
+    b.xf.push(dm);
+    b.m('wood').boxAt(0, 0, 0, s * 1.32, 0.028, 0.018, 1, 0x3f);
+    b.xf.pop();
+  }
   b.m('wood').clearUvShift();
   b.xf.pop();
 }

@@ -96,11 +96,21 @@ export class TonemapPass implements RenderPass {
         vec3 scene = ironSanitize(texture(uColor, vUv).rgb);
 
         #ifdef USE_DOF
-          vec2 lens = ironDofFocus(uDepth, uFocus, uCocScale, uAutoFocus);
+          float focus = ironDofFocus(uDepth, uFocus, uAutoFocus);
           float depth = texture(uDepth, vUv).r;
-          float coc = ironCoc(depth, lens.x, lens.y, uMaxCoc, uFarGain);
-          vec3 blurred = ironSanitize(texture(uDof, vUv).rgb);
-          scene = mix(scene, blurred, smoothstep(0.6, 1.8, coc));
+          float coc = ironCoc(depth, focus, uNearScale, uFarScale, uFarStart, uMaxNear, uMaxFar);
+          vec4 dofTap = texture(uDof, vUv);
+          vec3 blurred = ironSanitize(dofTap.rgb);
+          // dofTap.a is the NEAR-FIELD COVERAGE the gather measured: how much
+          // of this pixel a defocused foreground spills over. Taking the max
+          // with the full-resolution CoC is what lets an occluder's bokeh bleed
+          // OUTWARD past its own silhouette — a pixel of sharp background
+          // standing right behind a soft wall edge has coc = 0 and would
+          // otherwise cut the blur off with a razor, which is the "masked to a
+          // hard edge" failure §6.2's near field exists to avoid. The
+          // full-resolution term still carries the transition wherever geometry
+          // actually is, so the half-res staircase never reaches the image.
+          scene = mix(scene, blurred, smoothstep(0.6, 1.8, max(coc, dofTap.a)));
         #endif
 
         float exposureScale = texelFetch(uExposure, ivec2(0, 0), 0).r;
@@ -126,9 +136,11 @@ export class TonemapPass implements RenderPass {
         uBloomIntensity: uf(BLOOM_INTENSITY),
         uExposureFallback: uf(exposureScaleFromEv(EXPOSURE_PRESET_EV)),
         uFocus: uf(dof.focus),
-        uCocScale: uf(dof.scale),
-        uMaxCoc: uf(dof.maxCoc),
-        uFarGain: uf(dof.farGain),
+        uNearScale: uf(dof.nearScale),
+        uFarScale: uf(dof.farScale),
+        uFarStart: uf(dof.farStart),
+        uMaxNear: uf(dof.maxNear),
+        uMaxFar: uf(dof.maxFar),
         uAutoFocus: uf(dof.autoFocus ? 1 : 0),
       },
       graph.target(RT_GRADED),
@@ -146,9 +158,11 @@ export class TonemapPass implements RenderPass {
           uniform float uBloomIntensity;
           uniform float uExposureFallback;
           uniform float uFocus;
-          uniform float uCocScale;
-          uniform float uMaxCoc;
-          uniform float uFarGain;
+          uniform float uNearScale;
+          uniform float uFarScale;
+          uniform float uFarStart;
+          uniform float uMaxNear;
+          uniform float uMaxFar;
           uniform float uAutoFocus;
         `,
         defines: dofActive ? { USE_DOF: 1 } : {},

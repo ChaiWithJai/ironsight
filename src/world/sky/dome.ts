@@ -59,11 +59,16 @@ uniform float uSkyOvercast;
 uniform float uSkySigma;
 uniform float uSkyCameraY;
 uniform float uSkyCloudDensity;
+/** Frame counter. Only the cloud march reads it, to advance its sample offset;
+ *  everything else in this shader is a pure function of the sun and the view. */
+uniform float uSkyFrame;
 /** Sun illuminance normal to the sun, above the cloud deck, in LUX. Not divided
  *  by 4pi — ironCloudPhase is a real sr^-1 phase and carries the solid angle. */
 uniform vec3 uSkyCloudSun;
-/** Hemispherical sky radiance the deck floats in, cd/m2. See system.ts. */
+/** Hemispherical sky radiance a cloud TOP floats in, cd/m2. See system.ts. */
 uniform vec3 uSkyCloudFill;
+/** The same for a cloud BASE: the horizon band and the ground under it. */
+uniform vec3 uSkyCloudFillBase;
 
 /**
  * The marine boundary layer, as a CHAPMAN AIRMASS rather than a 1/cos slab.
@@ -172,7 +177,7 @@ const DOME_FRAGMENT = /* glsl */ `
   // near the horizon where the aerosol dominates and the reference is pale and
   // warm. Applied to the SKY TERM ONLY: the sun disc and the cloud deck are
   // composited after it and must keep their own radiance.
-  float calib = mix(0.55, 0.26, smoothstep(0.02, 0.62, dir.y));
+  float calib = mix(0.55, 0.14, smoothstep(0.02, 0.62, dir.y));
   vec3 sky = mix(lut, inscatter, calib);
 
   // ---- sun disc ---------------------------------------------------------
@@ -213,15 +218,17 @@ const DOME_FRAGMENT = /* glsl */ `
     // Per-pixel offset of the ray start, as a fraction of the first stride.
     // gl_FragCoord and a bit-mixing hash, NOT an ordered dither — see clouds.ts
     // for why the difference decides whether the deck reads as volume or as
-    // rectilinear block noise.
-    float jitter = ironCloudHash(gl_FragCoord.xy);
+    // rectilinear block noise — advanced by the golden-ratio conjugate once per
+    // frame so RCORE's TAA history averages the march's variance away instead
+    // of accumulating one frozen noise pattern forever. See ironCloudJitter.
+    float jitter = ironCloudJitter(gl_FragCoord.xy, uSkyFrame);
     // The fill is the whole hemisphere the deck floats in, computed on the CPU
     // (system.ts) from the same anchors the dome is drawn from — not the zenith
     // alone, which at golden hour is the DARKEST direction in the sky and left
     // every cloud base a third under-lit. Handed over UNSCALED: the march
     // applies its own depth-dependent occlusion to it.
     vec4 cl = ironCloudMarch(origin, dir, uSkySunDirection, uSkyCloudSun, uSkyCloudFill,
-                             IRON_CLOUD_STEPS, uSkyCloudDensity, jitter);
+                             uSkyCloudFillBase, IRON_CLOUD_STEPS, uSkyCloudDensity, jitter);
     cloudScatter = cl.rgb;
     cloudT = cl.a;
   }
@@ -282,8 +289,10 @@ export interface DomeUniforms {
   readonly uSkySigma: GpuUniform<number>;
   readonly uSkyCameraY: GpuUniform<number>;
   readonly uSkyCloudDensity: GpuUniform<number>;
+  readonly uSkyFrame: GpuUniform<number>;
   readonly uSkyCloudSun: GpuUniform<THREE.Vector3>;
   readonly uSkyCloudFill: GpuUniform<THREE.Vector3>;
+  readonly uSkyCloudFillBase: GpuUniform<THREE.Vector3>;
   readonly uSkyCloudNoise: GpuUniform<THREE.Texture | null>;
   readonly uSkyCloudNoiseSize: GpuUniform<number>;
   readonly uSkyCloudCoverage: GpuUniform<number>;
@@ -302,8 +311,10 @@ export function createDomeUniforms(): DomeUniforms {
     uSkySigma: { value: 1 },
     uSkyCameraY: { value: 2 },
     uSkyCloudDensity: { value: 1 },
+    uSkyFrame: { value: 0 },
     uSkyCloudSun: { value: new THREE.Vector3(55200, 39300, 26400) },
     uSkyCloudFill: { value: new THREE.Vector3(2900, 2950, 3150) },
+    uSkyCloudFillBase: { value: new THREE.Vector3(5200, 4900, 4500) },
     uSkyCloudNoise: { value: null },
     uSkyCloudNoiseSize: { value: 256 },
     uSkyCloudCoverage: { value: 0.3 },

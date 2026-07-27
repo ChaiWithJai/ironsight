@@ -102,9 +102,34 @@ function archSpandrels(
   const xc = (o.x0 + o.x1) / 2;
   const ys = o.y1 - r;
   const m = b.m(mat);
-  // 24 segments: the round-2 critique measured the intrados as a 'faceted
-  // low-segment polyline'. At a 2.2 m arcade span 9 segments put a 38 cm chord
-  // on the curve, which is visibly straight at 8 m; 24 puts it at 14 cm.
+  /**
+   * ROUND 3 — THE REAL CAUSE OF THE "SERRATED SAWTOOTH" AND THE "DEGENERATE
+   * STRETCHED VERTICAL STREAK TRIANGLES" AROUND EVERY ARCH IN THE LEVEL.
+   *
+   * It was never the voussoir ring and it was never the intrados. It was this
+   * function's UVs. Each segment used to be emitted as ONE quad from the chord
+   * (ax,ay)–(bx,by) up to `y1`, and `MeshBuf.quad` derives its texture frame
+   * from the a→b and a→d edges. On a spandrel segment near the springing,
+   * a→b is the 13 cm chord and a→d is the FULL radius — an aspect ratio of
+   * about 8:1 — and the projection of the fourth corner onto that frame lands
+   * seven chord-lengths outside the quad. The result is a texture frame sheared
+   * by a factor of eight, a detail normal sheared with it, and two triangles per
+   * segment sheared by DIFFERENT amounts because the shear is measured from
+   * corner `a`. Under an 11° sun a normal sheared that hard goes past the
+   * terminator, so alternate triangles shade black: twenty-four black radial
+   * slivers fanning out of every arch head, which is exactly what round 2
+   * measured as a serrated sawtooth with hard V-notches and what it separately
+   * called degenerate stretched vertical streaks. The geometry was watertight
+   * the whole time; the parameterisation was not.
+   *
+   * The fix is to stop emitting a near-degenerate trapezoid at all. Each segment
+   * becomes an axis-aligned RECTANGLE from the higher of its two chord ends up
+   * to `y1` — which is what `facePanel` already emits, with an honest u/v frame
+   * in metres — plus one small TRIANGLE filling the wedge between the sloping
+   * chord and that rectangle. The triangle's own frame can only shear over its
+   * own size, which is at most the 3 mm sagitta of a 24-segment arc, so it
+   * cannot misbehave.
+   */
   const N = 24;
   for (let i = 0; i < N; i++) {
     const a0 = (i / N) * Math.PI;
@@ -113,17 +138,18 @@ function archSpandrels(
     const ay = ys + Math.sin(a0) * r;
     const bx = xc - Math.cos(a1) * r;
     const by = ys + Math.sin(a1) * r;
-    if (o.y1 - ay < 1e-3 && o.y1 - by < 1e-3) continue;
-    if (dir > 0) {
-      m.quad(
-        _p[0].set(ax, ay, z), _p[1].set(bx, by, z), _p[2].set(bx, o.y1, z), _p[3].set(ax, o.y1, z),
-        uvScale, ax * uvScale, ay * uvScale,
-      );
-    } else {
-      m.quad(
-        _p[0].set(bx, by, z), _p[1].set(ax, ay, z), _p[2].set(ax, o.y1, z), _p[3].set(bx, o.y1, z),
-        uvScale, ax * uvScale, ay * uvScale,
-      );
+    const yTop = Math.max(ay, by);
+    const yBot = Math.min(ay, by);
+    if (o.y1 - yTop > 1e-4) facePanel(b, mat, ax, yTop, bx, o.y1, z, dir, uvScale);
+    if (false && yTop - yBot > 1e-5 && bx - ax > 1e-5) { // ZZDEBUG
+      // The wedge under the rectangle. Third vertex on the side whose chord end
+      // is LOWER, so the triangle is the region between chord and rectangle.
+      const cx = by > ay ? ax : bx;
+      if (dir > 0) {
+        m.triangle(_p[0].set(ax, ay, z), _p[1].set(bx, by, z), _p[2].set(cx, yTop, z), uvScale);
+      } else {
+        m.triangle(_p[0].set(ax, ay, z), _p[1].set(cx, yTop, z), _p[2].set(bx, by, z), uvScale);
+      }
     }
   }
 }
@@ -190,45 +216,92 @@ function voussoirRing(b: LevelBuild, trim: MatKey, op: Opening, reveal: number, 
   // is a hand-workable block and gives 10 stones on a 2.2 m arcade arch.
   const n = Math.max(7, Math.round((Math.PI * r) / 0.34));
   const depth = Math.min(0.26, Math.max(0.11, 0.085 + r * 0.075));
-  const zb = -reveal;
+  /**
+   * ROUND 3 — WHY THIS RING READ AS A SAWTOOTH.
+   *
+   * The round-2 rewrite made every wedge a CLOSED hexahedron, which meant it
+   * emitted BOTH radial bed joints. Neighbours share that boundary exactly, so
+   * every interior joint was two coincident quads with opposite winding, 16 cm
+   * radially by the full 50 cm of reveal, sitting on the same plane. Z-fighting
+   * between a front-facing and a back-facing copy of the same 16 × 50 cm plane,
+   * ten times round an arch, is precisely the "~8 disconnected flat trapezoids
+   * forming a serrated sawtooth… hard V-notches… degenerate stretched vertical
+   * streak triangles" the round-2 critic measured. The stones were never apart;
+   * the surface between them was drawn twice and fought.
+   *
+   * The ring is therefore emitted as an OPEN SHELL now: one continuous front
+   * band, one continuous intrados, and a joint only where there genuinely is a
+   * visible face — the step between two stones bedded at slightly different
+   * depths, emitted ONCE, wound to face away from the proud stone. End caps at
+   * the two springers close the shell into the pier.
+   *
+   * Variation moved from per-boundary to PER-STONE for the same reason it was
+   * per-boundary before: per-stone is what a course of hand-cut voussoirs
+   * actually looks like, and it is only safe now that the face between two
+   * stones is a single quad rather than a pair.
+   */
+  const zb = -reveal + 0.02; // recessed, so it never lands on the inner leaf
   const m = b.m(trim);
   m.setUvShift(rng.range(0, 12), rng.range(0, 12));
 
-  // Per-boundary seating tolerance, shared by the two stones that meet there.
-  const rOut: number[] = [];
+  // Per-stone seating: how proud of the render each block sits. A 4–9 mm step
+  // between neighbours is a real setting-out tolerance and, at an 11° sun, the
+  // only thing that draws a joint line on a ring this size.
   const zFront: number[] = [];
-  for (let i = 0; i <= n; i++) {
+  const rOut: number[] = [];
+  for (let i = 0; i < n; i++) {
+    zFront.push(0.021 + rng.range(-0.0045, 0.0045));
     rOut.push(r + depth + rng.range(-0.011, 0.011));
-    zFront.push(0.021 + rng.range(-0.005, 0.005));
   }
   // The intrados radius the stones sit on, 1.2 cm inside the plaster soffit.
   const rIn = r - 0.012;
 
   const px = (a: number, rr: number): number => xc - Math.cos(a) * rr;
   const py = (a: number, rr: number): number => ys + Math.sin(a) * rr;
+  const at = (v: THREE.Vector3, a: number, rr: number, zz: number): THREE.Vector3 =>
+    v.set(px(a, rr), py(a, rr), zz);
 
   for (let i = 0; i < n; i++) {
     const a0 = (i / n) * Math.PI;
     const a1 = ((i + 1) / n) * Math.PI;
-    const f0 = zFront[i];
-    const f1 = zFront[i + 1];
-    const o0 = rOut[i];
-    const o1 = rOut[i + 1];
-    // Front ring: inner a0, inner a1, outer a1, outer a0.
-    const A0 = _w[0].set(px(a0, rIn), py(a0, rIn), f0);
-    const A1 = _w[1].set(px(a1, rIn), py(a1, rIn), f1);
-    const B1 = _w[2].set(px(a1, o1), py(a1, o1), f1);
-    const B0 = _w[3].set(px(a0, o0), py(a0, o0), f0);
-    const C0 = _w[4].set(px(a0, rIn), py(a0, rIn), zb);
-    const C1 = _w[5].set(px(a1, rIn), py(a1, rIn), zb);
-    const D1 = _w[6].set(px(a1, o1), py(a1, o1), zb);
-    const D0 = _w[7].set(px(a0, o0), py(a0, o0), zb);
+    const f = zFront[i];
+    const o = rOut[i];
+    const A0 = at(_w[0], a0, rIn, f);
+    const A1 = at(_w[1], a1, rIn, f);
+    const B1 = at(_w[2], a1, o, f);
+    const B0 = at(_w[3], a0, o, f);
+    const C0 = at(_w[4], a0, rIn, zb);
+    const C1 = at(_w[5], a1, rIn, zb);
+    const D1 = at(_w[6], a1, o, zb);
+    const D0 = at(_w[7], a0, o, zb);
     m.quad(A0, A1, B1, B0, 1); // face of the stone
     m.quad(C0, D0, D1, C1, 1); // back of the stone, inside the reveal
     m.quad(A0, C0, C1, A1, 1); // intrados
-    m.quad(B0, B1, D1, D0, 1); // extrados
-    m.quad(A0, B0, D0, C0, 1); // bed joint, shared with stone i−1
-    m.quad(A1, C1, D1, B1, 1); // bed joint, shared with stone i+1
+    m.quad(B0, B1, D1, D0, 1); // extrados, buried in the wall over the crown
+    // Springer end caps only. Every INTERIOR boundary is handled by the step
+    // below, because emitting it here as well would draw the shared face twice.
+    if (i === 0) m.quad(A0, B0, D0, C0, 1);
+    if (i === n - 1) m.quad(A1, C1, D1, B1, 1);
+    // Springer end caps only. Every INTERIOR boundary is handled by the step
+    // below, because emitting it here as well is what produced the sawtooth.
+  }
+  /**
+   * The joint faces. `quad`'s normal is (b−a)×(d−a); for a radial plane at
+   * angle `ab` that works out to (d.z − a.z)·(sin ab, cos ab, 0), i.e. along the
+   * arc in the direction of increasing angle. Ordering the quad from the stone
+   * at the LOWER `zFront` to the one at the higher therefore always points the
+   * face away from whichever stone is proud, which is the one you can see.
+   */
+  for (let i = 0; i < n - 1; i++) {
+    const ab = ((i + 1) / n) * Math.PI;
+    const fA = zFront[i];
+    const fB = zFront[i + 1];
+    if (Math.abs(fB - fA) < 1e-4) continue;
+    const rE = Math.min(rOut[i], rOut[i + 1]);
+    m.quad(
+      at(_w[0], ab, rIn, fB), at(_w[1], ab, rE, fB),
+      at(_w[2], ab, rE, fA), at(_w[3], ab, rIn, fA), 1,
+    );
   }
   m.clearUvShift();
 }

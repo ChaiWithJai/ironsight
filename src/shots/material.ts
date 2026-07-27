@@ -40,12 +40,15 @@ registerShot({
   name: 'material_chart',
   description:
     'The ALPHA market hall’s south arcade, entered past a pier standing 2.4 m ' +
-    'from the lens: the same sandstone read at 2 m, at 8 m and at 20 m in one ' +
-    'frame, raking-lit on every south face and pure sky light on every east ' +
-    'return. Proves: baked PBR reaches the level (albedo, normal, roughness, ' +
-    'cavity AO), curvature wear on convexities, grime in cavities, dust on ' +
-    'upward faces, detail + micro normal holding at arm’s length, and the SAME ' +
-    'material read at 79° incidence and at pure sky light in one frame.',
+    'from the lens, with the square’s sunlit market stall in the right third. ' +
+    'FOUR BRDFs in one frame: matte mineral (arcade, paving, rubble) at 2 m, 8 m ' +
+    'and 20 m; a sheen-lobe cloth (the stall canopy, doubleSided, transmitting); ' +
+    'planked wood (poles and trestle); and a genuine gloss traverse across ONE ' +
+    'continuous mineral plane where the paving has been burnished by tread. ' +
+    'Proves: baked PBR reaches the level (albedo, normal, roughness, cavity AO), ' +
+    'curvature wear on convexities, grime in cavities, dust on upward faces, ' +
+    'detail + micro normal holding at arm’s length, and the SAME material read ' +
+    'at 79° incidence and at pure sky light in one frame.',
   frames: 14,
   setup(ctx) {
     ctx.seed(0x4d);
@@ -98,7 +101,25 @@ registerShot({
     // WEST wall both rendered black — they stood inside a plot's geometry, which
     // is invisible from outside and costs a five-minute capture to discover. Do
     // not move this camera without a capture to prove the new station is clear.
-    ctx.poseCamera([79.0, 13.22, 86.0], [43.55, 12.38, 104.53], 50);
+    // ROUND 3: SWUNG 12° RIGHT AND OPENED TO 58°, and both numbers are the
+    // answer to one finding — "this is the material chart and it contains
+    // exactly one material". It did. The station was right and the subject was
+    // one substance, so the frame could not say anything about BRDF variety at
+    // all: no sheen lobe, no wood, no gloss traverse, nothing to compare the
+    // mineral against.
+    //
+    // A wide survey capture from this exact station put the square's nearest
+    // market stall 39° right of the old sightline — sunlit, 15 m out, canopy
+    // (fabric, doubleSided, sheen), four poles and a trestle (planked wood), and
+    // its own 5:1 cast shadow raking across the paving. Swinging 12° brings it
+    // to 27° right, and opening the lens from 50° to 58° keeps the 2.4 m pier
+    // inside the left edge at 42° rather than throwing it away: the near-field
+    // micro-detail proof and the BRDF comparison now share one frame instead of
+    // competing for it.
+    //
+    // 58° is still clear of the 40° cinematic-aperture threshold in
+    // src/render/passes/dof.ts, so the pier at 2.4 m stays sharp.
+    ctx.poseCamera([79.0, 13.22, 86.0], [40.47, 12.38, 96.76], 58);
   },
 });
 

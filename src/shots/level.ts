@@ -282,3 +282,16 @@ registerShot({
     ctx.poseCamera([152, 236, 300], [-70, 10, 2], 45);
   },
 });
+
+registerShot({
+  name: 'zz_dbg_shed',
+  description: 'DIAGNOSTIC — the quay shed gable at 22 m with the haze pulled off.',
+  frames: 8,
+  setup(ctx) {
+    ctx.seed(0x42);
+    ctx.setTimeOfDay(12.6);
+    ctx.setWeather(0.02, { wind: 2.0, fog: 0.0006 });
+    ctx.setOverlays({ viewmodel: false, hud: false });
+    ctx.poseCamera([75.0, 13.4, 81.5], [75.0, 14.3, 88.0], 45);
+  },
+});

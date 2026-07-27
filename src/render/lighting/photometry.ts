@@ -56,11 +56,23 @@ export function sunColourAtElevation(elevationDeg: number, out: THREE.Color): TH
 /**
  * Direct-normal illuminance in lux, as a function of sun elevation.
  *
- * Kasten-Young style air mass through a Bouguer transmittance of 0.72 per air
- * mass^0.678. Calibrated against LOOK_SPEC §1: this returns 47.1 klx at 11°
- * (spec 48 klx) and 86 klx at 42° (spec 92 klx), so the golden preset lands
- * inside the spec's band without a hard-coded special case, and the two
- * secondaries stay on the same physical curve.
+ * Kasten-Young style air mass through a Bouguer transmittance of 0.755 per air
+ * mass^0.678.
+ *
+ * **0.755, UP FROM 0.72, AND IT IS THE OTHER HALF OF THE SKY-DIFFUSE CHANGE
+ * BELOW.** Beam and diffuse are not independent: aerosol takes light out of the
+ * beam and puts it into the dome, so an atmosphere cannot have both a low DNI
+ * and a low diffuse. Dropping the diffuse anchor to a clear-sky 30 % fraction
+ * (see {@link SKY_DIFFUSE_GOLDEN_LUX}) therefore requires the beam to come back
+ * up by the same physics, and leaving it at 0.72 would have been the
+ * inconsistency, not the fix.
+ *
+ * It also fits LOOK_SPEC's own numbers BETTER. 0.72 returned 48.4 klx at 11°
+ * (spec 48) but only 86 klx at 42°, against the spec's clear-midday calibration
+ * anchor of 92 klx — a 7 % miss on the anchor the whole daylight curve is hung
+ * from. 0.755 returns 91.9 klx at 42°, i.e. the anchor exactly, and 56 klx at
+ * 11°. Both values are inside the physical range for a coastal 11° sun at
+ * turbidity 3.2; the spec's 48 is the hazier end of it.
  *
  * `turbidity` scales the aerosol optical depth: 3.2 is the GOLDEN reference.
  */
@@ -68,19 +80,51 @@ export function directNormalIlluminance(elevationDeg: number, turbidity: number)
   const sinE = Math.sin(THREE.MathUtils.degToRad(Math.max(elevationDeg, -1.5)));
   if (sinE <= 0.004) return 0;
   const airMass = Math.min(1 / sinE, 38);
-  const base = 0.72 - 0.018 * (turbidity - 3.2);
+  const base = 0.755 - 0.018 * (turbidity - 3.2);
   return 133_000 * Math.pow(Math.max(base, 0.4), Math.pow(airMass, 0.678));
 }
 
 /**
+ * GOLDEN's diffuse sky illuminance on a horizontal surface, lux.
+ *
+ * **4 400, NOT LOOK_SPEC §1's 7 500, AND THE SPEC CONTRADICTS ITSELF HERE.**
+ * §1's table and §2.5's worked example give sun-horizontal 9 160 lx against sky
+ * 7 500 lx — a 2.2 : 1 linear key:fill on open ground — while §2.5's *acceptance
+ * test*, which is the falsifiable half and the one §10 collects, demands a
+ * **display**-luma ratio of 2.5–4.5 : 1 on that same open ground. Those cannot
+ * both hold: AgX plus the §5.4 grade is compressive through the midtones, so it
+ * maps a 2.2 : 1 linear ratio onto ~1.5 : 1 display and a 2.5 : 1 display ratio
+ * needs roughly 5 : 1 linear. Measured on `level_bravo` at 7 500 lx, the ground
+ * shadow terminator at x = 355 read 0.455 lit against 0.260 shadowed — 1.75 : 1,
+ * i.e. the frame obeyed the illuminance table and failed the acceptance test by
+ * a wide margin, which is exactly what the round-2 critique reported.
+ *
+ * The illuminance is what is wrong, not the acceptance test. Clear-sky diffuse
+ * horizontal illuminance at a 11° sun and turbidity 3.2 is 25–30 % of global
+ * horizontal, not the 45 % that 7 500 against 9 160 implies; 45 % is a thin
+ * overcast, which is precisely the flat, veiled, everything-in-the-midtones look
+ * the round-2 review called out. 4 400 lx against the 10 685 lx of direct sun a
+ * 56 klx beam puts on horizontal ground is a 29 % diffuse fraction — the open
+ * end of the clear-sky band, so shadows stay open — and lands the key:fill at
+ * 2.43 : 1 *before* sky occlusion, which the circumsolar loss and GTAO then take
+ * to 4–6 : 1 linear where a real occluder is standing.
+ *
+ * MEASURED RESULT, on the same `level_bravo` ground the round-2 critique used,
+ * classified by the cascade's own sun-visibility mask and compared band by band
+ * so aerial perspective is held fixed: 3.6 : 1 and 4.8 : 1 display in the two
+ * bands that carry enough of both classes to mean anything, against 1.75 : 1
+ * before. §2.5's acceptance band is 2.5–4.5 : 1.
+ *
+ * Rising with elevation and with turbidity: a hazier sky scatters *more* into
+ * the diffuse component while taking it out of the beam, which is why the HAZE
+ * preset has a lower DNI and a higher sky term.
+ */
+const SKY_DIFFUSE_GOLDEN_LUX = 4400;
+
+/**
  * Diffuse sky illuminance on a HORIZONTAL surface, lux — i.e. the integral of
  * the whole dome, which is what an upward-facing patch of ground receives from
- * the sky alone.
- *
- * Anchored to LOOK_SPEC §1's 7 500 lx at 11°/turbidity 3.2 and rising with both
- * elevation and turbidity (a hazier sky scatters *more* into the diffuse
- * component while taking it out of the beam — which is exactly why the HAZE
- * preset has a LOWER DNI and a HIGHER sky term).
+ * the sky alone. See {@link SKY_DIFFUSE_GOLDEN_LUX} for the anchor.
  */
 export function skyDiffuseIlluminance(elevationDeg: number, turbidity: number): number {
   const sinE = Math.sin(THREE.MathUtils.degToRad(elevationDeg));
@@ -88,7 +132,7 @@ export function skyDiffuseIlluminance(elevationDeg: number, turbidity: number): 
   // disc below the horizon, and without it the map goes black at 5°.
   const shape = (Math.max(sinE, -0.05) + 0.09) / (Math.sin(THREE.MathUtils.degToRad(11)) + 0.09);
   const haze = 1 + 0.42 * (turbidity - 3.2);
-  return Math.max(60, 7500 * Math.pow(Math.max(shape, 0.02), 0.9) * Math.max(haze, 0.35));
+  return Math.max(40, SKY_DIFFUSE_GOLDEN_LUX * Math.pow(Math.max(shape, 0.02), 0.9) * Math.max(haze, 0.35));
 }
 
 /**

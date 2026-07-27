@@ -146,21 +146,63 @@ ${HAZE_GLSL}
     // §3.2's "contrast dies faster than luminance" without touching the exponent
     // the graded blend table pins.
     vec3 trans = max(exp(-tau), vec3(IRON_HAZE_TMIN));
+    // 'ironSkyChroma' WRAPS THIS AND IT IS NOT OPTIONAL — see the note below the
+    // build-up block, and the function itself in glsl.ts §3.
+    vec3 equilibrium = ironSkyChroma(ironHazeRadiance(dir, sunDir, sunChroma, 3.4, 0.0));
+
     // IN-SCATTER BUILD-UP: the medium only reaches its equilibrium radiance once
     // it can see the whole sky, and inside the first scattering length it
     // generally cannot — it is enclosed by whatever the ray is about to hit.
     // Path length is the stand-in until an occlusion term exists to drive this
     // properly; see HAZE_INSCATTER_NEAR in model.ts for why an interior at 5 m
     // being MORE veiled than a building at 80 m was the round-2 defect.
-    float buildUp = mix(IRON_HAZE_IN_NEAR, 1.0, 1.0 - exp(-dist / IRON_HAZE_IN_BUILD));
-    // 'ironSkyChroma' WRAPS THIS AND IT IS NOT OPTIONAL. The dome's marine
-    // boundary layer saturates to 'ironSkyChroma(ironHazeRadiance(dir, …))' for
-    // the same 'dir'; a fully hazed-out ridge and the sky one pixel above it are
-    // a milliradian apart, so if only one of the two gets the correction the
+    //
+    // ── AND THE NEAR FLOOR IS NOW SHADOWED, WHICH IS THE ROUND-3 DEFECT ───────
+    //
+    // Round 3, severity 9: "the shaded portico wall samples [105,87,81] — warmer
+    // and brighter than the sunlit stone it sits under … a portico under three
+    // storeys of building must not contain sunlit fog … without that, every
+    // interior in the game will glow."
+    //
+    // Right, and the missing term is a SOURCE FUNCTION, not a density. 'L_in'
+    // above is the radiance a volume of this medium settles to when it is lit by
+    // the open sky and the sun; a volume of the same medium standing inside a
+    // colonnade is lit by the colonnade. The optical depth over five metres is
+    // identical in both places — that is why pushing the fog's near plane out to
+    // 25 m is the wrong lever, and why it would break §3.2's blend table, which
+    // is graded and puts 15 m at 16 % — but the two volumes are not remotely the
+    // same brightness, and today both were handed 9 000 cd/m² of sunward horizon.
+    //
+    // The signal that separates them is available for free: the SURFACE'S OWN
+    // RADIANCE. Over the first few tens of metres the medium and the surface
+    // behind it are enclosed by the same geometry and lit by the same fraction of
+    // the sky, so the surface is a direct measurement of the local source
+    // function — a sunlit wall stands in sunlit air, a portico wall stands in
+    // portico air. Normalising by the equilibrium radiance rather than by a fixed
+    // cd/m² keeps it exposure-independent and makes the gate bite hardest exactly
+    // where the in-scatter is strongest, i.e. on the sunward azimuth.
+    //
+    // ITS ONE KNOWN LIE is a genuinely dark material in full sun — fresh asphalt
+    // at albedo 0.05 reads like an interior and loses part of its near veil. The
+    // error is bounded by the ramp (gone by ~60 m, where the term is a tenth of
+    // its floor) and by the 0.06 floor below, and it is a far smaller error than
+    // lighting every interior in the game with the open sky. Replace the ratio
+    // with a real sky-visibility term the moment LIGHT publishes one; the shape
+    // of the expression does not change, only what drives it.
+    float surfLum = dot(surface, vec3(0.2126, 0.7152, 0.0722));
+    float openLum = dot(equilibrium, vec3(0.2126, 0.7152, 0.0722)) * IRON_SKY_SCALE;
+    // 0.18 of the equilibrium radiance is roughly what a MID-GREY SURFACE IN FULL
+    // SUN returns against the sky it stands under, so a lit surface sits at 1 and
+    // the gate is inert on everything the round-2 build got right.
+    float localVis = clamp(surfLum / max(0.18 * openLum, 1e-4), 0.06, 1.0);
+    float buildUp = mix(IRON_HAZE_IN_NEAR * localVis, 1.0, 1.0 - exp(-dist / IRON_HAZE_IN_BUILD));
+    // 'ironSkyChroma' WRAPPED IT ABOVE AND THAT IS NOT OPTIONAL. The dome's
+    // marine boundary layer saturates to 'ironSkyChroma(ironHazeRadiance(dir, …))'
+    // for the same 'dir'; a fully hazed-out ridge and the sky one pixel above it
+    // are a milliradian apart, so if only one of the two gets the correction the
     // skyline gains a chroma step that no distance dissolves. See the function
     // in glsl.ts §3 for what the correction is and why it exists.
-    vec3 inscatter = ironSkyChroma(ironHazeRadiance(dir, sunDir, sunChroma, 3.4, 0.0))
-                   * (IRON_SKY_SCALE * buildUp);
+    vec3 inscatter = equilibrium * (IRON_SKY_SCALE * buildUp);
     return surface * trans + inscatter * (1.0 - trans);
   }
 #endif

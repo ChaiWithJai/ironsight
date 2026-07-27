@@ -72,19 +72,75 @@ const DIRTY_ANGLE_DEG = 0.15;
  * (202,201,199 against 233,231,228) with no scatter gain anywhere. One CPU
  * integral per state change replaces the two extra LUT samples per pixel a
  * shader-side version would have cost.
+ *
+ * `ring` builds one cosine-latitude ring; both quadratures below are made of them.
  */
-const FILL_DIRS: readonly THREE.Vector3[] = (() => {
-  const dirs = [new THREE.Vector3(0, 1, 0)];
-  for (const elevationDeg of [58, 32, 10]) {
-    const e = elevationDeg * DEG2RAD;
-    const cosE = Math.cos(e);
-    for (let i = 0; i < 6; i++) {
-      const a = ((i + 0.5) / 6) * Math.PI * 2;
-      dirs.push(new THREE.Vector3(Math.sin(a) * cosE, Math.sin(e), Math.cos(a) * cosE));
-    }
+const ring = (elevationDeg: number, count: number): THREE.Vector3[] => {
+  const e = elevationDeg * DEG2RAD;
+  const cosE = Math.cos(e);
+  const out: THREE.Vector3[] = [];
+  for (let i = 0; i < count; i++) {
+    const a = ((i + 0.5) / count) * Math.PI * 2;
+    out.push(new THREE.Vector3(Math.sin(a) * cosE, Math.sin(e), Math.cos(a) * cosE));
   }
-  return dirs;
-})();
+  return out;
+};
+
+const FILL_DIRS: readonly THREE.Vector3[] = [
+  new THREE.Vector3(0, 1, 0),
+  ...ring(58, 6),
+  ...ring(32, 6),
+  ...ring(10, 6),
+];
+
+/**
+ * The directions a cloud BASE sees, and why it needs its own quadrature.
+ *
+ * ── THE DEFECT THIS EXISTS FOR ──────────────────────────────────────────────
+ *
+ * Blind A/B against `reference/gameplay/bfv_gp_036.jpg` — the corpus' low-sun
+ * anchor — put the single clearest tell in our cloud deck: in the reference the
+ * cloud BASES carry the warm horizon colour and the CROWNS are cool, and in ours
+ * both are the same neutral blue-grey. That inversion is most of what makes a
+ * frame read as golden hour rather than as midday, and its absence reads as a
+ * deck lit from directly above.
+ *
+ * The cause is that `FILL_DIRS` is the hemisphere an upward-facing element sees,
+ * cosine-weighted, so the horizon band — 9 000 cd/m² on the sun side against a
+ * 2 200 cd/m² zenith — enters it at weight sin(10°) = 0.17 and is averaged away.
+ * That is the correct integral for a cloud TOP and the wrong one for a cloud
+ * BASE, which faces DOWN: the horizon band is the brightest thing in its field of
+ * view, and everything below it is ground.
+ *
+ * So there are two integrals and the march blends them by depth in the slab —
+ * the base one contributing its CHROMA only, see `recompute`.
+ * The rings sit at +18°, +6°, −6° and −22° and are weighted ISOTROPICALLY — see
+ * `computeCloudFill` for why a base takes no cosine — i.e. the quadrature is
+ * concentrated on the horizon band exactly where the energy and the warmth are.
+ * The two below-horizon rings are where the GROUND term enters:
+ * `analyticSkyRadiance` already applies its below-eyeline occlusion there, and
+ * the residue is a fair stand-in for a sea/sandstone surface under a 9 200 lx
+ * horizontal illuminance — LOOK_SPEC §2.4's bounce table puts dry stone at
+ * 1 600 lx effective and sea at 900, i.e. a few hundred cd/m², which is what that
+ * occluded residue lands at without a second model to maintain.
+ *
+ * ── HONEST SIZE OF THE EFFECT ───────────────────────────────────────────────
+ *
+ * Measured at an 11° sun the two quadratures differ by about 14 % in B−R — the
+ * base one lands warm-neutral (B/R 0.98) against the top one's cool (B/R 1.14) —
+ * and after the march's own occlusion term the difference reaching the image is
+ * under one code value. It is kept because it is the correct decomposition and
+ * costs one CPU quadrature per state change, and because the gap grows as the sun
+ * drops: at the reference frame's near-horizon sun the sun-side band is most of
+ * what a base can see. Do NOT expect it to carry a golden-hour read on its own —
+ * at 11° the warmth in a cloud base comes from the sun march, not from here.
+ */
+const FILL_BASE_DIRS: readonly THREE.Vector3[] = [
+  ...ring(18, 8),
+  ...ring(6, 8),
+  ...ring(-6, 8),
+  ...ring(-22, 6),
+];
 
 /** `SkyState` is readonly to consumers; the owner needs a writable view of it. */
 type MutableSkyState = { -readonly [K in keyof SkyState]: SkyState[K] };
@@ -169,8 +225,19 @@ class IronSky implements SkyService, RenderSystem {
     // cloud instead of a third of them landing in front of it, and that a lit
     // sample costs nine texture fetches rather than thirteen (see the band limit
     // on the shape octave in clouds.ts).
+    //
+    // ROUND 3, SECOND RAISE — 0.60 → 0.78, cap 34 → 44. The 0.60 above was not
+    // a quality judgement at all: it was the largest number that fitted inside
+    // `tools/capture.mjs`'s 240 s in-page budget while the capture harness was
+    // forcing a SOFTWARE rasteriser. The harness now runs on the GPU and the
+    // same shot lands in 1.2 s, so the constraint that set the figure is gone.
+    // 44 samples at a per-step optical depth near 0.8 is what the geometric
+    // schedule needs for its quantisation error to sit UNDER the temporal
+    // accumulation in `ironCloudJitter` rather than beside it: the two compound,
+    // the march is unbiased, and halving the residual before TAA sees it is
+    // worth more than another four frames of history.
     const cloudSteps = quality.clouds.enabled
-      ? Math.min(34, Math.max(18, Math.round(quality.clouds.steps * 0.60)))
+      ? Math.min(44, Math.max(18, Math.round(quality.clouds.steps * 0.78)))
       : 0;
     createDome(scene, ctx.services.materials, this.domeUniforms, cloudSteps);
 
@@ -358,7 +425,34 @@ class IronSky implements SkyService, RenderSystem {
       cloudE * this.sunChromaColor.g,
       cloudE * this.sunChromaColor.b,
     );
-    this.computeCloudFill(u.uSkyCloudFill.value);
+    this.computeCloudFill(FILL_DIRS, true, u.uSkyCloudFill.value);
+    this.computeCloudFill(FILL_BASE_DIRS, false, u.uSkyCloudFillBase.value);
+    // ── THE BASE FILL IS A HUE, NOT AN AMOUNT, AND THAT IS DELIBERATE ─────────
+    //
+    // The base quadrature genuinely comes back BRIGHTER than the top one at an
+    // 11° sun — the horizon band is four times the zenith and it fills most of
+    // that field of view — and handing that number straight to the march would be
+    // physically defensible and visually wrong for this project, because the
+    // round-3 review's other cloud finding is that our BASES ARE NOT DARK ENOUGH
+    // ("base/top ratio 0.81, where real cumulus runs 0.45–0.60"). Two corrections
+    // pulling opposite ways on the same pixel is how a lane ends up tuning in
+    // circles.
+    //
+    // So the base fill is renormalised to the top fill's LUMINANCE and keeps only
+    // its CHROMA. What is modelled is then the thing the A/B found missing — a
+    // base lit by the warm horizon while the crown is lit by the cool zenith —
+    // with no authority over how dark a base is, which stays where the
+    // self-shadowing and multiple-scattering terms put it. The luminance half of
+    // the argument is left on the table on purpose; revisit it if a later review
+    // says bases are too dark rather than too light.
+    //
+    // Measured, this moves a cloud base by under one code value at an 11° sun.
+    // See the honesty note on FILL_BASE_DIRS for why it is kept anyway.
+    const top = u.uSkyCloudFill.value;
+    const base = u.uSkyCloudFillBase.value;
+    const lumTop = 0.2126 * top.x + 0.7152 * top.y + 0.0722 * top.z;
+    const lumBase = 0.2126 * base.x + 0.7152 * base.y + 0.0722 * base.z;
+    base.multiplyScalar(lumTop / Math.max(1e-3, lumBase));
 
     this.fog.setSun(this.sunDir, u.uSkySigma.value, this.sunChromaColor);
 
@@ -391,20 +485,32 @@ class IronSky implements SkyService, RenderSystem {
    * ambient a cloud sample sits in before its own body occludes any of it.
    *
    * The march applies a depth- and optical-depth-dependent occlusion on top of
-   * this, so what is wanted here is the UNOCCLUDED hemisphere and nothing else.
-   * Deliberately excludes the ground half: a 900 m cloud base does see the sea
-   * beneath it, but at a 0.10 albedo under a 9 200 lx horizontal illuminance
-   * that is 290 cd/m² against a hemisphere mean an order of magnitude larger,
-   * and folding it in would only lift the bases the self-shadowing term exists
-   * to darken.
+   * this, so what is wanted here is the UNOCCLUDED field and nothing else.
+   *
+   * Called twice per state change, once per quadrature — see `FILL_BASE_DIRS`
+   * for why a cloud base needs a different one from a cloud top.
    */
-  private computeCloudFill(out: THREE.Vector3): void {
+  private computeCloudFill(
+    dirs: readonly THREE.Vector3[],
+    cosineWeighted: boolean,
+    out: THREE.Vector3,
+  ): void {
     let r = 0;
     let g = 0;
     let b = 0;
     let weight = 0;
-    for (const dir of FILL_DIRS) {
-      const w = dir.y;
+    for (const dir of dirs) {
+      // COSINE for the top, ISOTROPIC for the base, and the asymmetry is the
+      // physics rather than a convenience. A cloud top is close enough to a
+      // surface to be treated as one — it is the boundary where the medium meets
+      // clear air, so the cosine law applies. A cloud base is not a surface at
+      // all: the samples that read this are INSIDE the medium, several optical
+      // depths of near-isotropic multiple scattering from any boundary, and what
+      // reaches them is the field averaged over the sphere their phase function
+      // sees, not the projection onto a normal that does not exist. A strict
+      // cosine about −y would also be wrong in the trivial sense: it would zero
+      // the horizon band, which is the one direction that carries the warmth.
+      const w = cosineWeighted ? dir.y : 1;
       analyticSkyRadiance(
         dir,
         this.sunDir,
@@ -427,6 +533,11 @@ class IronSky implements SkyService, RenderSystem {
   update(ctx: FrameCtx): void {
     const cam = ctx.camera;
     this.domeUniforms.uSkyCameraY.value = cam.position.y;
+    // The cloud march's sample offset advances once per frame so TAA can average
+    // its variance away — see `ironCloudJitter` in clouds.ts. Wrapped at 4096 so
+    // the float stays exactly integral (a golden-ratio multiply of a large float
+    // quantises, and a quantised offset is a static pattern again).
+    this.domeUniforms.uSkyFrame.value = ctx.frame % 4096;
     // The cloud deck drifts on the shared wind field. Sim time, never wall
     // clock, so two runs of the same shot land on the same clouds.
     const drift = ctx.time * this.mutable.windSpeed * 2.2e-6;

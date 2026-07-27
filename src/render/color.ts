@@ -116,7 +116,7 @@ export const AGX_CONTRAST_GAMMA = 1.2143;
  * have shadowed content at all, against a corpus median of 2.4 % and §5.2's
  * ceiling of 5 %.
  */
-export const GRADE_BLACK_LIFT = 0.012;
+export const GRADE_BLACK_LIFT = 0.016;
 
 /**
  * THE BLACK POINT, and why it exists as a separate control from the toe lift
@@ -129,16 +129,15 @@ export const GRADE_BLACK_LIFT = 0.012;
  * onto a floor nothing ever reached, which is the milky, filter-like wash a
  * critic picks out of a line-up instantly.
  *
- * It is a SHARP-KNEE rolloff, `L / (1 + (k/L)^4)`, applied on LUMINANCE with the
+ * It is a soft-knee rolloff, `L · Lⁿ / (Lⁿ + kⁿ)`, applied on LUMINANCE with the
  * result carried back to RGB as a scalar. Three properties, all of them load
  * bearing:
  *
- *  - **It converges on the identity, not on `x - k`.** The error is O((k/L)⁴), so
- *    at L = 2k the midtone has already lost only 6 %, and by L = 3k it is under
- *    1 %. A plain subtract-and-renormalise black point costs every midtone the
- *    same ~6 codes and walks the median out of §5.2's 70–115 band; this one
- *    spends its whole budget in the bottom eighth of the range where the defect
- *    actually is.
+ *  - **It converges on the identity, not on `x - k`.** The error is O((k/L)ⁿ), so
+ *    the midtone is left alone. A plain subtract-and-renormalise black point
+ *    costs every midtone the same ~6 codes and walks the median out of §5.2's
+ *    70–115 band; this one spends its budget in the bottom of the range where
+ *    the defect actually is.
  *  - **Zero derivative at the origin**, so shadow content COMPRESSES into the toe
  *    rather than clipping to void. LOOK_SPEC and the rubric both treat crushed
  *    blacks as a defect; a hard `max(L - k, 0)` would produce them, and the
@@ -158,8 +157,36 @@ export const GRADE_BLACK_LIFT = 0.012;
  * reached far enough up the curve to cost the §5.1 ramp thirteen codes at
  * scene-linear 0.020 (25 → 12); at 0.065 the whole rolloff is still inside the
  * bottom twenty codes.
+ *
+ * ROUND 5 — THE KNEE EXPONENT CAME DOWN FROM 4 TO 2 AND k WENT UP TO 0.115, AND
+ * THE REASON IS A MEASUREMENT THE OLD SHAPE COULD NOT REACH.
+ *
+ * A fourth-power knee is over by L = 2k. That is the right shape for a frame
+ * whose darkest content is genuinely near black and merely needs the last few
+ * codes recovered — `hud_full` and `level_alpha` are both that frame, at p1 = 5
+ * and 27. It is the WRONG shape for a frame with a lifted FLOOR, and
+ * `water_golden` is that frame: backlit open water, measured min luminance
+ * 0.105, p1 0.160, ZERO pixels anywhere below display 27 and 51 % of the frame
+ * inside L ∈ [0.50, 0.80]. Its shadowed hull faces sat at L 0.29. At k = 0.065
+ * and n = 4 the knee's authority at L = 0.105 is a 3 % darkening — it is not
+ * that the black point was set wrong, it is that a fourth-power knee has no
+ * reach at all three doublings above k, which is exactly where a lifted floor
+ * lives.
+ *
+ * n = 2 with k = 0.115 keeps the same two guarantees — zero derivative at the
+ * origin (no crushing), asymptotically the identity (the midtone does not pay)
+ * — and trades reach for steepness: at L = 0.105 it is a 52 % darkening, at
+ * L = 0.29 an 13 % one, at L = 0.61 a 3 % one. The whole point is that the
+ * curve now discriminates between "dark" and "not actually dark, just low",
+ * which the sharp knee could not.
  */
-export const GRADE_BLACK_POINT = 0.065;
+export const GRADE_BLACK_POINT = 0.080;
+/**
+ * The knee exponent. 2, and it should not go below it: at n = 1 the rolloff is
+ * a Reinhard and its error at the midtone is O(k/L), which is a visible ~10 %
+ * tax on the median and walks §5.2's p50 out of band.
+ */
+export const GRADE_BLACK_KNEE_POWER = 2;
 
 /**
  * §5.2 contrast: a symmetric S about a pivot, applied to LUMINANCE (see
@@ -728,6 +755,33 @@ vec3 ironAgx(vec3 color) {
  *                          turns every shadow blue including the bounce-warmed
  *                          ones, which §5.4 calls a defect.
  */
+
+/**
+ * §5.4's three wheels, as data rather than as literals buried in the shader, so
+ * that the whole split tone can be read — and re-fitted against a measurement —
+ * in one place. Units are sRGB code fractions; §5.4's stated envelope is
+ * ±0.03–0.06 per channel and every value here is inside it.
+ *
+ * Signs: negative red / positive blue is COOL, the reverse is WARM. §5.4's own
+ * table is quoted as B−R, so a warm bucket is a NEGATIVE number there and a
+ * positive one here.
+ */
+const SPLIT_SHADOW_LIFT: readonly [number, number, number] = [-0.018, -0.006, 0.024];
+const SPLIT_MID_GAMMA: readonly [number, number, number] = [0.03, 0.006, -0.04];
+const SPLIT_MID_GAIN: readonly [number, number, number] = [0.035, 0.009, -0.035];
+const SPLIT_HIGH_GAIN: readonly [number, number, number] = [0.052, 0.013, -0.045];
+
+/**
+ * Format a triple for GLSL. `.toFixed(3)` is NOT cosmetic: JS interpolates 0.03
+ * as the string "0.03" but 3 as "3", and an int literal in a `vec3(...)` in GLSL
+ * ES 3.0 is a hard compile error that takes the whole grade program down and
+ * returns every shot in the repo as pure white. Formatting at the interpolation
+ * site is what closes that trap for good.
+ */
+function glslVec3(v: readonly [number, number, number]): string {
+  return v.map((x) => x.toFixed(4)).join(', ');
+}
+
 export const GLSL_GRADE = /* glsl */ `
 // Endpoint-preserving, monotone filmic S with a fixed pivot. See
 // GRADE_CONTRAST_PIVOT for the derivation.
@@ -792,13 +846,12 @@ vec3 ironGrade(vec3 displayLinear) {
   d = pow(max(d, vec3(0.0)), vec3(${AGX_CONTRAST_GAMMA}));
 
   // --- §5.2 black point -------------------------------------------------
-  // L/(1 + (k/L)^4), on luminance, carried back as a scalar. Converges on the
-  // identity a factor of two above k, so the midtone does not pay for it, and
-  // has zero derivative at the origin, so nothing clips to void.
+  // L·Lⁿ/(Lⁿ + kⁿ), on luminance, carried back as a scalar. Converges on the
+  // identity well above k, so the midtone does not pay for it, and has zero
+  // derivative at the origin, so nothing clips to void.
   float bpL = max(ironLuma(d), 1e-4);
-  float bpT = ${GRADE_BLACK_POINT} / bpL;
-  float bpT2 = bpT * bpT;
-  d *= 1.0 / (1.0 + bpT2 * bpT2);
+  float bpT = pow(${GRADE_BLACK_POINT.toFixed(4)} / bpL, ${GRADE_BLACK_KNEE_POWER.toFixed(1)});
+  d *= 1.0 / (1.0 + bpT);
 
   // §5.2 contrast, ON LUMINANCE, carried back to RGB as a scalar — the same
   // shape as the black point above and for the same reason.
@@ -839,7 +892,7 @@ vec3 ironGrade(vec3 displayLinear) {
   // The spec writes smoothstep(0.45, 0.10, L): a DESCENDING ramp, which GLSL
   // does not define, so it is spelled out as 1 - smoothstep(lo, hi, L).
   // .toFixed(3), and it is not cosmetic. GRADE_SAT_BOOST is 3.0, and JS
-  // interpolates that as the string "3" — so this line emitted \`1.0 + 3 * vib\`,
+  // interpolates that as the string "3" — so this line emitted "1.0 + 3 * vib",
   // an int-times-float in GLSL ES 3.0, which is a hard compile error. The grade
   // program then failed to link and EVERY shot in the repo came back pure white.
   // Any constant in this file that happens to land on a whole number has the same
@@ -895,28 +948,45 @@ vec3 ironGrade(vec3 displayLinear) {
   // −22…−8, is untouched at −16.
   float highW = smoothstep(0.58, 0.86, L) * (1.0 - 0.85 * smoothstep(0.86, 1.0, L)) * splitW;
   float midW = (1.0 - shadowW) * (1.0 - highW) * splitW;
-  // The shadow lift stays UNGATED: it is ±0.014 at most, it carries the ambient
-  // dome hue rather than the sun's, and §5.4's shadow row (−4…+6) is the one
-  // bucket both shots already sit inside.
-  d += vec3(-0.010, -0.004, 0.014) * shadowW;
-  // Midtone gamma at 0.6× §5.4's stated value. §5.4 is explicit that the warmth
-  // is supposed to be EARNED from golden-hour light on sandstone and that a LUT
-  // which manufactures it is a defect; when this was written the lighting was
-  // still neutral and the full value was carrying the whole load. It no longer
-  // is — measured on the current roster the midtone B−R already runs −50 to −70
-  // against §5.4's −48…−24, i.e. the scene now over-delivers — so the corrector
-  // steps back rather than stacking on top of it.
-  vec3 gamma = vec3(0.018, 0.004, -0.024) * midW;
+  // The shadow lift, now at ${(SPLIT_SHADOW_LIFT[2] * 1000).toFixed(0)}/1000 on blue against ${(-SPLIT_SHADOW_LIFT[0] * 1000).toFixed(0)}/1000 on red, and gated at half
+  // authority rather than not at all. Round 3's critic measured hud_full's
+  // three luma bands at (22.5, 20.6, 20.1), (71.8, 66.3, 67.6) and (183.3,
+  // 184.4, 180.6) — every one of them inside 3/255 of neutral, with the shadows
+  // marginally WARM — and opened the finding with "a neutral grey-balanced frame
+  // reads as an untouched render no matter how good the sky is". The old ±0.014
+  // wheel is worth 6 codes of B−R at full weight, which is under the noise of
+  // the scene's own ambient chroma; this is worth 11 and is the smallest number
+  // that survives being averaged over a whole luma band.
+  //
+  // It stays SMALL relative to the midtone wheel on purpose. §5.4 is explicit
+  // that a corrector which turns every shadow blue, including the bounce-warmed
+  // ones on the sunward side of a wall, is a defect — so the shadow side buys
+  // just enough separation to read as a split tone and the warmth still has to
+  // be earned from the lighting.
+  d += vec3(${glslVec3(SPLIT_SHADOW_LIFT)}) * shadowW * mix(0.5, 1.0, vib);
+  // Midtone gamma, back at §5.4's stated value after a round at 0.6×, plus a
+  // GAIN term alongside it. The gamma alone could not close the measured gap and
+  // the arithmetic says why: a gamma offset of 0.030/−0.040 moves a pixel at
+  // d = 0.5 by six codes of B−R, and the frames that need it were missing §5.4's
+  // 96–144 target (−48…−24) by twenty to fifty. hud_full measured −10.6 there
+  // and level_alpha +2.7 — the wrong SIGN. A gain is linear in d where a gamma
+  // offset is logarithmic, so it has real authority in the upper midtone where
+  // most of a sunlit frame actually sits, and the two together are worth ~18
+  // codes at d = 0.5. Both stay inside §5.4's ±0.03–0.06 envelope per channel.
+  vec3 gamma = vec3(${glslVec3(SPLIT_MID_GAMMA)}) * midW;
   d = pow(max(d, vec3(0.0)), 1.0 / (1.0 + gamma));
+  d *= 1.0 + vec3(${glslVec3(SPLIT_MID_GAIN)}) * midW;
   // Highlight gain at the top of §5.4's stated ±0.03–0.06 envelope rather than
   // its bottom. Measured on round-1 frames the highlights ran COOL — level_alpha
   // read B−R +11.7 at 144–192 and +4.6 at 192–216 against targets of −42…−20 and
   // −30…−14 — because the bright end of a hazy frame is sky, and sky is blue. A
   // ±0.014 corrector moves that by five codes and is invisible; this moves it by
-  // fifteen, which is the whole width of the miss that a LUT is entitled to fix.
+  // twenty, which is the whole width of the miss that a LUT is entitled to fix.
   // The rest has to come from the aerial-perspective in-scatter carrying the sun
-  // chroma, which is not this file's to set.
-  d *= 1.0 + vec3(0.038, 0.010, -0.034) * highW;
+  // chroma, which is not this file's to set. The vib gate is what keeps this
+  // off a genuinely blue sky: a saturated pixel is one the scene already
+  // decided the hue of, and the corrector has no business there.
+  d *= 1.0 + vec3(${glslVec3(SPLIT_HIGH_GAIN)}) * highW;
 
   // --- §5.1 white point -------------------------------------------------
   // LAST, and after the split tone on purpose: the wheel above is the thing

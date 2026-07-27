@@ -51,11 +51,35 @@ const SEAWARD = new THREE.Vector3(0, 0, -1);
  */
 const HORIZON_BAND = 0.11;
 
-/** LOOK_SPEC §2.4 ground-bounce table: effective irradiance (lx) and chroma. */
+/**
+ * LOOK_SPEC §2.4 ground-bounce table: effective irradiance (lx) and chroma.
+ *
+ * THE LAND AND SEA LOBES ARE ABOVE THE TABLE'S 1 600 / 900 AND THAT IS ROUND 3's
+ * ANSWER TO CRUSHED SHADOWS. Round 3 cut the sky-diffuse anchor (see
+ * `photometry.ts`) to get the key:fill ratio into §2.5's acceptance band, and
+ * the ratio is measured on OPEN GROUND — an upward-facing surface, which sees
+ * none of this lobe at all. Vertical faces and undersides in shadow see a lot of
+ * it, and they are the surfaces that were reading as flat black slabs. Raising
+ * the bounce therefore reopens exactly the pixels the sky cut crushed and moves
+ * the measured ground ratio by nothing.
+ *
+ * It is also the more physical of the two numbers. A Lambertian quay of albedo
+ * 0.42 under GOLDEN's 15.1 klx horizontal returns π·L = 6 300 lx into the
+ * downward hemisphere, so a surface fully open to it receives 6 300 lx before
+ * any view-factor discount; 3 400 is a 54 % view factor, which is roughly what a
+ * wall standing on that quay subtends. It is set by a blind A/B rather than by
+ * taste: against `bfv_gp_031` — the corpus frame chosen for adjacent lit and
+ * shaded walls — our shaded wall lost its material entirely while the
+ * reference's held concrete grain, joints and streaking, and the bounce lobe is
+ * the only term that reaches a shaded vertical face without touching the open
+ * ground the §2.5 ratio is measured on. §2.4's own "8–12 % of the direct sun
+ * irradiance" clause reads 3.8–5.7 klx against the 47 klx DNI. 1 600 lx sat well
+ * under both.
+ */
 const GROUND = {
-  land: { lux: 1600, chroma: new THREE.Color(0.62, 0.5, 0.36) },
-  sea: { lux: 900, chroma: new THREE.Color(0.3, 0.46, 0.5) },
-  glitter: { lux: 5200, chroma: new THREE.Color(1.0, 0.82, 0.62) },
+  land: { lux: 3400, chroma: new THREE.Color(0.62, 0.5, 0.36) },
+  sea: { lux: 1800, chroma: new THREE.Color(0.3, 0.46, 0.5) },
+  glitter: { lux: 6200, chroma: new THREE.Color(1.0, 0.82, 0.62) },
 } as const;
 
 /** GOLDEN's total horizontal illuminance — the anchor the bounce table is quoted at. */

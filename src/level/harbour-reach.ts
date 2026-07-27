@@ -156,14 +156,58 @@ function buildLevel(ctx: BootContext): BuiltLevel {
     const len = Math.hypot(dx, dz) || 1;
     return { x: ax - (dz / len) * inland, z: az + (dx / len) * inland };
   };
+  /**
+   * THE APRON IS A SLAB, NOT A HILLSIDE — AND THIS IS WHY THREE SHEDS AND A
+   * CONTAINER YARD WERE STANDING IN THE SEA.
+   *
+   * `buildQuay` casts a flat concrete apron at `QUAY.deckY` (3.55) running
+   * `QUAY.depth` inland of the seawall, and `buildCrane` already stands its
+   * rails on that number. The sheds, the yard and everything they drop did not:
+   * they took `ground(x, z)`, which is TERRAIN's height field, and at the
+   * harbour that field is the sea bed — around chart datum, i.e. 3.5 m BELOW the
+   * slab they are supposed to stand on. The result is visible in any frame that
+   * looks at the quay from seaward: the shed's plinth is under the waterline,
+   * the apron slab crosses its wall two thirds of the way up, and the container
+   * stacks read as boxes floating in the harbour. It is the same class of defect
+   * as round 2's floating headland prop, at a much larger scale.
+   *
+   * Anything standing ON the apron therefore gets this sampler instead. It
+   * returns the slab wherever the slab exists and the terrain everywhere else,
+   * so a ground skirt that runs off the edge of the apron still lands on real
+   * ground. `max` rather than a flat constant, because if the terrain is ever
+   * re-cut ABOVE the slab the building must follow the terrain — a building
+   * buried in a hillside is worse than one standing on a plinth.
+   */
+  const onApron = (x: number, z: number): boolean => {
+    const e = QUAY.edge;
+    for (let i = 0; i < e.length - 1; i++) {
+      const dx = e[i + 1].x - e[i].x;
+      const dz = e[i + 1].z - e[i].z;
+      const len = Math.hypot(dx, dz) || 1;
+      const tx = dx / len;
+      const tz = dz / len;
+      // Inland normal, the same one `buildQuay` extrudes the slab along.
+      const along = (x - e[i].x) * tx + (z - e[i].z) * tz;
+      const inland = (x - e[i].x) * -tz + (z - e[i].z) * tx;
+      if (along >= -1.5 && along <= len + 1.5 && inland >= -0.5 && inland <= QUAY.depth) return true;
+    }
+    return false;
+  };
+  const apronGround = (x: number, z: number): number =>
+    (onApron(x, z) ? Math.max(ground(x, z), QUAY.deckY) : ground(x, z));
+
   const shedA = apronAt(0.14, 26);
   const shedB = apronAt(0.52, 27);
-  const shedC = apronAt(0.86, 25);
-  buildWarehouse(b, shedA.x, shedA.z, 16, 9, 0.28, ground, rHarbour);
-  buildWarehouse(b, shedB.x, shedB.z, 13, 8, 0.24, ground, rHarbour);
-  buildWarehouse(b, shedC.x, shedC.z, 11, 7.5, 0.18, ground, rHarbour);
+  // 0.82 rather than 0.86: at 0.86 the shed's seaward-east corner sat 3 m PAST
+  // the east end of the apron slab, so a third of its floor cantilevered over
+  // open water. 0.82 puts all four corners inside the slab, and the sightline
+  // `level_bravo` is staged on only moves by 0.2° of azimuth.
+  const shedC = apronAt(0.82, 27);
+  buildWarehouse(b, shedA.x, shedA.z, 16, 9, 0.28, apronGround, rHarbour);
+  buildWarehouse(b, shedB.x, shedB.z, 13, 8, 0.24, apronGround, rHarbour);
+  buildWarehouse(b, shedC.x, shedC.z, 11, 7.5, 0.18, apronGround, rHarbour);
   const yard = apronAt(0.33, 13);
-  buildContainerYard(b, yard.x, yard.z, 22, 9, 0.26, ground, rHarbour);
+  buildContainerYard(b, yard.x, yard.z, 22, 9, 0.26, apronGround, rHarbour);
   buildFuelDepot(b, FUEL_DEPOT.x, FUEL_DEPOT.z, FUEL_DEPOT.yaw, ground, rHarbour);
 
   ctx.report('building level: town');
