@@ -261,7 +261,27 @@ export class ShadowCascades {
     // analytically, so it is 0.6 of a texel rather than the 1.15 it needed when
     // it was (hopelessly) trying to cover the whole kernel walk on its own.
     u.vectors[V_BIAS * 4 + 0] = 0.6;
-    u.vectors[V_BIAS * 4 + 1] = 1.5; // normal-offset bias, cascade texels × sin(θ)
+    // NORMAL-OFFSET BIAS, AND WHY IT IS 0.45 TEXELS AND NOT THE 1.5 IT WAS.
+    //
+    // A normal offset moves the lookup point off the receiver along its own
+    // normal. On ground under an 11° sun that is almost the worst possible
+    // direction: raising the sample by d metres slides the point it reads in the
+    // shadow map d/tan(11°) = 5.1·d metres DOWN-SUN. At 1.5 texels that is 7.7
+    // texels of pure peter-panning — 11 cm on the ground in cascade 0 and 20 cm
+    // in cascade 1. A 4 cm pebble's shadow is 20 cm long, so the whole thing was
+    // being slid out from under its own occluder, which is exactly the reported
+    // "~30 debris props sit as flat ellipses that cast nothing".
+    //
+    // It can be this small because it is no longer doing the anti-acne work: the
+    // receiver-plane bias in `ironCascade` carries the systematic part and this
+    // only has to cover interpolated vertex normals disagreeing with the
+    // rasterised triangle, which is sub-texel. Landed by capturing `light_cascades`
+    // with the shadow term written straight to the framebuffer (see `service.ts`
+    // DEBUG_SUN_SHADOW): at 0.20 the paving carries hard stipple acne along the
+    // slab relief, at 0.45 the same paving is clean and the only dark marks left
+    // on it are real grass and debris shadows, and at the old 1.5 the debris
+    // shadows are gone entirely.
+    u.vectors[V_BIAS * 4 + 1] = 0.45; // normal-offset bias, cascade texels × sin(θ)
     // Blocker search radius in cascade TEXELS, not metres: ten texels is ~0.17 m
     // in cascade 0 and ~5 m in cascade 3, which is the range over which an
     // occluder can physically widen this cascade's penumbra. See `ironCascade`.

@@ -80,21 +80,48 @@ registerShot({
 registerShot({
   name: 'light_contact',
   description:
-    'Close on the foot of the market hall where the plinth, the sand drift and ' +
-    'the paving meet, 14 m out and cross-sun. Proves contact-hardening PCSS and ' +
-    'the short-radius occlusion term: at the contact line the cast shadow is ' +
-    'razor-sharp and carries an AO band darker than the shadow itself, and the ' +
-    'same edge softens measurably as the occluder-receiver gap opens up the wall.',
+    'The sand drift west of the market hall at standing eye height, looking ' +
+    'north along the arcade with the light travelling 91° across the sightline. ' +
+    'Proves contact-hardening PCSS and the short- and micro-radius occlusion ' +
+    'terms on one piece of sunlit ground: grass at 1-3 m throws a razor ' +
+    'terminator, debris chips and a kerb at 4-9 m throw shadows a few ' +
+    'centimetres wide, the drum and wedges at 9-16 m throw metres of softer ' +
+    'edge, and every one of them sits in a contact band darker than its own ' +
+    'cast shadow.',
   frames: 28,
   setup(ctx) {
     ctx.seed(0x11a8);
     ctx.setTimeOfDay(17.4);
     ctx.setWeather(0.04, { wind: 3.5, fog: 0.001 });
     ctx.setOverlays({ viewmodel: false, hud: false });
-    // Everything of interest sits inside cascades 0 and 1, where a texel is
-    // 1.5–5 cm and the penumbra is genuinely resolved rather than sitting on the
-    // one-texel floor.
-    ctx.poseCamera([58, 12.55, 76], [63.5, 12.45, 88], 38);
+    // ROUND 4 RE-STAGED THIS, AND THE OLD POSE WAS FRONT-LIT — the exact fault
+    // this file's header accuses round 2 of, still present in the shot named
+    // after contact shadows.
+    //
+    // The arithmetic that settles it. Light TRAVELS along azimuth 81°. The
+    // useful quantity is the angle between the VIEW direction and that travel
+    // direction: 0° is the sun directly behind the lens (every shadow hides
+    // behind its own occluder), 180° is straight into the sun (same, foreshor-
+    // tened toward the lens), and 90° is the only place a shadow lies ACROSS the
+    // frame at full length. The old sightline (58,76)→(63.5,88) is azimuth 24.6°,
+    // i.e. 56° off the travel direction — front-lit, and a debug capture of the
+    // shadow term confirmed it: the term was working and every shadow in frame
+    // was tucked behind the object that cast it.
+    //
+    // This station looks along azimuth 350°, which is 91° off the travel
+    // direction. Shadows now run left-to-right across the sand at 5.1 m per
+    // metre of occluder, and the frame carries all three scales the shot exists
+    // to prove on one continuous piece of sunlit ground: grass blades at 1–3 m
+    // with a razor terminator, the debris chips and kerb at 4–9 m, the drum and
+    // concrete wedges at 9–16 m, and the arcade's own 8 m mass laying the long
+    // soft edge across the top. Cascade 0 and 1 only, so a texel is 1–3 cm and
+    // the penumbra is resolved rather than sitting on the one-texel floor.
+    //
+    // 44° rather than 38°: at 38 the aperture path in `src/render/passes/dof.ts`
+    // put 20+ px of CoC on the near sand, which is where the sharpest contact in
+    // the frame is. Above 40 the pass stays on gameplay restraint and the whole
+    // ground plane resolves.
+    ctx.poseCamera([60.5, 12.35, 73.5], [58.4, 12.05, 85.3], 44);
   },
 });
 

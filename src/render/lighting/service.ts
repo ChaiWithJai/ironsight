@@ -62,6 +62,7 @@ import { Gtao } from '@/render/lighting/gtao';
 import { LocalLightPool } from '@/render/lighting/clustered';
 import { SkyAmbient } from '@/render/lighting/sky-ambient';
 import {
+  DEBUG_OFF,
   V_ATLAS,
   V_MISC,
   V_SCREEN,
@@ -71,6 +72,16 @@ import {
   installShadingModel,
   shadingUniforms,
 } from '@/render/lighting/shading';
+
+/**
+ * Channel-isolation debug. MUST BE `DEBUG_OFF` IN EVERY COMMIT — it replaces the
+ * shaded colour of every lit surface with a raw lighting term. It exists because
+ * "the frame has no cast shadows" has two completely different causes (a broken
+ * shadow term, or a camera staged where no shadow falls) that are indis-
+ * tinguishable in a beauty frame and trivially separable here. Flip it, capture,
+ * flip it back. See `shading.ts` DEBUG_*.
+ */
+const DEBUG_MODE = DEBUG_OFF;
 
 /** Sun movement that forces an environment rebake. `ARCHITECTURE` B6/B7. */
 const REBAKE_DEGREES = 0.15;
@@ -226,7 +237,21 @@ class IronLighting implements LightingService {
     // Three ≥ r155 shades `E · cosθ · albedo / π` with `intensity` as
     // illuminance, so lux goes in unmodified and the exposure below is the only
     // thing standing between it and the display.
-    this.light.color.copy(this.colour);
+    //
+    // THE COLOUR IS RE-NORMALISED TO UNIT LUMINANCE FIRST, AND THAT IS A REAL
+    // 1.32× ON THE KEY LIGHT, NOT A TWEAK. Three multiplies `color · intensity`,
+    // so the illuminance the surface actually receives is `dni · Y(colour)`.
+    // LOOK_SPEC §2.2's ramp is MAX-normalised — at 11° it is (1, 0.712, 0.478),
+    // whose Rec.709 luminance is 0.756 — while §2.2's 48 klx is a LUMINOUS
+    // quantity that is already V(λ)-weighted. Multiplying the two applies the
+    // weighting twice and delivers 36 klx where the spec says 48. The exposure
+    // in the next block is derived from the unweighted 48 klx, so the error did
+    // not show up as a dark frame: it showed up as a LOW LIT:SHADOW RATIO,
+    // because only the sun was quietly scaled by 0.756 and the sky was not.
+    // Measured on `level_bravo`, that alone is the difference between 1.5:1 and
+    // 2.0:1 display luma against §2.5's 2.5–4.5:1 acceptance band.
+    const luminance = 0.2126 * this.colour.r + 0.7152 * this.colour.g + 0.0722 * this.colour.b;
+    this.light.color.copy(this.colour).multiplyScalar(1 / Math.max(luminance, 1e-3));
     this.light.intensity = dni;
     this.light.position.copy(ctx.camera.position).addScaledVector(this.dir, 500);
     this.target.position.copy(ctx.camera.position);
@@ -265,7 +290,10 @@ class IronLighting implements LightingService {
     u.vectors[V_SUN * 4 + 2] = this.dir.z;
     u.vectors[V_SUN * 4 + 3] = this.light.visible ? 1 : 0;
 
-    u.vectors[V_ATLAS * 4] = this.cascades.atlasSize;
+    // Debug gain: the reciprocal of the scene exposure, so a debug term of 1.0
+    // survives the post chain's Exposure pass and lands at white instead of at
+    // the ~0.04 golden hour crushes it to. Read only by the DEBUG_* branch.
+    u.vectors[V_ATLAS * 4] = 1 / Math.max(1e-6, derivedExposure(total));
     u.vectors[V_ATLAS * 4 + 1] = 1 / this.cascades.atlasSize;
     u.vectors[V_ATLAS * 4 + 2] = SUN_PENUMBRA_SLOPE;
     u.vectors[V_ATLAS * 4 + 3] = MIN_PENUMBRA_TEXELS;
@@ -283,6 +311,7 @@ class IronLighting implements LightingService {
     // its indirect light — below the threshold at which an eye reads a contact.
     u.vectors[V_MISC * 4 + 1] = 0.9;
     u.vectors[V_MISC * 4 + 2] = quality.shadows.maxDistance * 0.82; // cascade fade start
+    u.vectors[V_MISC * 4 + 3] = DEBUG_MODE;
 
     // ---- buffers ------------------------------------------------------------
     this.pool.tick(ctx);

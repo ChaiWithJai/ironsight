@@ -148,3 +148,78 @@ registerShot({
     ctx.poseCamera([99.5, 13.22, 80.5], [81.3, 11.82, 116.1], 55);
   },
 });
+
+registerShot({
+  name: 'material_nearfield',
+  description:
+    'The BRAVO breakwater’s seaward parapet at 3.6 m — the exact mass that ' +
+    'occupies the lower-right third of `level_bravo`, but read through a 46° ' +
+    'lens so the cinematic aperture stays off and the surface is judged on its ' +
+    'own merits rather than through 30 px of bokeh. Proves: the largest ' +
+    'near-field object in the game’s hero establishing frame carries mesoscale ' +
+    '(coursing, chipped arrises, run-off) and micro (grain, roughness break-up) ' +
+    'rather than going smooth as the camera closes.',
+  frames: 14,
+  setup(ctx) {
+    ctx.seed(0x4f);
+    ctx.setTimeOfDay(17.4);
+    ctx.setWeather(0.05, { wind: 5.5, fog: 0.0032 });
+    ctx.setOverlays({ viewmodel: false, hud: false });
+    // SAME STATION as `level_bravo` — [62.5, 7.02, −40.5] on the breakwater
+    // centreline — so this frame and that one are looking at the same texels of
+    // the same geometry under the same sun. That is the whole point: a material
+    // fix that only shows on a bespoke chart is not a fix for the frame the
+    // critic actually reads.
+    //
+    // `buildBreakwater` runs the arm from (26, −14) to (104, −70), i.e. along
+    // (0.8125, −0.5833), and drops the seaward parapet on the +normal side at
+    // (halfWidth − 0.5) out from the centreline. At this station the arm is 45 m
+    // in, so halfWidth is 4.06 and the parapet's face sits 3.56 m off the axis
+    // on bearing 216°. Aimed 6 m down its length rather than square at it, so
+    // one frame carries the sandstone at 3.6 m, at 6 m and at 14 m with the
+    // course lines converging — the arrangement that makes a repeat findable.
+    //
+    // 46°, NOT 38°. `src/render/passes/dof.ts` switches to a cinematic aperture
+    // at fovDeg <= 40 and would put ~30 px of CoC on the one surface this shot
+    // exists to resolve. Anything above 40 keeps gameplay restraint (CoC <= 3 px)
+    // and the parapet stays sharp.
+    ctx.poseCamera([62.5, 7.02, -40.5], [58.9, 6.15, -45.6], 46);
+  },
+});
+
+registerShot({
+  name: 'material_steel',
+  description:
+    'The BRAVO container yard from the landward lane at standing eye height. ' +
+    'Proves the SHEET-METAL half of the uber material, which nothing else in ' +
+    'the roster covered: rolled corrugation with real depth, butt seams and ' +
+    'proud weld beads, bolt rows, and the three rust generations — flat oxide, ' +
+    'vertical bleeding from every seam, near-black scale in the low points — ' +
+    'with the paint left glossy on the flats and matte where it has gone.',
+  frames: 14,
+  setup(ctx) {
+    ctx.seed(0x50);
+    ctx.setTimeOfDay(17.4);
+    ctx.setWeather(0.05, { wind: 5.0, fog: 0.003 });
+    ctx.setOverlays({ viewmodel: false, hud: false });
+    // `buildContainerYard` is placed at apronAt(0.33, 13) on the quay edge
+    // polyline in `src/level/layout.ts`, which resolves to (−26.4, −47.1) with a
+    // 22 × 9 half-extent and 0.26 rad of yaw; the apron deck is at 3.55, so a
+    // 1.62 m standing eye is at 5.17. Inland is +z along this stretch of the
+    // quay, so the station stands 3 m clear of the yard's landward edge and
+    // looks back into it along a lane.
+    //
+    // Sightline 180°, i.e. 99° off the 81° light travel — one degree under
+    // §2.3's window and deliberately so. What a sheet-metal shot needs above all
+    // is light near the surface PLANE: at 99° the sun rakes the containers'
+    // long sides at 9° above grazing, so a 19 mm rib throws a 12 cm shadow and
+    // the corrugation is the dominant thing in the frame. Rotating further round
+    // to satisfy the letter of the window would put the sun behind the stacks
+    // and lose every one of those shadows.
+    //
+    // 44°, above the 40° cinematic-aperture threshold in
+    // `src/render/passes/dof.ts`, so the near stack stays sharp — this is a
+    // material chart, not an establishing frame.
+    ctx.poseCamera([-26.4, 5.17, -35.4], [-26.8, 4.35, -45.0], 44);
+  },
+});

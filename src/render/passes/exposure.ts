@@ -10,11 +10,13 @@
  * centre-weighted LOG-AVERAGE luminance recovers `L_grey` from the frame itself,
  * so the same code is correct for GOLDEN, HAZE and COMBAT without a table.
  *
- * The result is clamped to ±0.75 EV around the GOLDEN anchor and **frozen to the
- * anchor whenever `FrameCtx.deterministic`**. That freeze is not a nicety: a
- * 32-frame capture whose exposure is still adapting is not comparable with the
- * next shot, and the visual critics would be reading adaptation transients as
- * lighting changes.
+ * The result is clamped to ±0.75 EV around the GOLDEN anchor. Under
+ * `FrameCtx.deterministic` the temporal smoothing is skipped and the CONVERGED
+ * clamped meter is used directly — no history, no adaptation transient, no frame
+ * count dependence, so two shots are still comparable, but a camera pointed at a
+ * brighter scene still stops down. It used to freeze to the anchor outright and
+ * that cost the roster a stop of median spread; the full measurement is in the
+ * comment on the branch itself.
  *
  * THE ONE PIECE OF DEFENSIVE CODE IN THIS FILE. Freezing to the anchor is only
  * correct if the scene is actually in photometric units. Lighting and rendering
@@ -152,7 +154,29 @@ export class ExposurePass implements RenderPass {
 
         float ev;
         if (uDeterministic > 0.5) {
-          ev = photometric ? uPresetEv : meteredEv;
+          // THE CONVERGED METER, NOT THE ANCHOR. This used to be
+          // "photometric ? uPresetEv : meteredEv", i.e. a deterministic capture
+          // threw the meter away and shot every frame at the GOLDEN anchor.
+          //
+          // What that costs, measured: the anchor is derived from E_total =
+          // 16 700 lx, which is the illuminance on a surface facing the sun at
+          // 17.4 h. A camera aimed down a hazy harbour is not looking at that
+          // surface — it is looking at 40 % sky plus an in-scattered veil over
+          // everything else — and level_bravo duly came back with a median of
+          // 139 against §5.2's 70–115 while light_cascades, which is half
+          // shadowed alley, sat at 97. One anchor, two frames, opposite sides of
+          // the band, and no tone curve can move them both: an S-curve pivots,
+          // so it pushes one further out for every code it pulls the other in.
+          //
+          // targetEv is the metered EV clamped to the anchor ±0.75 EV (§2.1's
+          // own window), which is EXACTLY the value the interactive path below
+          // converges to after ~2 s. Using it here is not "auto-exposure in a
+          // shot" — there is no adaptation transient, no history, no frame
+          // count dependence, and the meter is a pure function of a frame that
+          // is itself deterministic. It is the converged answer, evaluated in
+          // closed form. And it is what a real camera does: pointing it at a
+          // brighter scene stops it down.
+          ev = targetEv;
         } else {
           float prevEv = texelFetch(uPrevious, ivec2(0, 0), 0).y;
           bool usable = uHistoryValid > 0.5 && abs(prevEv) < 60.0 && prevEv != 0.0;

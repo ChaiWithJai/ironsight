@@ -211,6 +211,120 @@ const RELIEF_SURFACES: ReadonlySet<SurfaceId> = new Set([
   SurfaceId.Gravel,
 ]);
 
+/**
+ * THE CHROMA CEILING, per surface — the maximum saturation a material's LINEAR
+ * albedo is allowed to reach, whatever the emitting lane authored.
+ *
+ * `docs/LOOK_SPEC.md` §4.3 quotes measured chroma off the reference corpus, and
+ * the round-3 measurement of `material_nearfield` says we are nowhere near it:
+ * the breakwater parapet's sunlit sandstone reads hue 23° at **S 0.627** against
+ * the spec's 27–35° at **S 0.13–0.26**, i.e. two-and-a-half to nearly five times
+ * over. That is the single loudest material defect in the game's hero
+ * establishing frame — a 480 × 470 px near-field mass of neon terracotta — and
+ * it is not a texture problem. The bake is fine and the wear stack is fine; the
+ * frame's chroma is simply unbounded.
+ *
+ * WHY THE CEILING LIVES HERE AND NOT IN THE LANE'S `baseColor`. Fifteen lanes
+ * author tints, they author them as sRGB hex read off a palette swatch, and a
+ * swatch that looks like "warm sandstone" at 100 % on a white page is a long way
+ * past what a real mineral reflects. `level.sandstone` is 0xa78c63, which is
+ * linear (0.385, 0.267, 0.132) — S 0.657. Asking every lane to re-author every
+ * tint against a spectrophotometer is the wrong seam and would go stale the
+ * first time anyone tweaked a palette. The factory owns the surface vocabulary,
+ * so the factory owns the bound; a lane's hue and value survive untouched and
+ * only the excess chroma is taken out.
+ *
+ * The numbers are the SPEC's, converted from the sunlit-display saturation it
+ * quotes back through the golden-hour key (which is itself strongly orange and
+ * therefore adds chroma rather than removing it) — so each one sits below the
+ * bottom of its band, and they were then confirmed by measuring the captured
+ * frame rather than by arithmetic alone.
+ */
+const CHROMA_CEILING: Partial<Readonly<Record<SurfaceId, number>>> = {
+  // §4.3: sandstone S 0.13–0.26 sunlit. Mineral, and the largest single share of
+  // the town's pixels — this one number moves more of the frame than any other.
+  [SurfaceId.Sandstone]: 0.20,
+  [SurfaceId.Stucco]: 0.20,
+  [SurfaceId.Plaster]: 0.17,
+  [SurfaceId.Concrete]: 0.15,
+  [SurfaceId.Rubble]: 0.18,
+  [SurfaceId.Cobble]: 0.17,
+  [SurfaceId.Gravel]: 0.17,
+  // Fired terracotta genuinely is the most saturated mineral on the map, and
+  // pantiled roofs are a deliberate part of the palette — but 0.62 is paint.
+  [SurfaceId.Tile]: 0.34,
+  [SurfaceId.Sand]: 0.21,
+  [SurfaceId.WetSand]: 0.21,
+  [SurfaceId.Dirt]: 0.22,
+  [SurfaceId.Wood]: 0.26,
+  [SurfaceId.PaintedWood]: 0.26,
+  // Iron oxide is a brown, not an orange. The brief's own number for the near
+  // container mass is ~0.35 and the reference corpus agrees: a weathered box is
+  // three or four browns with the paint showing through, never one hot chroma.
+  [SurfaceId.RustedMetal]: 0.30,
+  [SurfaceId.PaintedMetal]: 0.26,
+  [SurfaceId.BareMetal]: 0.15,
+  [SurfaceId.Grating]: 0.17,
+  [SurfaceId.Sandbag]: 0.21,
+  [SurfaceId.Fabric]: 0.26,
+  [SurfaceId.Tarp]: 0.26,
+  [SurfaceId.Rope]: 0.23,
+  [SurfaceId.Rubber]: 0.10,
+  [SurfaceId.Bark]: 0.26,
+  // Chlorophyll and blood are the two genuinely saturated things in the world;
+  // capping them at mineral levels is what makes a scene read as plastic.
+  [SurfaceId.Foliage]: 0.62,
+  [SurfaceId.Flesh]: 0.50,
+  [SurfaceId.Kevlar]: 0.21,
+};
+
+/** Unlisted surfaces (glass, water) are shaded by a lane chunk; leave them be. */
+const CHROMA_UNBOUNDED = 1.0;
+
+/**
+ * SHEET-METAL MESOSCALE — the layer that turns "an orange box" into steel.
+ *
+ * Round 3's material critique named the failure precisely: the largest object in
+ * `level_bravo`'s near field carries "zero mesoscale (no panel lines, welds,
+ * rivets, corrugation, placards) and zero micro". The bake's `mat.rusted_metal`
+ * ships a 2.6 m tile with a 2 × 3 panel pattern in it, which is the right idea
+ * at the wrong scale: at 1.5 m from the lens one tile covers most of the frame,
+ * so a 2 × 3 pattern gives you at most one seam and nothing else. Everything a
+ * steel plate actually shows at arm's length — the rolled rib, the butt seam,
+ * the weld bead standing proud of it, the bolt row, the rust bleeding out of the
+ * seam — is below the tile's resolution and has to be synthesised.
+ *
+ * It is built in WORLD METRES off the surface's dominant plane rather than in
+ * uv, for the same reason the grain bands are: it is a PHYSICAL feature at a
+ * physical size (an ISO container's rib pitch is 280 mm whoever modelled it),
+ * and reading it in uv would put it at the mercy of whichever lane authored the
+ * quad. World space also means it cannot repeat — the plate grid is global, so
+ * two containers side by side do not carry the same seam in the same place.
+ *
+ *   pitch  corrugation rib pitch, m (0 disables the rib entirely)
+ *   depth  rib depth, m — real container corrugation is 20–25 mm
+ *   plate  butt-seam grid, m — 2.4 × 1.2 is standard sheet stock
+ *   rust   how far the oxidation has run, 0 = fresh paint, 1 = scale
+ */
+interface SheetProfile {
+  readonly pitch: number;
+  readonly depth: number;
+  readonly plate: number;
+  readonly rust: number;
+}
+
+const NO_SHEET: SheetProfile = { pitch: 0, depth: 0, plate: 0, rust: 0 };
+
+const SHEET: Partial<Readonly<Record<SurfaceId, SheetProfile>>> = {
+  // The harbour's containers, the freighter's hull and every drum on the quay.
+  [SurfaceId.RustedMetal]: { pitch: 0.32, depth: 0.019, plate: 2.35, rust: 0.85 },
+  // Cranes, bollards, shed cladding: the paint is mostly still on.
+  [SurfaceId.PaintedMetal]: { pitch: 0.32, depth: 0.013, plate: 1.95, rust: 0.34 },
+  // Machined and structural stock — seams and bolts, no rolled rib.
+  [SurfaceId.BareMetal]: { pitch: 0, depth: 0, plate: 1.55, rust: 0.16 },
+  [SurfaceId.Grating]: { pitch: 0, depth: 0, plate: 1.20, rust: 0.55 },
+};
+
 export interface IronMaterialOptions {
   readonly spec: MaterialSpec;
   readonly textures: TextureSet;
@@ -229,11 +343,26 @@ export interface IronMaterialResult {
 }
 
 /** `MaterialFeature` bits that change GLSL, and therefore cost a permutation. */
-function definesFor(spec: MaterialSpec, hasWear: boolean, block: BlockLattice): Record<string, string> {
+function definesFor(
+  spec: MaterialSpec,
+  hasWear: boolean,
+  block: BlockLattice,
+  sheet: SheetProfile,
+): Record<string, string> {
   const f = spec.features;
   const d: Record<string, string> = {};
   if (f & MaterialFeature.Triplanar) d.IRON_TRIPLANAR = '1';
   if (block.amp > 0) d.IRON_STONE = '1';
+  // One permutation for the whole sheet-metal stack — rib, seam, bolts and the
+  // three rust generations ride the same handful of noise calls, and splitting
+  // them into separate bits would multiply programs for no shading benefit.
+  if (sheet.plate > 0) {
+    d.IRON_SHEET = '1';
+    // Rib depth is a compile-time constant rather than a fifth uniform slot:
+    // it never changes at runtime and the shader is already carrying eleven
+    // vec4s of per-material state.
+    d.IRON_RIB_DEPTH = sheet.depth.toFixed(4);
+  }
   // Stochastic sampling is a UV-path technique: the triplanar path breaks its
   // own repeat with a domain warp instead (three projections × three taps is
   // nine dependent fetches on the terrain, which is most of a grazing frame).
@@ -321,7 +450,15 @@ export function buildIronMaterial(opts: IronMaterialOptions): IronMaterialResult
 
   const hasWear = textures.wear !== undefined;
   const block = BLOCK_LATTICE[spec.surface] ?? PATCHES;
-  const defines = definesFor(spec, hasWear, block);
+  // A lane that writes its own shading (the weapon's four chunk-driven specs) or
+  // that has asked for weapon-scale detail is authoring millimetres, and a
+  // 280 mm container rib laid across a receiver would be absurd. `detailScale`
+  // is already the repo's signal for "this is hand-sized" — the parallax depth
+  // switches on the same test — so the sheet layer reuses it rather than
+  // inventing a second one.
+  const handScale = (spec.detailScale ?? 1) > 4 || spec.surfaceShader !== undefined;
+  const sheet = handScale ? NO_SHEET : SHEET[spec.surface] ?? NO_SHEET;
+  const defines = definesFor(spec, hasWear, block, sheet);
 
   // Metres per repeat. `tilingScale` > 1 means "smaller features", which is how
   // a lane asks for the same material at a different physical scale.
@@ -417,6 +554,14 @@ export function buildIronMaterial(opts: IronMaterialOptions): IronMaterialResult
         // they hold the per-instance jitter to zero: on a manufactured surface
         // it reads as a fault rather than as history.
         suppressVariation ? 0 : block.amp,
+      ),
+    },
+    uIronClass: {
+      value: new THREE.Vector4(
+        CHROMA_CEILING[spec.surface] ?? CHROMA_UNBOUNDED,
+        sheet.rust,
+        sheet.pitch,
+        sheet.plate,
       ),
     },
   };

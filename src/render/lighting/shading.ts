@@ -72,11 +72,26 @@ export const V_ATLAS = 3; // [unused, 1/atlasSize, tan(sunAngularRadius), minPen
 export const V_SCREEN = 4; // [1/width, 1/height, aoStrength, cascadeCount]
 export const V_SUN = 5; // [sunDir.xyz (toward sun, world), shadowEnabled]
 export const V_BIAS = 6; // [depthBiasTexels, normalBiasTexels, blockerSearchTexels, blendBand]
-export const V_MISC = 7; // [localLightCount, contactAoStrength, cascadeFadeStart, unused]
+export const V_MISC = 7; // [localLightCount, contactAoStrength, cascadeFadeStart, debugMode]
 /** Four tile rects in the atlas: [offsetU, offsetV, scaleU, scaleV]. */
 export const V_TILE0 = 8;
 export const V_LIGHT_BASE = 12;
 export const VEC_COUNT = V_LIGHT_BASE + IRON_MAX_LOCAL_LIGHTS * 3;
+
+/**
+ * `ironVec[V_MISC].w` — a channel-isolation debug, off in every shipped frame.
+ *
+ * A shadow bug is invisible in a tonemapped, fogged, DOF'd beauty frame: a term
+ * that returns a flat 1.0 and a term that is correct but staged out of shot look
+ * identical. These modes write the raw term to the framebuffer instead of the
+ * shaded colour, which turns "is there a shadow here" into a yes/no rather than
+ * a judgement call. Set from `DEBUG_MODE` in `service.ts`.
+ */
+export const DEBUG_OFF = 0;
+export const DEBUG_SUN_SHADOW = 1;
+export const DEBUG_CASCADE_INDEX = 2;
+export const DEBUG_AO = 3;
+export const DEBUG_NDL = 4;
 
 export interface ShadingUniforms {
   readonly matrices: Float32Array;
@@ -131,6 +146,14 @@ uniform sampler2D ironAoTex;
 #define IRON_MAX_PLANE_SLOPE 8.0
 #define IRON_MAX_LOCAL_LIGHTS ${IRON_MAX_LOCAL_LIGHTS}
 #define IRON_LIGHT_BASE ${V_LIGHT_BASE}
+/** Debug mode selectors. \`#define\` so the ints never land in float context. */
+#define IRON_DBG_SHADOW ${DEBUG_SUN_SHADOW}
+#define IRON_DBG_CASCADE ${DEBUG_CASCADE_INDEX}
+#define IRON_DBG_AO ${DEBUG_AO}
+#define IRON_DBG_NDL ${DEBUG_NDL}
+
+/** Debug channel, written in \`lights_fragment_begin\`, read in \`opaque_fragment\`. */
+vec4 ironDebug = vec4( 0.0 );
 
 vec3 ironWorldPos( const in vec3 viewPos ) {
   return ( ironMatrix[${M_VIEW_INVERSE}] * vec4( viewPos, 1.0 ) ).xyz;
@@ -328,6 +351,8 @@ float ironSunShadow( const in vec3 worldPos, const in vec3 worldNormal, const in
     }
   }
 
+  ironDebug.z = float( c );
+
   // A negative return means "outside this cascade's footprint" — fall through to
   // the coarser one instead of punching an unshadowed hole in the frame.
   float s = ironCascade( c, worldPos, worldNormal, ndl );
@@ -494,8 +519,12 @@ export function installShadingModel(quality: Readonly<QualitySettings>): void {
 		{
 			vec3 ironWp = ironWorldPos( geometryPosition );
 			vec3 ironWn = normalize( ironWorldDir( geometryNormal ) );
-			directLight.color *= ironSunShadow( ironWp, ironWn, -geometryPosition.z, dot( ironWn, ironVec[${V_SUN}].xyz ) )
-				* ironContactSun();
+			float ironNdl = dot( ironWn, ironVec[${V_SUN}].xyz );
+			float ironS = ironSunShadow( ironWp, ironWn, -geometryPosition.z, ironNdl );
+			ironDebug.x = ironS;
+			ironDebug.y = ironNdl;
+			ironDebug.w = ironContactSun();
+			directLight.color *= ironS * ironDebug.w;
 		}
 		#else
 ${dirShadow}		#endif
@@ -514,6 +543,28 @@ ${dirShadow}		#endif
   // accumulating indirect light, and it is the last chunk in the physical
   // fragment that RCORE's uber material does not rewrite.
   chunk.lights_fragment_end += OCCLUSION;
+
+  // Channel isolation. Compiled in always (it is four compares on a uniform that
+  // is zero in every shipped frame, and the branch is uniform so it costs
+  // nothing), because a shadow term that silently returns 1.0 is otherwise
+  // indistinguishable from a shadow that is merely staged out of shot.
+  chunk.dithering_fragment += /* glsl */ `
+#ifdef STANDARD
+{
+  int ironMode = int( ironVec[${V_MISC}].w + 0.5 );
+  // Undo the scene exposure so a debug term of 1.0 lands at white rather than at
+  // the 0.04 the golden-hour exposure would otherwise crush it to.
+  float ironGain = ironVec[${V_ATLAS}].x;
+  if ( ironMode == IRON_DBG_SHADOW ) gl_FragColor = vec4( vec3( ironDebug.x ) * ironGain, 1.0 );
+  else if ( ironMode == IRON_DBG_CASCADE ) gl_FragColor = vec4( (
+    ironDebug.z < 0.5 ? vec3( 1.0, 0.2, 0.2 ) :
+    ironDebug.z < 1.5 ? vec3( 0.2, 1.0, 0.2 ) :
+    ironDebug.z < 2.5 ? vec3( 0.2, 0.4, 1.0 ) : vec3( 1.0, 1.0, 0.2 ) ) * ironGain, 1.0 );
+  else if ( ironMode == IRON_DBG_AO ) gl_FragColor = vec4( ironOcclusion().rgr * ironGain, 1.0 );
+  else if ( ironMode == IRON_DBG_NDL ) gl_FragColor = vec4( vec3( max( ironDebug.y, 0.0 ) ) * ironGain, 1.0 );
+}
+#endif
+`;
 
   // Publish the shared cells. Numeric values are Float32Arrays, which
   // `cloneUniforms` copies BY REFERENCE — that is what makes one write reach

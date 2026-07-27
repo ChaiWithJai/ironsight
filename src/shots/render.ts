@@ -117,11 +117,12 @@ registerShot({
 registerShot({
   name: 'post_dof_bokeh',
   description:
-    'The same quay on a 38 deg cinematic lens. Proves the aperture path: ' +
-    'auto-focus onto the crane lattice at the frame centre, the near water and ' +
-    'the weapon melting in the foreground, the headland behind at ~30 px of CoC, ' +
-    'and the specular glitter breaking into round 7-blade bokeh that brightens ' +
-    'at the rim and squashes to a cat\'s eye toward the corners.',
+    'The same quay on a 38 deg cinematic lens. Proves the aperture path AND its ' +
+    'round-4 re-derivation: the near field — viewmodel at 0.4 m, deck inside ' +
+    '3 m — melts into round 7-blade bokeh that brightens at the rim and squashes ' +
+    'to a cat\'s eye toward the corners, while the quay, the gantries and the ' +
+    'headland behind them all stay READABLE. Both bands used to be the other ' +
+    'way round.',
   frames: 20,
   setup(ctx) {
     ctx.seed(0x53);
@@ -132,19 +133,24 @@ registerShot({
     // uses to switch from gameplay restraint to a real aperture — the player's
     // own FOV slider bottoms out at 60, so nothing in gameplay can reach it.
     //
-    // THE SUBJECT HAS TO BE NEAR, and this pose is built around that constraint
-    // rather than around the view. `CINEMATIC_COC_SCALE` is a FIXED aperture on
-    // purpose (see `passes/dof.ts`), so background CoC is 120/d_focus px: a
-    // subject at 56 m yields 2 px and the shot proves nothing at all. §6.2's
-    // 20–40 px figure is quoted against a 4 m subject for exactly this reason.
+    // WHAT THIS SHOT PROVES CHANGED IN ROUND 4, because the lens did. It used to
+    // claim "the headland behind at ~30 px of CoC", which the pass duly
+    // delivered — and delivering it on `level_bravo`, which takes the same lens,
+    // smeared the entire dock the player stands on and was the first thing a
+    // critic said about the frame ("an out-of-focus photograph"). The cinematic
+    // path is now an ESTABLISHING lens: CoC scale 40 not 120, cap 15 px not 32,
+    // far side at a quarter weight, auto-focus clamped to 12 m. See the CoC
+    // table in `passes/dof.ts`.
     //
-    // So the centre ray is aimed at the NEAREST gantry's tower at (6, −36), 8.4 m
-    // out, which puts the background at ~14 px and the deck and water inside 3 m
-    // at ~26 px, with the viewmodel saturating the 32 px cap. The sun lands at
-    // screen (0.38, 0.34), up and left of the tower, so the glitter path and the
-    // aureole both fall in the defocused zone — which is where the aperture
-    // character (7-blade truncation, bright rim, cat's-eye squash) is actually
-    // visible.
+    // So the near field is what has to carry the proof, and this pose still
+    // gives it: the viewmodel at 0.4 m saturates the 15 px cap and the deck
+    // inside 3 m runs 8–13 px, which is where the aperture character (7-blade
+    // truncation, bright rim, cat's-eye squash toward the corners) is visible —
+    // look at the specular run down the barrel, which breaks into discrete
+    // discs. The centre ray is aimed at the nearest gantry's tower at (6, −36),
+    // 8.4 m out, so the meter lands on solid geometry rather than sky and the
+    // 12 m clamp is not what is choosing the focus. Everything past 6 m is under
+    // 2 px and stays legible, which is now the point.
     ctx.poseCamera([14, 5.6, -33.5], [6, 6.3, -36], 38);
   },
 });

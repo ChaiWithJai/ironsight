@@ -59,6 +59,20 @@ const RADIUS_FAR = 10.0;
  * 0.55 m is §2.6's own figure and puts three or four taps inside the window.
  */
 const RADIUS_NEAR = 0.55;
+/**
+ * MICRO search radius, metres — LOOK_SPEC §2.6's "short-range 0.12 m radius term
+ * composited in", which until now was not implemented at all.
+ *
+ * It exists for one class of object and the reviews name it precisely: the
+ * ~30 pebbles and rubble chips scattered over the quay "sit as flat ellipses
+ * with no contact darkening, so they read as decals painted on the ground".
+ * A 4 cm pebble subtends about 0.4 % of the hemisphere of a point 0.5 m away,
+ * so it is invisible to a 0.55 m integral no matter how it is weighted — the
+ * only way to see it is to integrate a neighbourhood its own size. That is all
+ * this radius is, and it costs no extra texture fetches: it is a third horizon
+ * pair tracked over the taps the near and far searches already take.
+ */
+const RADIUS_MICRO = 0.13;
 
 /**
  * How far the contact-shadow ray marches along the sun vector, metres. Short on
@@ -135,6 +149,8 @@ const AO_PRELUDE = /* glsl */ `
   uniform vec4 uProjection;
   /** [ radiusNear, radiusFar, thickness, intensity ] */
   uniform vec4 uAoParams;
+  /** [ radiusMicro, microExponent, unused, unused ] */
+  uniform vec4 uAoParams2;
   /** [ view-space direction TOWARD the sun, contact-march length in metres ] */
   uniform vec4 uSunView;
 
@@ -201,6 +217,7 @@ function aoBody(slices: number, steps: number): string {
   float jitter = ironNoise( gl_FragCoord.xy );
   float visibilityFar = 0.0;
   float visibilityNear = 0.0;
+  float visibilityMicro = 0.0;
 
   for ( int s = 0; s < ${slices}; s ++ ) {
     float phi = ( float( s ) + jitter ) * IRON_PI / float( ${slices} );
@@ -219,11 +236,21 @@ function aoBody(slices: number, steps: number): string {
     // out occluded on the wrong side.
     float cFarA = -1.0, cFarB = -1.0;
     float cNearA = -1.0, cNearB = -1.0;
+    float cMicroA = -1.0, cMicroB = -1.0;
 
     for ( int t = 0; t < ${steps}; t ++ ) {
       float frac = ( float( t ) + jitter + 0.5 ) / float( ${steps} );
-      // Quadratic spacing: dense at the contact end where the detail is.
-      frac *= frac;
+      // CUBIC spacing, not the quadratic it was, and the micro window is the
+      // whole reason. The taps are laid out as a fraction of the FAR radius, so
+      // over a typical 2–8 m far window quadratic spacing put its innermost taps
+      // at ~1 cm and ~8 cm and then jumped straight to 22 cm — one usable sample
+      // inside a 13 cm neighbourhood, which is not a horizon, it is a guess.
+      // Cubed, the same eight taps land at roughly 0.05, 1.5, 7, 18, 39, 72 cm
+      // and 1.2, 1.9 m of that window: four inside the micro radius, six inside
+      // the near radius, and the far end sampled coarsely — which is correct,
+      // because the far term is a smooth sky-visibility estimate and the near
+      // and micro terms are where the eye actually looks for a contact.
+      frac *= frac * frac;
       vec2 offset = dir * frac * radiusPxFar / uResolution;
 
       vec4 sb = texture( uGbuffer, vUv + offset );
@@ -237,6 +264,7 @@ function aoBody(slices: number, steps: number): string {
         float w = clamp( 1.0 - ( len - uAoParams.y ) / uAoParams.z, 0.0, 1.0 );
         cFarB = max( cFarB, mix( -1.0, c, w ) );
         if ( len <= uAoParams.x ) cNearB = max( cNearB, c );
+        if ( len <= uAoParams2.x ) cMicroB = max( cMicroB, c );
       }
 
       vec4 sa = texture( uGbuffer, vUv - offset );
@@ -247,6 +275,7 @@ function aoBody(slices: number, steps: number): string {
         float w = clamp( 1.0 - ( len - uAoParams.y ) / uAoParams.z, 0.0, 1.0 );
         cFarA = max( cFarA, mix( -1.0, c, w ) );
         if ( len <= uAoParams.x ) cNearA = max( cNearA, c );
+        if ( len <= uAoParams2.x ) cMicroA = max( cMicroA, c );
       }
     }
 
@@ -257,11 +286,16 @@ function aoBody(slices: number, steps: number): string {
     float hNearA = n + max( -acos( clamp( cNearA, -1.0, 1.0 ) ) - n, -IRON_HALF_PI );
     float hNearB = n + min( acos( clamp( cNearB, -1.0, 1.0 ) ) - n, IRON_HALF_PI );
     visibilityNear += ironArc( n, hNearA, hNearB, projNLen );
+
+    float hMicroA = n + max( -acos( clamp( cMicroA, -1.0, 1.0 ) ) - n, -IRON_HALF_PI );
+    float hMicroB = n + min( acos( clamp( cMicroB, -1.0, 1.0 ) ) - n, IRON_HALF_PI );
+    visibilityMicro += ironArc( n, hMicroA, hMicroB, projNLen );
   }
 
   float inv = 1.0 / float( ${slices} );
   float aoFar = clamp( visibilityFar * inv, 0.0, 1.0 );
   float aoNear = clamp( visibilityNear * inv, 0.0, 1.0 );
+  float aoMicro = clamp( visibilityMicro * inv, 0.0, 1.0 );
   aoFar = pow( aoFar, uAoParams.w );
   // The contact term carries a stronger exponent than the sky term on purpose.
   // The rubric asks for "darkening ... where every object meets the ground" and
@@ -269,7 +303,18 @@ function aoBody(slices: number, steps: number): string {
   // integral over a 0.55 m neighbourhood only reaches ~0.55 visibility at a
   // right-angled floor/wall joint, which is a suggestion rather than a contact.
   aoNear = pow( aoNear, uAoParams.w * 1.9 );
-  outColor = vec4( aoNear, aoFar, ironContactShadow( P, N, depth ), 1.0 );
+  // The micro term is COMPOSITED, not averaged: a pebble occludes the 13 cm
+  // around it and nothing beyond, so its occlusion is a separate event from the
+  // 0.55 m crease term rather than a noisier estimate of the same one, and the
+  // two multiply. Its exponent is the strongest of the three because the eye
+  // reads a contact by its darkest pixel, and because a 4 cm occluder that only
+  // reaches 0.9 visibility is worth exactly nothing.
+  outColor = vec4(
+    aoNear * pow( aoMicro, uAoParams2.y ),
+    aoFar,
+    ironContactShadow( P, N, depth ),
+    1.0
+  );
 `;
 }
 
@@ -307,7 +352,13 @@ function contactShadowFn(steps: number): string {
     // Start off the surface along its own normal, by one step's worth of
     // grazing error. Without it a floor lit at 11° self-occludes on tap one.
     float jitter = ironNoise( gl_FragCoord.xy * 1.7 );
-    vec3 rayPos = P + N * ( maxDist * 0.06 ) + rayStep * jitter;
+    // 0.018, down from 0.06. The offset is in METRES along the receiver normal
+    // (0.008 m at a 0.45 m march), and an occluder shorter than it is invisible
+    // to this ray — which at 0.06 meant 2.7 cm, i.e. every pebble and rubble
+    // chip on the quay. The first tap sits 5.6 cm down-sun and therefore 1.1 cm
+    // above a flat receiver at an 11° sun, so 0.8 cm of start offset still
+    // clears the receiver's own surface with room for its normal map.
+    vec3 rayPos = P + N * ( maxDist * 0.018 ) + rayStep * jitter;
 
     float occ = 0.0;
     for ( int i = 0; i < ${steps}; i ++ ) {
@@ -321,7 +372,7 @@ function contactShadowFn(steps: number): string {
       // the sun. The upper bound is the assumed thickness of that something —
       // past it the occluder is a separate object with air behind it and this
       // ray passes safely under.
-      if ( diff > 0.02 && diff < maxDist * 1.5 ) {
+      if ( diff > 0.008 && diff < maxDist * 1.5 ) {
         occ = 1.0;
         break;
       }
@@ -376,6 +427,9 @@ export class Gtao {
   private readonly uProjection: GpuUniform<THREE.Vector4> = { value: new THREE.Vector4(1, 1, 1, 0) };
   private readonly uAoParams: GpuUniform<THREE.Vector4> = {
     value: new THREE.Vector4(RADIUS_NEAR, RADIUS_FAR, 2.5, 1.25),
+  };
+  private readonly uAoParams2: GpuUniform<THREE.Vector4> = {
+    value: new THREE.Vector4(RADIUS_MICRO, 2.6, 0, 0),
   };
   private readonly uSunView: GpuUniform<THREE.Vector4> = { value: new THREE.Vector4(0, 0, -1, 0) };
   private readonly sunView = new THREE.Vector3();
@@ -504,6 +558,7 @@ export class Gtao {
         uGbuffer: this.uGbuffer as GpuUniform,
         uProjection: this.uProjection as GpuUniform,
         uAoParams: this.uAoParams as GpuUniform,
+        uAoParams2: this.uAoParams2 as GpuUniform,
         uSunView: this.uSunView as GpuUniform,
       },
       raw,

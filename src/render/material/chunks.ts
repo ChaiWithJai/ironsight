@@ -140,6 +140,15 @@ uniform vec4 uIronSoft;
  * global grid, and the per-stone tonal field uses the same cell in world metres.
  */
 uniform vec4 uIronBlock;
+/**
+ * THE SURFACE CLASS — properties of the MATERIAL rather than of the texture.
+ *
+ *   x  chroma ceiling: maximum saturation the linear albedo may reach (§4.3)
+ *   y  oxidation, 0 = fresh paint … 1 = scale        (sheet metal only)
+ *   z  corrugation rib pitch in metres, 0 = flat     (sheet metal only)
+ *   w  butt-seam plate grid in metres, 0 = not sheet metal
+ */
+uniform vec4 uIronClass;
 uniform vec2 uIronScreen;         // 1 / render target size
 uniform sampler2D uIronSceneDepth;
 uniform vec3 uIronCamPos;
@@ -426,6 +435,155 @@ export const IRON_SURFACE = /* glsl */ `
   // salt, prevailing wind and one repaint in 1987 actually do to a facade.
   float ironZone = ironNoise2( ironPlane * 0.0207 + vec2( 113.7, 44.1 ) );
 
+  /* =========================== SHEET METAL ================================ *
+   *
+   * Everything a steel plate shows at arm's length and the bake cannot: the
+   * rolled rib, the butt seam and its weld bead, the bolt row, and THREE
+   * generations of rust laid down in the order corrosion actually arrives.
+   *
+   * Built in WORLD METRES on the dominant plane, not in uv. An ISO container's
+   * rib pitch is 280 mm whoever modelled the box, and reading the layer in uv
+   * would put a physical dimension at the mercy of whichever lane authored the
+   * quad — the exact failure the grain bands were moved out of uv to escape.
+   * World space also makes the plate grid GLOBAL, so two containers standing
+   * side by side do not carry the same seam in the same place, which is the
+   * thing that gives a stack of them away.
+   *
+   * The plane's SECOND axis is world up on a vertical face, which is what lets
+   * rust know which way is DOWN — and run-off is the whole reason a weathered
+   * box does not look like a noise field: streaks start at a seam or a bolt and
+   * bleed downward, never sideways and never upward.
+   */
+  float ironRib = 0.0;          // 0 in the trough, 1 on the crest
+  float ironRibSlope = 0.0;     // d(height)/d(plane.x), metres per metre
+  float ironBead = 0.0;         // weld bead, 0..1
+  vec2  ironBeadSlope = vec2( 0.0 );
+  float ironSeamGap = 0.0;      // the dark line the two plates do not quite close
+  float ironBolt = 0.0;
+  vec2  ironBoltSlope = vec2( 0.0 );
+  float ironOxide = 0.0;        // generation 1 — flat oxide bloom
+  float ironBleed = 0.0;        // generation 2 — vertical run-off streak
+  float ironFlake = 0.0;       // generation 3 — near-black scale in the low points
+  float ironBareEdge = 0.0;     // paint knocked off a proud arris
+  #ifdef IRON_SHEET
+  {
+    // On a vertical face the dominant plane is world .zy or .xy, so its SECOND
+    // axis is world up; on a horizontal face it is .xz and there is no up at
+    // all. Blending rather than branching keeps the 45° faces (a hopper, a
+    // sloping hull plate) continuous.
+    float vert = 1.0 - smoothstep( 0.35, 0.85, ironUp );
+    vec2 p = ironPlane;
+
+    // Pixel footprint in world metres, so the fine bands can be faded out
+    // before they alias instead of being resolved by TAA into a shimmer.
+    float fp = max( length( fwidth( vIronWorld ) ), 1e-5 );
+    float fineFade = 1.0 - smoothstep( 0.0035, 0.011, fp );   // bolts, bead crest
+    float ribFade  = 1.0 - smoothstep( 0.020, 0.060, fp );    // the rib itself
+
+    /* ---- 1 the rolled rib ------------------------------------------------ */
+    // A TRAPEZOID, not a sine. Container corrugation is a folded profile: a flat
+    // crest, a flat trough and a steep web between them, and the flats are what
+    // make the rib catch the 11° sun as two hard bands rather than as a gradient.
+    if ( uIronClass.z > 1e-4 ) {
+      float ph = p.x / uIronClass.z;
+      float tri = abs( fract( ph ) - 0.5 ) * 2.0;
+      float a = 0.20;
+      float b = 0.68;
+      float t = clamp( ( tri - a ) / ( b - a ), 0.0, 1.0 );
+      ironRib = t * t * ( 3.0 - 2.0 * t );
+      // Analytic derivative: smoothstep' × d(tri)/d(ph) × d(ph)/d(metre).
+      float dt = 6.0 * t * ( 1.0 - t ) / ( b - a );
+      float dtri = sign( fract( ph ) - 0.5 ) * 2.0;
+      ironRibSlope = IRON_RIB_DEPTH * dt * dtri / uIronClass.z * ribFade;
+      ironRib = mix( 0.5, ironRib, ribFade );
+    }
+
+    /* ---- 2 the butt seam and its weld bead ------------------------------- */
+    // 14 mm of proud bead with a 2 mm dark gap down the middle of it. The bead
+    // is the single most valuable feature in this whole block: it is a CONVEX
+    // arris running the full height of the sheet, so it is where the paint goes
+    // first, and a thin bright specular line on an otherwise matte face is what
+    // the rubric means by "real edges catch light".
+    vec2 g = p / max( uIronClass.w, 0.05 );
+    vec2 dm = abs( fract( g ) - 0.5 ) * max( uIronClass.w, 0.05 );
+    vec2 sgn = sign( fract( g ) - 0.5 );
+    vec2 q = dm / 0.014;
+    vec2 bx = exp( - q * q );
+    ironBead = max( bx.x, bx.y ) * fineFade;
+    // d/dp of exp(-(d/w)^2) = -2 d/w^2 · exp(…) · d(d)/dp
+    ironBeadSlope = -0.006 * 2.0 * dm / ( 0.014 * 0.014 ) * bx * sgn * fineFade;
+    ironSeamGap = max(
+      1.0 - smoothstep( 0.0, 0.0022, dm.x ),
+      1.0 - smoothstep( 0.0, 0.0022, dm.y ) ) * fineFade;
+
+    /* ---- 3 the bolt row -------------------------------------------------- */
+    // M16 heads on a 120 mm pitch down each seam. Modelled as a quartic cap
+    // rather than a hemisphere: the true cap's slope goes vertical at the rim
+    // and turns into a black ring under a raking sun, where the quartic lands
+    // its steepest slope inboard and reads as a dome.
+    {
+      vec2 along = fract( p / 0.12 ) - 0.5;
+      vec2 rr = vec2(
+        length( vec2( dm.x, along.y * 0.12 ) ),
+        length( vec2( along.x * 0.12, dm.y ) ) ) / 0.019;
+      vec2 cap = max( vec2( 0.0 ), 1.0 - rr * rr );
+      cap *= cap;
+      ironBolt = max( cap.x, cap.y ) * fineFade;
+      // Only the nearer of the two rows contributes slope, and only along its
+      // own axis — a bolt on a vertical seam is a bump in x, not in both.
+      float pick = step( cap.y, cap.x );
+      ironBoltSlope = -0.0075 * 4.0 * fineFade * vec2(
+        pick * ( 1.0 - rr.x * rr.x ) * rr.x * sgn.x / 0.019,
+        ( 1.0 - pick ) * ( 1.0 - rr.y * rr.y ) * rr.y * sgn.y / 0.019 );
+      ironBoltSlope *= step( 0.0, cap.x + cap.y );
+    }
+
+    /* ---- 4 rust, three generations --------------------------------------- */
+    float rust = uIronClass.y;
+    // Where water sits and paint fails: the trough, the seam, the bolt head.
+    float seed = ( 1.0 - ironRib ) * 0.40 + ironBead * 0.55 + ironBolt * 0.65
+               + ironSeamGap * 0.9;
+    float rN0 = ironNoise2( p * 0.62 + vec2( 12.4, 71.9 ) );   // 1.6 m blooms
+    float rN1 = ironNoise2( p * 2.37 + vec2( 3.1, 44.2 ) );    // 0.42 m patches
+    float rN2 = ironNoise2( p * 9.10 + vec2( 55.7, 8.3 ) );    // 0.11 m pitting
+    float field = rN0 * 0.50 + rN1 * 0.34 + rN2 * 0.16 + seed * 0.35;
+
+    // GENERATION 1 — flat oxide. The broad, dry, mid-brown bloom that eats a
+    // painted panel from its edges inward. Noise-broken boundary, never an
+    // outline: a clean-edged rust patch reads as a decal.
+    ironOxide = smoothstep( 0.66 - 0.46 * rust, 0.90 - 0.26 * rust, field );
+
+    // GENERATION 2 — the bleeding streak. Iron-bearing water leaves a seam or a
+    // bolt and runs DOWN, so the field is 4 cm across and 1.1 m long, starts
+    // hard at its source and decays exponentially below it. This is the term
+    // that makes a box read as having stood outside for fifteen years, and it
+    // is the one the reference corpus shows on literally every steel surface.
+    {
+      float dBelow = ( 1.0 - fract( g.y ) ) * max( uIronClass.w, 0.05 );
+      float lane = ironNoise2( vec2( p.x * 23.0, p.y * 0.55 ) );
+      float run = exp( - dBelow / 1.10 ) * ( 1.0 - exp( - dBelow / 0.035 ) );
+      ironBleed = smoothstep( 0.52, 0.88, lane ) * run * vert * rust;
+      // Bolts weep too, and a bolt weeping is a much shorter, denser streak.
+      ironBleed = max( ironBleed,
+        ironBolt * exp( - fract( g.y * ( max( uIronClass.w, 0.05 ) / 0.12 ) ) * 3.0 ) * vert * rust * 0.7 );
+    }
+
+    // GENERATION 3 — scale. Where the oxide has been wet, dried and wet again it
+    // exfoliates into near-black flakes, and it does that in the LOW points
+    // where the water actually stood. Gating on the trough is what keeps the
+    // three generations spatially separated instead of stacked on one mask.
+    ironFlake = ironOxide * smoothstep( 0.35, 0.92, rN1 )
+      * ( 0.30 + 0.70 * ( 1.0 - ironRib ) ) * rust;
+
+    // The paint that is LEFT is on the flats; what stands proud has been walked
+    // on, lashed against and scraped by a spreader. Bare steel on the rib crest
+    // and the bead, held down wherever the oxide has already won.
+    ironBareEdge = clamp(
+      ( ironRib * 0.55 + ironBead * 0.9 + ironBolt * 0.5 )
+      * ( 0.35 + 0.85 * rN1 ) * ( 1.0 - ironOxide * 0.75 ), 0.0, 1.0 );
+  }
+  #endif
+
   #ifdef IRON_TRIPLANAR
     vec3 ironTriW = ironTriWeights( ironGeoN, uIronTiling.w );
     // DOMAIN WARP, the triplanar answer to visible tiling.
@@ -627,12 +785,92 @@ export const IRON_SURFACE = /* glsl */ `
     ironAlbedo = mix( vec3( ironTexL ), ironAlbedo, 0.62 );
   }
 
+  /* ---- THE MOTIF DAMPER, and why it is a mip fetch ------------------------ *
+   *
+   * The stochastic sampler hides the SEAM between repeats and the incommensurate
+   * layer below breaks the field inside one — but neither of them touches the
+   * thing that actually gives a tiled material away at arm's length, which is
+   * that the eye recognises a SHAPE. The bake's finest albedo octaves draw a
+   * distinctive crumpled-foil motif with a couple of scribed diagonals in it,
+   * and once you have seen that motif on one block you see it on every block in
+   * the wall, on a grid, however cleverly the phases were shuffled. Measured on
+   * the round-3 material_nearfield capture: the same asterisk-and-broken-arrow
+   * figure is legible on eleven of the parapet's blocks.
+   *
+   * Blending toward a DELIBERATELY under-sampled tap of the same map removes
+   * exactly that band and nothing else. Three mips coarse is roughly an 8-texel
+   * box, which is 3 cm on a 2.4 m sandstone tile: below the mortar courses and
+   * the block-scale tone (both of which survive untouched, because they live in
+   * mips this fetch still resolves) and above nothing worth keeping, because the
+   * two analytic grain bands re-supply that whole octave from noise that has no
+   * period at all.
+   *
+   * Strength rises as the camera CLOSES, which is the opposite of what a naive
+   * LOD would do and is the point: at 20 m the motif is sub-pixel and the mip
+   * chain has already removed it, so damping there would only cost contrast. At
+   * 2 m it is 40 px across and it is the most findable thing in the frame.
+   */
+  float ironMotifDamp = 0.0;
+  float ironGrainRough = 0.0;
+  #ifndef IRON_TRIPLANAR
+  {
+    // SHEET METAL DAMPS HARDER AND FURTHER, because on that class the baked
+    // mesoscale is now REDUNDANT rather than merely repetitive. The bake's
+    // rusted-steel recipe draws its own 2 x 3 panel pattern with a ring-and-fleck
+    // motif in it, and at 8 m on a container that motif tiles into something
+    // that reads as printed chain-link — measured on the round-3 material_steel
+    // capture. Everything it was supplying (panel edges, cavity, oxide blotching)
+    // the sheet block above now synthesises in world metres at the right physical
+    // size and with no period, so the baked band is competing with a better
+    // version of itself. It stays as a colour and value field; only its
+    // recognisable SHAPE is taken out.
+    #ifdef IRON_SHEET
+      float ironDamp = 0.82 * ( 1.0 - smoothstep( 12.0, 36.0, ironDist ) );
+    #else
+      float ironDamp = 0.56 * ( 1.0 - smoothstep( 3.5, 14.0, ironDist ) );
+    #endif
+    ironMotifDamp = ironDamp;
+    vec4 ironTexSoft = texture2DGradEXT( uIronAlbedoHeight, ironUv + ironWearUv,
+                                         ironDdx * 8.0, ironDdy * 8.0 );
+    vec3 ironSoftRgb = mix( vec3( ironLuminance( ironTexSoft.rgb ) ), ironTexSoft.rgb, 0.62 );
+    ironAlbedo = mix( ironAlbedo, ironSoftRgb, ironDamp );
+
+    // …and put the octave straight back, from noise instead of from a tile.
+    //
+    // Damping alone would trade a findable repeat for a smooth surface, which
+    // is the other half of the same defect — LOOK_SPEC §4.1's acceptance test
+    // wants a display-luminance σ of 20-40 inside a nominally uniform patch and
+    // it does not care where the variation came from. Two octaves of world-space
+    // value noise at 4 cm and 1 cm carry the same energy the mip fetch removed,
+    // in the same band, with no period a human eye can find — which is the whole
+    // trade this pair of blocks exists to make. Rides roughness as well as
+    // albedo, because grain is a physical roughness feature first and a colour
+    // feature second.
+    // Three octaves at 4 cm, 1.8 cm and 7 mm — the whole of §4.1's detail and
+    // micro bands — because two were audibly not enough: damping alone traded a
+    // findable repeat for MUSH, which is the defect on the other side of the
+    // one it was fixing, and the replacement band has to be as crisp as what it
+    // replaced or the surface has simply gone smooth on approach.
+    float ironGa = ironNoise2( ironPlane * 24.0 ) - 0.5;
+    float ironGb = ironNoise2( ironPlane * 56.0 + vec2( 7.31, 2.17 ) ) - 0.5;
+    float ironGc = ironNoise2( ironPlane * 137.0 + vec2( 41.9, 63.4 ) ) - 0.5;
+    float ironGrain = ironGa * 0.50 + ironGb * 0.32 + ironGc * 0.18;
+    ironAlbedo *= 1.0 + 0.46 * ironGrain * ironDamp;
+    // Grain is a roughness feature first: a pit scatters, a polished ridge does
+    // not, and a colour-only grain reads as a printed speckle under a raking
+    // sun. Carried out of the block rather than applied here, because
+    // ironRoughness is not declared until the base fetch below has resolved.
+    ironGrainRough = 0.34 * ironGrain * ironDamp;
+  }
+  #endif
+
   // Baked roughness is a VARIATION around the texture's own centre, not an
   // absolute: the lane authored its roughness against LOOK_SPEC §4.2 and the
   // bake authored a texture around its own recipe. Subtracting the centre
   // leaves the texture's deviation and nothing else, so a lane can ask for
   // 0.93 stucco and still get the bake's rain-washed strips at 0.60.
-  float ironRoughness = clamp( uIronMat.x + ( ironTexN.b - uIronMat.z ) * 0.55, 0.045, 1.0 );
+  float ironRoughness = clamp( uIronMat.x + ( ironTexN.b - uIronMat.z ) * 0.55
+    + ironGrainRough, 0.045, 1.0 );
   float ironMetalness = clamp( uIronMat.y, 0.0, 1.0 );
 
   // ---- 2b THE INCOMMENSURATE SECOND LAYER, LOOK_SPEC §4.1 -------------------
@@ -937,9 +1175,18 @@ export const IRON_SURFACE = /* glsl */ `
   // ±15 % and the round-2 critique still found the courses reading as one
   // colour, so the band is taken to the top of its window rather than the
   // middle. Hue and roughness now ride their OWN hashes.
-  ironAlbedo *= 1.0 + 0.125 * ironStone;
-  ironAlbedo *= 1.0 + 0.062 * ironStoneHue * vec3( 1.0, 0.12, -0.85 );
-  ironRoughness = clamp( ironRoughness + 0.13 * ironStoneRough, 0.045, 1.0 );
+  //
+  // 0.185 and 0.21, up from 0.125 and 0.13. Two things pushed them: the motif
+  // damper above deliberately takes energy out of the texel band, and the chroma
+  // governor below takes the albedo's saturation down to the measured spec — so
+  // the per-BLOCK band is now carrying most of what stops a run of masonry
+  // reading as one surface, and it has to be at the top of §4.1's ±15 % window
+  // rather than the middle of it. The field is already modulated by the cell's
+  // face mask and by the 33 m variation mask, so the amplitude reached on any
+  // given block is well inside the band even at this coefficient.
+  ironAlbedo *= 1.0 + 0.185 * ironStone;
+  ironAlbedo *= 1.0 + 0.085 * ironStoneHue * vec3( 1.0, 0.12, -0.85 );
+  ironRoughness = clamp( ironRoughness + 0.21 * ironStoneRough, 0.045, 1.0 );
 
   // Macro break-up (3-12 m) — the term that stops a 70 m wall reading as one
   // surface at silhouette distance. LOOK_SPEC §4.1 puts the albedo band at
@@ -982,9 +1229,92 @@ export const IRON_SURFACE = /* glsl */ `
   ironRoughness = mix( ironRoughness, 0.60, ironWash * 0.75 );
   ironAlbedo *= 1.0 + 0.07 * ironWash;
 
+  /* ---- sheet metal, applied ON the paint --------------------------------- *
+   *
+   * Order is corrosion's own: the panel is painted, the paint oxidises, the
+   * oxide bleeds, the bleed dries to scale, and whatever stands proud gets the
+   * paint knocked off it back to bright steel. Applying them in any other order
+   * puts rust under paint.
+   *
+   * The METALNESS moves with them, and that is the half of this that a colour
+   * pass alone cannot buy. Iron oxide is a DIELECTRIC — it is a ceramic, not a
+   * metal — so a rusted panel that keeps metalness 1 has a coloured specular and
+   * a near-black diffuse, which is why it reads as orange chrome rather than as
+   * rust. LOOK_SPEC §4.2 puts corroded metal at 0.3 and bare steel at 1, and the
+   * whole visual interest of a weathered box is the traverse between them across
+   * one surface.
+   */
+  #ifdef IRON_SHEET
+  {
+    // Linear albedos, off the reference corpus rather than off a colour picker.
+    const vec3 OXIDE = vec3( 0.152, 0.090, 0.051 );   // dry bloom, ochre-brown
+    const vec3 BLEED = vec3( 0.096, 0.052, 0.031 );   // wet run-off, darker, redder
+    const vec3 SCALE = vec3( 0.041, 0.030, 0.025 );   // exfoliated flake, near black
+    const vec3 BARE  = vec3( 0.175, 0.178, 0.184 );   // freshly exposed steel
+
+    // Intact paint is a dielectric with a satin finish (§4.2, painted armour
+    // 0.40-0.60 / metalness 0), whatever metalness the lane authored. Lanes
+    // reach for 0.35-0.5 on painted steel because it "looks metallic", and that
+    // is precisely the mistake that makes painted surfaces read wrong.
+    ironRoughness = min( ironRoughness, 0.58 );
+    ironMetalness = min( ironMetalness, 0.06 );
+
+    ironAlbedo = mix( ironAlbedo, OXIDE, ironOxide * 0.88 );
+    ironRoughness = mix( ironRoughness, 0.88, ironOxide * 0.9 );
+    ironMetalness = mix( ironMetalness, 0.30, ironOxide * 0.9 );
+
+    ironAlbedo = mix( ironAlbedo, BLEED, ironBleed * 0.85 );
+    ironRoughness = mix( ironRoughness, 0.80, ironBleed * 0.8 );
+    ironMetalness = mix( ironMetalness, 0.24, ironBleed * 0.8 );
+
+    ironAlbedo = mix( ironAlbedo, SCALE, ironFlake * 0.9 );
+    ironRoughness = mix( ironRoughness, 0.94, ironFlake * 0.85 );
+    ironMetalness = mix( ironMetalness, 0.12, ironFlake * 0.85 );
+
+    // The bright line. 0.30 roughness against a 0.88 field either side of it is
+    // a 0.58 spread on one surface, and it is what puts a specular highlight on
+    // the rib crest and the weld bead while the flats stay dead matte.
+    ironAlbedo = mix( ironAlbedo, BARE, ironBareEdge * 0.80 );
+    ironRoughness = mix( ironRoughness, 0.30, ironBareEdge * 0.85 );
+    ironMetalness = mix( ironMetalness, 0.95, ironBareEdge * 0.85 );
+
+    // The seam gap is a slot, not a stain: it occludes and it is black.
+    ironAlbedo *= 1.0 - 0.55 * ironSeamGap;
+    ironAo *= ( 1.0 - 0.45 * ironSeamGap ) * ( 1.0 - 0.22 * ( 1.0 - ironRib ) );
+  }
+  #endif
+
   // ---- 4.5 wet ------------------------------------------------------------
   ironAlbedo *= mix( 1.0, 0.60, ironWet );
   ironRoughness = mix( ironRoughness, 0.15, ironWet );
+
+  /* ---- THE CHROMA GOVERNOR, LOOK_SPEC §4.3 ------------------------------- *
+   *
+   * The last thing that touches albedo, because every band above it — the tint,
+   * the per-stone hue jitter, the zone swing, the rust — can add chroma and the
+   * bound has to hold against all of them at once.
+   *
+   * Measured on the material_nearfield shot before this existed: the breakwater
+   * parapet's sunlit sandstone read hue 23° at S 0.627, against §4.3's 27-35°
+   * at S 0.13-0.26. Nothing was wrong with the texture — the luminance σ was
+   * 21.6, comfortably inside the acceptance window — the frame's chroma was
+   * simply unbounded, and an unbounded chroma is what makes a render read as a
+   * render. Real weathered mineral under a warm key is a NEUTRAL that leans
+   * warm; the reference corpus has nothing in it as saturated as one of our
+   * walls was.
+   *
+   * Toward the material's own LUMINANCE rather than toward grey at constant
+   * maximum, so value and every bit of the detail variation survive intact and
+   * only the chroma moves. Hue is untouched: the palette's warmth is a hue
+   * property and it is the part that is correct.
+   */
+  {
+    float ironMx = max( ironAlbedo.r, max( ironAlbedo.g, ironAlbedo.b ) );
+    float ironMn = min( ironAlbedo.r, min( ironAlbedo.g, ironAlbedo.b ) );
+    float ironSat = ( ironMx - ironMn ) / max( ironMx, 1e-4 );
+    float ironKeep = min( 1.0, uIronClass.x / max( ironSat, 1e-4 ) );
+    ironAlbedo = mix( vec3( ironLuminance( ironAlbedo ) ), ironAlbedo, ironKeep );
+  }
 
   // LOOK_SPEC §4.3: nothing below linear 0.035, nothing above 0.82. Values
   // outside are physically impossible and read as such.
@@ -1088,6 +1418,33 @@ export const IRON_SURFACE = /* glsl */ `
     vec3 gm = ironNoiseD2( ironDetUv * ironDetailFreq * uIronTiling.z + vec2( 0.37, 0.11 ) );
     ironSlope += gm.yz * uIronDetail.y * ironMicroFade * ironNStr;
   }
+  // The sheet-metal relief joins the grain bands as a slope in the SAME plane
+  // frame, so the rib, the bead and the bolt heads self-shade against the key
+  // exactly the way the pitting does. This is the half of the corrugation that
+  // does the work: an albedo band alone would read as a printed stripe, and a
+  // printed stripe on the nearest object in the frame is worse than nothing.
+  //
+  // ironRibSlope is quoted per metre along the plane's FIRST axis, which is
+  // ironPlaneT, and the bead/bolt slopes are already a per-axis pair — so all
+  // three go in without a change of basis.
+  //
+  // ironPlaneB's SIGN has to be recovered, and this is not pedantry. It is
+  // cross( N, T ), so it flips with the face's winding: on a container's +Z wall
+  // it points along +Y and on the −Z wall along −Y. The grain bands never
+  // noticed because value noise is statistically symmetric, but an asymmetric
+  // feature would be inverted on half the faces in the game — every weld bead on
+  // one side of every box would render as a groove, and a lit groove where the
+  // eye expects a proud bead is a defect you cannot un-see once found.
+  #ifdef IRON_SHEET
+  {
+    vec3 ironPlaneYW = ironAbsN.y > max( ironAbsN.x, ironAbsN.z )
+      ? vec3( 0.0, 0.0, 1.0 ) : vec3( 0.0, 1.0, 0.0 );
+    float sB = dot( ironPlaneB, ironPlaneYW ) < 0.0 ? -1.0 : 1.0;
+    ironSlope.x += ironRibSlope + ironBeadSlope.x + ironBoltSlope.x;
+    ironSlope.y += ( ironBeadSlope.y + ironBoltSlope.y ) * sB;
+  }
+  #endif
+
   vec3 ironGrainVec = ironPlaneT * ironSlope.x + ironPlaneB * ironSlope.y;
 
   vec3 ironNormalW;
@@ -1123,7 +1480,21 @@ export const IRON_SURFACE = /* glsl */ `
     // procedural grain bands moved to the world frame, and they are added as a
     // world vector rather than through this matrix for exactly that reason.
     float ironBaseSharp = 1.0 - smoothstep( 0.020, 0.075, ironFootprint );
-    vec2 ironBaseSlope = ( ironTexN.rg * 2.0 - 1.0 ) * ironNStr * 0.46
+    // THE MOTIF DAMPER'S OTHER HALF. Softening the albedo alone left the repeat
+    // fully legible, because half of what the eye was recognising was never in
+    // the albedo: the bake's finest normal octaves draw the same scribed
+    // diagonals on every block, and a scribe read as SHADING under an 11° sun is
+    // more findable than one read as colour. The same 8x-gradient tap, blended
+    // by the same near-field weight, takes that octave out of the slope while
+    // leaving the mortar courses — which live several mips coarser — untouched.
+    // The analytic grain bands below then re-supply the band from noise.
+    vec2 ironBaseN = ironTexN.rg;
+    if ( ironMotifDamp > 0.01 ) {
+      vec2 ironSoftN = texture2DGradEXT( uIronNormalRoughAo, ironUv + ironWearUv,
+                                         ironDdx * 8.0, ironDdy * 8.0 ).rg;
+      ironBaseN = mix( ironBaseN, ironSoftN, ironMotifDamp );
+    }
+    vec2 ironBaseSlope = ( ironBaseN * 2.0 - 1.0 ) * ironNStr * 0.46
       * mix( 0.30, 1.0, ironBaseSharp );
     ironRoughness = clamp( ironRoughness + 0.15 * ( 1.0 - ironBaseSharp ), 0.045, 1.0 );
     ironNormalW = normalize( ironTbn * vec3( ironBaseSlope, 1.0 ) + ironGrainVec );

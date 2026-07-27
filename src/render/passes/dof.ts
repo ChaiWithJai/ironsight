@@ -46,9 +46,50 @@ const CINEMATIC_FOV_DEG = 40;
 /** LOOK_SPEC §6.2's gameplay constant, in px·m at 1080p. */
 const GAMEPLAY_COC_SCALE = 0.926;
 const GAMEPLAY_MAX_COC = 3;
-/** Chosen so an infinitely distant background sits at 30 px against a 4 m subject. */
-const CINEMATIC_COC_SCALE = 120;
-const CINEMATIC_MAX_COC = 32;
+
+/*
+ * THE CINEMATIC APERTURE — re-derived after a critic opened a review with
+ * "this is an out-of-focus photograph".
+ *
+ * What was here: scale 120, cap 32 px, far gain 1.0, auto-focus metering the
+ * centre pixel anywhere in [1.5, 60] m. On `level_bravo` the centre pixel is a
+ * quay shed at 48 m, so the lens focused at 48 m — and `CoC = 120·|1/d − 1/48|`
+ * then puts 21 px on 5 m, 17 px on 6 m, 9.5 px on 10 m and 3.5 px on 20 m. That
+ * is the whole DECK the player stands on, i.e. the lower 45 % of the frame,
+ * smeared past legibility: sandbags fused into one lump, bollards reduced to
+ * discs. Optically it is exactly what an f/1.4 focused at 48 m does. It is also
+ * the wrong lens for the shot.
+ *
+ * What the reference corpus actually does (AAA_RUBRIC calibration note 5/6, and
+ * every establishing frame in `reference/gameplay/`): the heavy bokeh sits on a
+ * NEAR OCCLUDER — a shoulder, a wall edge, a rock inside ~3 m — and everything
+ * from the playable surface outward stays readable. Our two bands were swapped.
+ *
+ * So the cinematic path is now an ESTABLISHING lens rather than a portrait lens:
+ * near-focused and effectively hyperfocal beyond, i.e. stopped down. With
+ * `scale 40`, focus 8 m and the far side at a quarter weight:
+ *
+ *   | d      | 1.5 m | 2 m  | 3 m | 4 m | 6 m | 8 m | 20 m | 48 m |  ∞   |
+ *   | CoC px | 15*   | 15.0 | 8.3 | 5.0 | 1.7 | 0   | 0.75 | 1.05 | 1.25 |
+ *                                                    (far side ×0.25)
+ *
+ * — a near occluder that genuinely melts, a deck that reads from 5 m out, and a
+ * background that is sharp, which is what §6.2's hipfire row asks for anyway
+ * ("terrain at 2 km is the sharpest thing in the frame"). The 20–40 px
+ * background figure in §6.2's third row is quoted against a 4 m SUBJECT, i.e. a
+ * deploy portrait; an establishing shot of a harbour is not that frame and
+ * borrowing that lens for it is what produced the defect.
+ */
+const CINEMATIC_COC_SCALE = 40;
+const CINEMATIC_MAX_COC = 15;
+/**
+ * The far-side weight. Not 1.0: at f-numbers this low the near and far sides of
+ * the CoC curve are wildly asymmetric in what they cost the frame — the near
+ * side buys depth framing, the far side buys nothing here and costs the cranes,
+ * the town and the headland, which are the subjects of every establishing shot
+ * in the roster.
+ */
+const CINEMATIC_FAR_GAIN = 0.25;
 
 export class DepthOfFieldPass implements RenderPass {
   readonly id = 'post.dof';
@@ -69,10 +110,13 @@ export class DepthOfFieldPass implements RenderPass {
     const ads = ctx.services.viewmodel.state.adsBlend;
 
     if (cinematic) {
-      dof.focus = 4;
+      // 8 m is the fallback when the centre ray misses geometry entirely (a
+      // camera aimed at sky): the same near-field focus the clamp below biases
+      // toward, so a metered and an unmetered frame do not look like two lenses.
+      dof.focus = 8;
       dof.scale = CINEMATIC_COC_SCALE;
       dof.maxCoc = CINEMATIC_MAX_COC;
-      dof.farGain = 1;
+      dof.farGain = CINEMATIC_FAR_GAIN;
       dof.autoFocus = true;
     } else {
       // Hipfire focuses at 8 m and pulls to the sight picture through the ADS

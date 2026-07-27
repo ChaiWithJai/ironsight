@@ -148,22 +148,54 @@ export const GRADE_BLACK_LIFT = 0.012;
  *    the toe — measured, it doubled shadow saturation to 0.62 against §5.3's
  *    0.40–0.55 ceiling. Saturation is §5.3's business and it is set there.
  *
- * **0.055, down from 0.15.** At k = 0.15 the knee reached far enough up the
- * curve to cost the §5.1 ramp thirteen codes at scene-linear 0.020 (25 → 12) and
- * eleven at 0.050 — i.e. it was not a black point any more, it was a second
- * contrast curve living in the bottom third of the range, and it is what put the
- * darkest 5 % of `post_chain` at code 21 against a §5.1 prediction of 36. At
- * 0.055 the whole rolloff is inside the bottom fifteen codes, which is where
- * §5.2's p0.1 = 3–20 target actually lives.
+ * **0.065, up from 0.055** — a small round-4 nudge taken once the exposure pass
+ * stopped freezing every deterministic capture to the GOLDEN anchor (see
+ * `passes/exposure.ts`). With a metered exposure the darkest content lands lower
+ * to begin with, so the knee has real content to work on: measured on
+ * `level_bravo` the sub-display-8 fraction goes 0.00 % → 2.34 %, against a
+ * corpus median of 2.37 % and §5.2's 5 % ceiling, with p0.1 at 3 and p1 at 5
+ * (§5.2 targets 3–20 and 5–30). At k = 0.15 — where this started — the knee
+ * reached far enough up the curve to cost the §5.1 ramp thirteen codes at
+ * scene-linear 0.020 (25 → 12); at 0.065 the whole rolloff is still inside the
+ * bottom twenty codes.
  */
-export const GRADE_BLACK_POINT = 0.055;
+export const GRADE_BLACK_POINT = 0.065;
 
 /**
- * §5.2 contrast: a symmetric S about a pivot, in code space.
+ * §5.2 contrast: a symmetric S about a pivot, applied to LUMINANCE (see
+ * `ironGrade`), in code space.
  *
- * **1.42 about a pivot of 0.47, up from 1.14 about 0.44 — and this is a
- * deliberate, measured deviation from §5.1's ramp table, made because §5.1 and
- * §5.2 cannot both be satisfied and §5.2's is the bold acceptance line.**
+ * **1.42 about a pivot of 0.44 — and this is a deliberate, measured deviation
+ * from §5.1's ramp table, made because §5.1 and §5.2 cannot both be satisfied
+ * and §5.2's is the bold acceptance line.**
+ *
+ * ROUND 4 raised this to 1.70 and INTEGRATION PUT IT BACK. The raise was fitted
+ * against a build that did not yet contain `lighting/service.ts`'s sun-colour
+ * re-normalisation, which is a real 1.32× on the key light; landed together, the
+ * brighter key and the steeper S both spend themselves on the same tails and the
+ * distribution overshoots §5.2 at BOTH ends. Measured full-frame over the whole
+ * eight-shot hero roster, count of §5.2 lines outside their band:
+ *
+ * | contrast | out-of-band lines | level_bravo p25 / p75 | light_cascades p25 / p75 |
+ * |---|---|---|---|
+ * | 1.70 | 20 | 43 / 174 | 47 / 170 |
+ * | 1.52 | 19 | 48 / 168 | 53 / 164 |
+ * | **1.42** | **15** | **52 / 164** | **56 / 161** |
+ * | §5.2 target | — | ≥55 / ≤150 | ≥55 / ≤150 |
+ *
+ * The two justifications for the raise both survive the revert, and that is the
+ * point: (a) the S still runs on LUMINANCE, so §5.3's table is still decoupled —
+ * re-measured at 1.42 every saturation bucket moves by ≤0.06 and `light_cascades`
+ * is inside all seven; (b) `passes/exposure.ts` still meters deterministic
+ * captures, and it is the METER, not the S, that fixed the median. p50 is
+ * identical to the code across all three contrasts above (112 / 110 / 103 / 98)
+ * because the pivot sits on it. So the extra slope bought nothing at p50 and cost
+ * p25, p75, p1 and the toe on every shot in the roster.
+ *
+ * p75 is still over its ceiling on the wide frames (161–168 against 150) and that
+ * is honest: they are 35–45 % sky by area against a §5.2 evidence set of gameplay
+ * frames that are mostly ground, and pulling p75 to 150 means darkening a
+ * golden-hour sky that §2.4 independently puts at luma 234.
  *
  * The conflict, stated precisely. §5.1 gives a ten-stop scene-linear → display
  * ramp. §5.2 gives distribution targets: **p25–p75 inside 55–150** (an ~95-code
@@ -176,10 +208,9 @@ export const GRADE_BLACK_POINT = 0.055;
  * corpus agree with each other and disagree with the ramp.
  *
  * §5.2's warning against a "crushed punchy curve" is about the MIDTONE — "do not
- * centre the histogram" — and the S here is pivoted at 0.47 precisely so the
- * median does not move: measured across the roster p50 goes 96→89, 106→101,
- * 108→104, all still inside 70–115. What changes is the tails, which is what was
- * missing. Re-measured over the roster after the change:
+ * centre the histogram" — and the S here is pivoted ON the roster's median
+ * precisely so the median does not move. What changes is the tails, which is what
+ * was missing. Re-measured over the roster after the change:
  *
  * | | IQR width | mid-40 % band | below 8 | above 240 |
  * |---|---|---|---|---|
@@ -194,10 +225,12 @@ export const GRADE_BLACK_POINT = 0.055;
  * predicts 212. §2.4 and the corpus want the top of the curve where this puts
  * it; §5.1 alone wants it 20 codes lower.
  *
- * The pivot moved 0.44 → 0.47 for one reason: at 0.44 the extra contrast pushed
- * p50 down by 12–14 codes on the darker shots and `light_cascades` fell out of
- * §5.2's 70–115 band entirely. 0.47 sits just above the roster's median code, so
- * the S spends its slope on the tails and leaves the median where it was.
+ * The pivot is back at 0.44 — it went to 0.47 in round 3 precisely because at a
+ * frozen exposure `light_cascades` fell out of §5.2's 70–115 band, and that is
+ * the failure the metered exposure removes. 0.44 (code 112) now sits within five
+ * codes of BOTH frames' medians, so the S is close to a fixed point at the
+ * median on either of them and spends its whole slope on the tails, which is
+ * exactly what §5.2's "do not centre the histogram" asks for.
  *
  * Endpoint-preserving and monotone by construction, with the pivot a fixed point:
  *
@@ -205,7 +238,7 @@ export const GRADE_BLACK_POINT = 0.055;
  *     v = u^c / (u^c + (1-u)^c)                  → symmetric sigmoid at 0.5
  *     d = v^(1/g)                                → 0.5 maps back to pivot
  */
-export const GRADE_CONTRAST_PIVOT = 0.47;
+export const GRADE_CONTRAST_PIVOT = 0.44;
 export const GRADE_CONTRAST = 1.42;
 
 /**
@@ -225,15 +258,19 @@ export const GRADE_CONTRAST = 1.42;
  * against ("a fully blown 240–250 sky does not bloom onto the buildings in front
  * of it", "bright diffuse surfaces DO NOT BLOOM").
  *
- * 2.30 is the scene-linear value this chain maps to display 240, solved off the
- * composed curve (0.18→106, 1.44→227, 2.88→244; log-interpolating for 240 gives
- * 1.44·2^0.69 = 2.32). Everything §6.1 names as a legitimate bloom source is
- * orders of magnitude above it — the sun disc is 1.6e7 cd/m², about 3 000 after
- * exposure — and every diffuse surface in the map, sky included, is below it.
+ * 2.19 is the scene-linear value this chain maps to display 240, re-solved off
+ * the composed curve by bisection on a neutral ramp every time the curve moves.
+ * It tracked the round-4 contrast raise down to 1.61 and back up again when
+ * integration returned GRADE_CONTRAST to 1.42; at the current constants the ramp
+ * runs 0.18→109, 0.72→200, 1.44→229, 2.9→245. The display-referred intent,
+ * "threshold where diffuse white tops out", has never moved — only the curve
+ * underneath it. Everything §6.1 names as a legitimate bloom source is orders of
+ * magnitude above it — the sun disc is 1.6e7 cd/m², about 3 000 after exposure —
+ * and every diffuse surface in the map, sky included, is below it.
  *
  * Re-derive this whenever the curve moves; it is a property of the curve.
  */
-export const BLOOM_THRESHOLD_LINEAR = 2.30;
+export const BLOOM_THRESHOLD_LINEAR = 2.19;
 
 /** `ln(0.5)/ln(pivot)` — the warp that puts the pivot on the sigmoid's centre. */
 const GRADE_S_WARP = Math.log(0.5) / Math.log(GRADE_CONTRAST_PIVOT);
@@ -301,22 +338,45 @@ const GRADE_S_WARP = Math.log(0.5) / Math.log(GRADE_CONTRAST_PIVOT);
  *    of the peak bucket from 0.37–0.61 down to 0.40–0.56.
  */
 /**
- * **2.2, down from 3.0 — a direct consequence of GRADE_CONTRAST going to 1.42.**
+ * **4.4, up from 2.2 — and the number is only meaningful alongside the round-4
+ * change that made `ironContrastS` run on LUMINANCE.**
  *
- * `ironContrastS` runs PER CHANNEL, so raising it raises chroma as well as
- * contrast; the two knobs are not independent and the vibrance was fitted
- * against the old, flatter curve. Measured on the roster immediately after the
- * contrast change, the §5.3 peak bucket (48–96) came out at 0.51 / 0.57 / 0.60
- * against §5.3's 0.40–0.55, and §5.4's B−R at 96–144 reached −70 against a
- * −48…−24 target. 2.2 scales the chroma multiplier by 0.83 and lands the peak
- * bucket at 0.43–0.50, inside §5.3, without touching the SHAPE — the boost still
- * dies above L 0.86 and the desaturation term still owns everything over 216.
+ * While the S ran per channel, contrast and saturation were one knob: 2.2 was
+ * itself "down from 3.0, a direct consequence of GRADE_CONTRAST going to 1.42",
+ * i.e. §5.3's budget was being spent to pay for §5.2. Decoupled, the boost has
+ * to supply ALL of the chroma the §5.3 table asks for, and 4.4 is what the
+ * measurement wants. Because it is a VIBRANCE (weighted by 1 − smoothstep of the
+ * pixel's own chroma, see GRADE_VIBRANCE_HI) the same number serves a washed
+ * hazy frame and an already-saturated sunlit one — which is the whole point,
+ * since the round-3 critic caught the roster with one shot on each side.
+ *
+ * Measured, mean HSV saturation by luma bucket, spec crop:
+ *
+ * | frame | 0–24 | 24–48 | 48–96 | 96–144 | 144–192 | 192–216 | 216–240 |
+ * |---|---|---|---|---|---|---|---|
+ * | light_cascades before | 0.65 | 0.53 | 0.49 | 0.43 | 0.34 | 0.24 | — |
+ * | light_cascades after  | 0.50 | 0.46 | 0.54 | 0.43 | 0.31 | 0.18 | 0.14 |
+ * | level_bravo before    | 0.63 | 0.39 | 0.38 | 0.17 | 0.07 | 0.07 | 0.07 |
+ * | level_bravo after     | 0.48 | 0.38 | 0.37 | 0.14 | 0.10 | 0.07 | 0.08 |
+ * | §5.3 target           | .30–.60 | .30–.52 | .40–.55 | .25–.50 | .15–.34 | .08–.24 | .05–.16 |
+ *
+ * `light_cascades` is now inside every band with its peak in 48–96, which is
+ * §5.3's shape. `level_bravo` still runs under the table from 48–96 upward and
+ * that is NOT a grade defect: those buckets are the aerial-perspective veil, and
+ * a veil whose in-scatter carries no sun chroma is achromatic by construction.
+ * §3.2 says the in-scatter should carry the sun's colour; that is SKY's to fix
+ * and no LUT can invent chroma that is not in the pixel.
  */
-export const GRADE_SAT_BOOST = 2.2;
+export const GRADE_SAT_BOOST = 4.4;
 const GRADE_SAT_LO = 0.12;
 /**
- * 0.86, up from 0.70 — i.e. the boost now reaches into the 144–192 and 192–216
- * buckets instead of dying at 178.
+ * 0.80, trimmed from 0.86: at 0.86 the boost was still worth ×1.1 at display 200
+ * and `light_cascades` measured 0.24 in the 192–216 bucket, i.e. sitting on
+ * §5.3's ceiling, with §5.4's B−R at −52 there against a −30…−14 target. At 0.80
+ * that bucket lands at 0.18. The original note, which still applies:
+ *
+ * it was 0.70 once, i.e. the boost died before the 144–192 and 192–216
+ * buckets.
  *
  * §5.3's target table is a per-bucket floor as well as a ceiling, and measured on
  * `post_chain` every bucket from 48 to 216 sat UNDER it: 0.284 / 0.207 / 0.086 /
@@ -329,9 +389,25 @@ const GRADE_SAT_LO = 0.12;
  * both already inside the 0.05–0.16 and 0.02–0.09 bands) are untouched and the
  * desaturation term owns them alone.
  */
-const GRADE_SAT_HI = 0.86;
+const GRADE_SAT_HI = 0.80;
+/**
+ * The vibrance window, and the round-4 reason it is the most load-bearing pair of
+ * numbers in this file.
+ *
+ * `vib = 1 − smoothstep(LO, HI, chroma)`, so the boost has full authority on a
+ * pixel with no chroma and none on a pixel already at HI. That is what lets ONE
+ * saturation amplitude serve two frames the round-3 critic found on opposite
+ * sides of correct — a hazy sea-facing establishing shot measuring 0.17 in the
+ * 96–144 bucket, and a sunlit sandstone alley measuring 0.43 in the same bucket
+ * with buildings a critic called "strong red-salmon".
+ *
+ * HI is 0.52 and the window is tight on purpose. 0.64 was captured and rejected:
+ * it lifted `light_cascades`' 48–96 bucket to 0.576, over §5.3's 0.55 ceiling,
+ * and its B−R at 96–144 to −65 against −48…−24. 0.52 lands that frame at 0.544
+ * and −49 while leaving `level_bravo`'s washed pixels at nearly full boost.
+ */
 const GRADE_VIBRANCE_LO = 0.15;
-const GRADE_VIBRANCE_HI = 0.60;
+const GRADE_VIBRANCE_HI = 0.52;
 
 /**
  * Transfer functions + luminance + YCoCg. Included by every pass that touches
@@ -503,7 +579,26 @@ vec3 ironGrade(vec3 displayLinear) {
   float bpT2 = bpT * bpT;
   d *= 1.0 / (1.0 + bpT2 * bpT2);
 
-  d = ironContrastS(d);
+  // §5.2 contrast, ON LUMINANCE, carried back to RGB as a scalar — the same
+  // shape as the black point above and for the same reason.
+  //
+  // It used to run per channel, and that made contrast and saturation ONE knob
+  // instead of two: a per-channel S multiplies the channel spread as well as the
+  // luma spread, so every code of extra contrast arrived as extra chroma. The
+  // trail is in this file's own history — GRADE_SAT_BOOST was cut 3.0 → 2.2
+  // "as a direct consequence of GRADE_CONTRAST going to 1.42", i.e. a §5.2
+  // change had to be paid for out of §5.3's budget. Worse, the coupling is
+  // strongest exactly where the S is steepest, which is the toe: measured at
+  // contrast 1.72 the 0–24 luma bucket came back at HSV saturation 0.58–0.61
+  // against §5.3's 0.30–0.60, and above its own 48–96 bucket, which inverts
+  // §5.3's defining shape (saturation must PEAK in the lower midtones, not in
+  // the shadows).
+  //
+  // On luminance the two are orthogonal: §5.2's histogram targets can be set
+  // from GRADE_CONTRAST and §5.3's saturation table from GRADE_SAT_BOOST, and
+  // moving either does not walk the other out of band.
+  float csL = max(ironLuma(d), 1e-4);
+  d *= ironContrastS(vec3(csL)).x / csL;
 
   // Toe: +0.012 at black (code 3), +0.0006 by code 46, nothing above. Small
   // enough that the bottom fifteen codes stay REACHABLE — see GRADE_BLACK_LIFT
@@ -530,7 +625,14 @@ vec3 ironGrade(vec3 displayLinear) {
   // trap waiting for it; formatting at the interpolation site is what closes it.
   float boost = 1.0 + ${GRADE_SAT_BOOST.toFixed(3)} * vib
     * (1.0 - smoothstep(${GRADE_SAT_LO}, ${GRADE_SAT_HI}, L))
-    * smoothstep(0.02, 0.12, L);
+    // Low-end fade, 0.03→0.22 rather than 0.02→0.12. §5.3's defining SHAPE is
+    // that saturation PEAKS in the lower midtones; measured on level_bravo with
+    // the shorter fade the 0–24 bucket came back at 0.56 against a 48–96 bucket
+    // of 0.39, i.e. the peak sat in the shadows and the shape was inverted. The
+    // deep toe is where a scene's own ambient chroma is already at its most
+    // saturated (it is sky light on a surface with no sun on it) and is the last
+    // place that needs help.
+    * smoothstep(0.03, 0.22, L);
   // Chroma scale about luma — boosting and desaturating are the same operation
   // with the multiplier either side of 1, and neither may move L.
   d = vec3(L) + (d - vec3(L)) * (boost * (1.0 - w * 0.88));
@@ -543,9 +645,27 @@ vec3 ironGrade(vec3 displayLinear) {
   // — which is what used to be here — puts its maximum on the one bucket the
   // spec wants neutral, i.e. it tints the sun disc and leaves the 192–216 band,
   // where the warmth actually belongs, untouched. Hence the roll-off term.
+  //
+  // AND BOTH THE MIDTONE AND HIGHLIGHT WHEELS ARE GATED BY THE SAME vib
+  // WEIGHT AS THE SATURATION ABOVE. This is the round-4 change and it is the
+  // one that lets two shots on opposite sides of correct be fixed by one LUT.
+  // §5.4's closing paragraph is explicit that the warmth must be EARNED from
+  // golden-hour light on sandstone and that a corrector which manufactures it
+  // is a defect. Measured on the roster: level_bravo (a hazy, sea-facing
+  // frame) ran B−R **+2** at luma 96–144 against §5.4's −48…−24, i.e. it
+  // under-delivers and wants the whole corrector; light_cascades (sunlit
+  // sandstone facades) ran **−74** in the same bucket and −52 at 192–216
+  // against −30…−14, i.e. it over-delivers and every code the corrector adds
+  // is the red-salmon a critic named. An unweighted wheel cannot serve both.
+  // Gating on the pixel's own chroma can: a washed pixel is one the lighting
+  // did not warm, and is exactly the pixel the corrector is entitled to touch.
+  float splitW = mix(0.25, 1.0, vib);
   float shadowW = 1.0 - smoothstep(0.0, 0.25, L);
-  float highW = smoothstep(0.58, 0.86, L) * (1.0 - 0.55 * smoothstep(0.90, 1.0, L));
-  float midW = (1.0 - shadowW) * (1.0 - highW);
+  float highW = smoothstep(0.58, 0.86, L) * (1.0 - 0.55 * smoothstep(0.90, 1.0, L)) * splitW;
+  float midW = (1.0 - shadowW) * (1.0 - highW) * splitW;
+  // The shadow lift stays UNGATED: it is ±0.014 at most, it carries the ambient
+  // dome hue rather than the sun's, and §5.4's shadow row (−4…+6) is the one
+  // bucket both shots already sit inside.
   d += vec3(-0.010, -0.004, 0.014) * shadowW;
   // Midtone gamma at 0.6× §5.4's stated value. §5.4 is explicit that the warmth
   // is supposed to be EARNED from golden-hour light on sandstone and that a LUT
