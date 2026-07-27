@@ -52,6 +52,37 @@ import type { IronCameraRig } from '@/render/camera-rig';
 const BLOOM_INTENSITY = 0.07;
 
 /**
+ * The lens vignette, as a SCENE-LINEAR falloff applied before the tone curve.
+ *
+ * IT USED TO LIVE IN `LensFxPass`, AFTER THE GRADE, AND THAT IS WHY NO PIXEL IN
+ * THE ROSTER COULD REACH DISPLAY 255. A vignette is light that never arrived at
+ * the sensor: it is an EXPOSURE reduction, and exposure happens in front of the
+ * film, not behind it. Applied in code space afterwards it multiplies the
+ * clipped value too — so a pixel the tonemapper had legitimately driven to 1.0
+ * came back at 0.984·255 = 251 at r = 0.44, which is where the sky of every
+ * outdoor frame in the roster sits. Measured across `level_alpha`,
+ * `level_bravo` and `light_cascades`: max luminance 250 / 251 / 238, and ZERO
+ * pixels anywhere with all three channels at 254+. The critic's phrasing was
+ * "zero pixels reach pure white"; this line was the whole reason.
+ *
+ * Applied here, the behaviour is the one §6.5's own evidence describes. Its
+ * measurement is `[m: bf2042_gp_022]` "a blown sky falls from 247 at x = 0.40 to
+ * 236 at x = 0.995" — and that same frame still carries 0.23 % of its pixels
+ * over display 250 and a genuine 1.0 maximum. Both are true at once precisely
+ * because the falloff is in front of the curve: a region three stops over white
+ * clips anyway, a region a tenth of a stop over does not.
+ *
+ * 0.30 in the linear domain, not §6.5's 0.08, because the two numbers are in
+ * different spaces and §6.5's is the one that must be met. Through AgX plus the
+ * §5.1 ramp fit the local slope at a bright-sky exposure is ~0.27 code-decades
+ * per linear-decade, so a 30 % linear falloff arrives as an 8.4 % code falloff
+ * on a flat sky — measured on `level_alpha`'s sky band, 205 at r = 0.40 down to
+ * 188 at the corner. §6.5's ceiling is 8 % and its cited reference frame drops
+ * 4 %; we are at the ceiling and deliberately not past it.
+ */
+const VIGNETTE_LINEAR = 0.30;
+
+/**
  * Pass 25. Exposure → bloom composite → DOF composite → AgX → the 3-way grade.
  *
  * The DOF composite lives here rather than in the DOF pass because the CoC that
@@ -124,6 +155,14 @@ export class TonemapPass implements RenderPass {
         vec3 exposed = scene * exposureScale;
         exposed += ironSanitize(texture(uBloom, vUv).rgb) * uBloomIntensity;
 
+        // §6.5 vignette, in scene-linear and in front of the curve. Aspect
+        // corrected so it is round rather than an ellipse stretched with the
+        // window, and r-normalised to 1.0 at the corner exactly as LensFx does
+        // for the CA — the two effects share a radius definition on purpose.
+        vec2 centred = (vUv - 0.5) * vec2(uAspect, 1.0) * 2.0;
+        float rFrame = length(centred) / length(vec2(uAspect, 1.0));
+        exposed *= 1.0 - uVignette * rFrame * rFrame;
+
         vec3 display = ironAgx(exposed);
         outColor = vec4(ironGrade(display), 1.0);
       `,
@@ -143,6 +182,8 @@ export class TonemapPass implements RenderPass {
         uMaxNear: uf(dof.maxNear),
         uMaxFar: uf(dof.maxFar),
         uAutoFocus: uf(dof.autoFocus ? 1 : 0),
+        uAspect: uf(ctx.camera.aspect),
+        uVignette: uf(VIGNETTE_LINEAR),
       },
       graph.target(RT_GRADED),
       {
@@ -166,6 +207,8 @@ export class TonemapPass implements RenderPass {
           uniform float uMaxNear;
           uniform float uMaxFar;
           uniform float uAutoFocus;
+          uniform float uAspect;
+          uniform float uVignette;
         `,
         defines: dofActive ? { USE_DOF: 1 } : {},
       },
@@ -238,20 +281,43 @@ export class LensFxPass implements RenderPass {
         vec3 d = ironSrgbEncode(c);
 
         #ifdef SHARPEN
-          // CAS-style contrast-adaptive sharpen: a soft-clamped unsharp mask
-          // that leaves already-crisp edges alone.
+          // Unsharp mask, soft-clamped to the cross neighbourhood AND — the
+          // round-5 addition — GATED ON LOCAL RANGE.
+          //
+          // The clamp alone is not contrast adaptation and calling it that hid
+          // a real defect. On a TAA-resolved silhouette the pixel carrying the
+          // partial coverage is, by construction, the local mid-value; an
+          // unsharp mask pushes a mid-value toward whichever side it is nearer,
+          // and the clamp happily permits that because the destination is
+          // inside the neighbourhood. The net effect is to take a resolved
+          // 190 / 112 / 194 edge back toward 190 / 61 / 194 — i.e. to undo,
+          // spatially, exactly what the eight Halton samples paid for. Measured
+          // on light_cascades' fountain rim, the pass was worth 0.047 of extra
+          // Laplacian energy on its own: 0.127 with sharpening against 0.080
+          // with it off, on the same frame.
+          //
+          // The gate is the fix and it is the one true statement CAS makes: a
+          // sharpener has business in the MICRO-contrast of a surface and none
+          // at a silhouette, because a silhouette is already at the resolution
+          // limit and the only thing left to sharpen there is the antialiasing.
+          // Full authority under a 6 % code range, none over 24 %.
           vec3 n0 = ironSrgbEncode(texture(uSrc, uv + vec2(0.0, uTexel.y)).rgb);
           vec3 n1 = ironSrgbEncode(texture(uSrc, uv - vec2(0.0, uTexel.y)).rgb);
           vec3 n2 = ironSrgbEncode(texture(uSrc, uv + vec2(uTexel.x, 0.0)).rgb);
           vec3 n3 = ironSrgbEncode(texture(uSrc, uv - vec2(uTexel.x, 0.0)).rgb);
           vec3 lo = min(min(n0, n1), min(n2, n3));
           vec3 hi = max(max(n0, n1), max(n2, n3));
-          vec3 sharpened = d + (d * 4.0 - n0 - n1 - n2 - n3) * uSharpen * 0.25;
+          float localRange = max(max(hi.r, hi.g), hi.b) - min(min(lo.r, lo.g), lo.b);
+          float adapt = 1.0 - smoothstep(0.06, 0.24, localRange);
+          vec3 sharpened = d + (d * 4.0 - n0 - n1 - n2 - n3) * uSharpen * adapt * 0.25;
           d = clamp(sharpened, min(lo, d), max(hi, d));
         #endif
 
         // --- vignette --------------------------------------------------------
-        d *= 1.0 - 0.08 * r * r;
+        // MOVED to the tonemap pass, in scene-linear and in front of the curve
+        // — see VIGNETTE_LINEAR. A vignette applied here also darkens pixels
+        // the tonemapper had clipped, which is what put a hard ceiling of
+        // display 251 on every frame in the roster.
 
         // --- grain -----------------------------------------------------------
         float L = ironLuma(d);

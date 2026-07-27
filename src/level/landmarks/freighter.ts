@@ -208,6 +208,24 @@ export function buildFreighter(b: LevelBuild, rng: Rng): void {
       }
     }
   }
+  /**
+   * BULWARK STIFFENERS — round 5. The inboard skin emitted above is a plate 1.1 m
+   * tall running the whole 84 m of both sides with nothing on it, and from a
+   * camera inside the sheer line (which is where `water_golden` puts it) that is
+   * several hundred square metres of untextured quad. Real bulwark plating is
+   * held up by a bracket every frame space; they are 8 cm deep and they are the
+   * reason the inside of a ship's rail is never a flat surface.
+   */
+  for (let i = 1; i < stations; i++) {
+    const t = i / stations;
+    for (const s of [1, -1]) {
+      const p = hullPt(t, deckY, s, new THREE.Vector3());
+      const inb = p.z - s * (bulwarkT + 0.05);
+      b.m(deckMat).boxAt(p.x, deckY + 0.5, inb, 0.045, 0.5, 0.05, 1, 0x3f);
+      // The bracket's knee: a small triangular gusset down onto the deck.
+      b.m(deckMat).boxAt(p.x, deckY + 0.09, inb - s * 0.09, 0.04, 0.09, 0.14, 1, 0x3f);
+    }
+  }
   // Capping rail over the bulwark, and a run of stanchions below it.
   for (const s of [1, -1]) {
     const pts: THREE.Vector3[] = [];
@@ -265,9 +283,41 @@ export function buildFreighter(b: LevelBuild, rng: Rng): void {
       b.m(hull).boxAt(0, 0, 0, 5.1, 0.16, cw - 0.3, 1, 0x3f);
       b.xf.pop();
     } else {
-      b.m(hull).boxAt(hx0, deckY + 1.28, 0, 5.2, 0.15, cw - 0.15, 0.8, 0x3f);
-      for (let i = 0; i < 6; i++) {
-        b.m(deckMat).boxAt(hx0 - 4.4 + i * 1.75, deckY + 1.44, 0, 0.07, 0.07, cw - 0.2, 1, 0x3f);
+      /**
+       * FOLDING PONTOON COVERS, round 5. This was one 10.4 × 8.9 m slab with six
+       * thin bars laid on it — the single largest flat plane on the ship, and at
+       * the low camera angle `water_golden` uses it is one of the *"flat
+       * single-sided quads with hard 90-degree rectangular corners"* round 4
+       * called out. A hatch that size is never one lid: it is four or five
+       * pontoons that fold, each with a raised perimeter frame, a slight
+       * independent tilt, and a gap you can see the coaming through.
+       */
+      const pans = 4;
+      for (let p = 0; p < pans; p++) {
+        const ph = (5.2 * 2) / pans;
+        const pxc = hx0 - 5.2 + ph * (p + 0.5);
+        const tilt = rng.range(-0.018, 0.018);
+        const pm = new THREE.Matrix4()
+          .makeTranslation(pxc, deckY + 1.28 + rng.range(-0.02, 0.03), 0)
+          .multiply(new THREE.Matrix4().makeRotationZ(tilt));
+        b.xf.push(pm);
+        const g = b.m(hull);
+        g.setUvShift(rng.range(0, 24), rng.range(0, 24));
+        g.chamferBox(0, 0, 0, ph / 2 - 0.05, 0.11, cw - 0.15, 0.045, 0.8, rng, 0.12);
+        g.clearUvShift();
+        // Perimeter frame and two transverse stiffeners per pontoon: 6 cm of
+        // relief is enough to carry its own shadow line under an 11° sun, which
+        // is what stops the lid reading as a painted rectangle.
+        for (const s of [1, -1]) {
+          b.m(deckMat).boxAt(s * (ph / 2 - 0.11), 0.14, 0, 0.06, 0.06, cw - 0.18, 1, 0x3f);
+          b.m(deckMat).boxAt(0, 0.14, s * (cw - 0.21), ph / 2 - 0.16, 0.06, 0.06, 1, 0x3f);
+        }
+        for (const o of [-0.28, 0.28]) {
+          b.m(deckMat).boxAt(ph * o, 0.135, 0, 0.045, 0.05, cw - 0.22, 1, 0x3f);
+        }
+        // Lifting eye, off-centre, so the panel has one thing breaking its outline.
+        b.m('rust').cylinder(ph * rng.range(-0.2, 0.2), 0.19, cw * rng.range(-0.5, 0.5), 0.07, 0.07, 0.16, 6, 1, true, false);
+        b.xf.pop();
       }
     }
   }
@@ -306,27 +356,112 @@ export function buildFreighter(b: LevelBuild, rng: Rng): void {
     [new THREE.Vector3(0.9, 3.2, s * 1.6), new THREE.Vector3(0.9, 4.9, s * 0.5)], 0.05, 4, 1,
   );
   b.xf.pop();
-  // Foremast and the derrick posts. She lost her radar off the top.
-  b.m(deckMat).cylinder(halfL * 0.42, deckY, 0, 0.32, 0.2, 13.5, 8, 1, false, false);
-  for (const y of [5.5, 9.2]) {
-    b.m(deckMat).boxAt(halfL * 0.42, deckY + y, 0, 0.09, 0.09, 3.2, 1, 0x3f);
+  /**
+   * FOREMAST — round 5, and this is a SILHOUETTE bug, not a detail bug.
+   *
+   * Round 4 read this ship as *"a wooden square-rigged sailing ship … the
+   * yardarms are boxes with square-cut ends"*, and once you have seen it you
+   * cannot unsee it: a tapered pole carrying two long horizontal bars at two
+   * heights, with the deckhouse and hatch plates behind it, is the exact
+   * signature of a square rig. Two 3.2 m boxes were doing all of that damage.
+   *
+   * A real ship's foremast is not symmetrical about its own axis and does not
+   * carry a bar at mid-height. It carries, from the top down: a truck with the
+   * masthead light, ONE short signal yard right at the head with a halyard block
+   * at each end, a triangular platform, and then nothing at all until the deck.
+   * That silhouette cannot be read as a rig, and it costs fewer triangles than
+   * what it replaces.
+   *
+   * The yard is a `tube` rather than a `boxAt` so the ends are round instead of
+   * square-cut — the other half of the round-4 note — and it is offset forward
+   * of the mast rather than centred on it, which is where a signal yard actually
+   * sits and which breaks the symmetry that reads as a rig.
+   */
+  const mastX = halfL * 0.42;
+  b.m(deckMat).cylinder(mastX, deckY, 0, 0.32, 0.2, 9.0, 8, 1, false, false);
+  b.m(deckMat).cylinder(mastX, deckY + 9.0, 0, 0.17, 0.11, 4.5, 6, 1, false, false);
+  // Triangular masthead platform with a kick rail, at the hounds.
+  {
+    const g = b.m(deckMat);
+    const pts: THREE.Vector3[] = [];
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI * 2 + 0.5;
+      pts.push(new THREE.Vector3(mastX + Math.cos(a) * 1.05, deckY + 9.05, Math.sin(a) * 1.05));
+    }
+    g.quad(pts[0], pts[1], pts[2], pts[0], 1);
+    g.quad(pts[0], pts[2], pts[1], pts[0], 1);
+    for (let i = 0; i < 3; i++) {
+      g.tube([pts[i].clone(), pts[(i + 1) % 3].clone()], 0.035, 4, 1);
+    }
   }
+  // The signal yard: short, high, forward of the mast, with a lamp at each end.
+  b.m(deckMat).tube(
+    [
+      new THREE.Vector3(mastX + 0.24, deckY + 12.1, -1.55),
+      new THREE.Vector3(mastX + 0.24, deckY + 12.35, 1.55),
+    ],
+    0.055, 6, 1,
+  );
   for (const s of [1, -1]) {
+    b.m('glass').cylinder(mastX + 0.24, deckY + 12.2 + s * 0.12, s * 1.5, 0.09, 0.07, 0.2, 6, 1, true, false);
+  }
+  b.m('rust').cylinder(mastX, deckY + 13.5, 0, 0.1, 0.05, 0.3, 6, 1, true, false);
+  // Stays down to the deck edge — three, not two, so the mast is triangulated
+  // fore-and-aft as well as athwartships and the rig cannot read as symmetrical.
+  for (const [ax2, az2] of [[0.2, 0.8], [0.2, -0.8], [-0.34, 0]] as const) {
     b.m(deckMat).tube(
       [
-        new THREE.Vector3(halfL * 0.42, deckY + 13.0, 0),
-        new THREE.Vector3(halfL * 0.2, deckY + 1.2, s * halfB * 0.8),
+        new THREE.Vector3(mastX, deckY + 12.6, 0),
+        new THREE.Vector3(halfL * ax2, deckY + 1.2, az2 * halfB),
       ],
       0.025, 3, 1,
     );
   }
+  /**
+   * DERRICKS, STOWED — round 5, and this is the other half of the "square-rigged
+   * sailing ship" read.
+   *
+   * These were two 7.5 m round booms standing at 52° off the deck. Put them
+   * beside a pole mast, silhouette the lot against a bright sky at 40 m, and the
+   * eye has no way to tell them from a gaff and a boom: round 4 read the whole
+   * ship as a wooden sailing wreck, and a lifted derrick is half the reason.
+   *
+   * They are also WRONG for a wreck. A cargo derrick is topped by a wire from
+   * the masthead; the ship has been on the reef for years, the topping lifts are
+   * long gone, and both booms are down — one lowered into its crutch, one
+   * dropped across the bulwark and hanging over the side. That is a lower, more
+   * horizontal, more broken-up silhouette that can only read as machinery.
+   */
   for (let i = 0; i < 2; i++) {
     const px = -halfL * 0.34 + i * 27;
-    b.m('rust').tube(
-      [new THREE.Vector3(px, deckY, 0), new THREE.Vector3(px + 7.5, deckY + 9.5, i === 0 ? 3.2 : -2.6)],
-      0.28, 6, 1,
-    );
-    b.m(deckMat).cylinder(px, deckY, 0, 0.42, 0.42, 1.4, 8, 1, true, false);
+    // King post — the thing the boom is hinged to, and the one vertical here.
+    b.m(deckMat).cylinder(px, deckY, 0, 0.42, 0.34, 4.6, 10, 1, true, false);
+    b.m(deckMat).cylinder(px, deckY + 4.6, 0, 0.5, 0.5, 0.16, 10, 1, true, false);
+    if (i === 0) {
+      // Stowed in its crutch: heel at the post, head resting on a Y-frame aft.
+      b.m('rust').tube(
+        [new THREE.Vector3(px, deckY + 1.1, 0), new THREE.Vector3(px + 8.6, deckY + 2.0, 1.1)],
+        0.26, 7, 1,
+      );
+      for (const s of [1, -1]) {
+        b.m(deckMat).tube(
+          [new THREE.Vector3(px + 8.7, deckY, 1.1 + s * 0.55), new THREE.Vector3(px + 8.7, deckY + 1.75, 1.1)],
+          0.07, 4, 1,
+        );
+      }
+    } else {
+      // Dropped: the boom has come off its heel and lies across the rail, its
+      // head in the water, with the runner wire trailing from it.
+      b.m('rust').tube(
+        [new THREE.Vector3(px, deckY + 0.9, -0.4), new THREE.Vector3(px - 6.4, deckY - 1.4, -halfB * 1.45)],
+        0.26, 7, 1,
+      );
+      b.m('rust').slackLine(
+        new THREE.Vector3(px - 6.2, deckY - 1.2, -halfB * 1.35),
+        new THREE.Vector3(px - 9.5, -1.6, -halfB * 2.1),
+        1.1, 0.05, 6,
+      );
+    }
   }
   // Anchor chain out the hawse and down into the water — the ship is ANCHORED,
   // and the chain is the one line that says so without a caption.

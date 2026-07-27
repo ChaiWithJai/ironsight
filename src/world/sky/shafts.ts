@@ -154,7 +154,31 @@ const SHAFT_FRAGMENT = /* glsl */ `
   // brightness in renderer-linear units and can be budgeted directly against
   // LOOK_SPEC §3.4's "≤ 25 % above the local fog level".
   float cosTheta = clamp(dot(dirWorld, uShaftSunDirection), -1.0, 1.0);
-  float phase = ironPhaseHG(cosTheta, 0.72) * 0.5727;
+  // ── A SIDE-SCATTER FLOOR, AND WHY A BARE HG IS THE WRONG PHASE HERE ────────
+  //
+  // Round 5, severity 8, on material_chart: "a low sun rakes through eight arch
+  // openings and produces not one light shaft … the rubric's #1 property is
+  // satisfied in the back third and absent in the front two thirds."
+  //
+  // The volume was running. HG(0.72) normalised to peak 1 returns 0.012 at 90°
+  // from the sun, so a sightline that is not INTO the sun got 1.2 % of the beam
+  // radiance and the shafts were arithmetically absent — which is why the one
+  // shot that looks into the sun (sky_shafts) has them and no other shot does.
+  //
+  // A single HG is a fit to the forward lobe of a Mie phase and is known to
+  // under-predict side and back scattering by an order of magnitude; a real
+  // coarse aerosol keeps a broad, nearly flat pedestal away from the forward
+  // peak, and multiple scattering inside the dust adds more of one. 0.15 of the
+  // peak is a 6.7:1 forward-to-side ratio, which still puts most of the effect
+  // where the sun is and keeps §3.4's "≤ 25 % above the local fog level" budget
+  // (the pedestal is 15 % of a term that already peaks at a fifth of the aerial
+  // in-scatter), but it is the difference between a colonnade that throws beams
+  // across its own floor and one that does not.
+  //
+  // The pedestal is still multiplied by 'shadow' below, so it can only brighten
+  // air the sun actually reaches: in an open sunlit scene it is a uniform few
+  // per cent of veil, and everywhere an occluder cuts the sun it is a shaft.
+  float phase = ironPhaseHG(cosTheta, 0.72) * 0.5727 * 0.85 + 0.15;
 
   float sigma = density * 1.35e-3;
   float alpha = 1.0 - exp(-sigma * vShaftStep);

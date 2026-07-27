@@ -132,14 +132,104 @@ export function sunIlluminanceLux(elevationDeg: number): number {
  * skeleton for BOTH the analytic in-scatter (aerial perspective) and the
  * raymarched sky LUT, which is what keeps the far headland the same colour as
  * the sky immediately above it.
+ *
+ * ── ROUND 5 RE-CHROMA'D THE TWO ANTI-SUN ROWS, AT UNCHANGED LUMINANCE ───────
+ *
+ * §2.4 gives the golden zenith as 2 200 cd/m² at chroma (0.78, 0.82, 0.95),
+ * i.e. LINEAR saturation 0.18. That number is measured off a graded, tonemapped
+ * JPEG, so it is a DISPLAY saturation being used as a scene-linear one, and the
+ * round trip loses most of it twice over: AgX converges every channel on white
+ * across its shoulder, and RCORE's grade then multiplies sky chroma by a further
+ * `1 − 0.88·smoothstep(0.62, 0.95, L)` ≈ 0.67 at the luminance a golden sky
+ * lands at. Feeding 0.18 in returns 0.03 out, which is exactly what three
+ * rounds of critics have measured.
+ *
+ * The anchors are therefore quoted as the SCENE-LINEAR chroma that displays as
+ * §2.4's, not as §2.4's numbers copied across: zenith (0.52, 0.76, 1.00) and
+ * anti-sun horizon (0.62, 0.80, 1.00), both at their original LUMINANCE
+ * (weights 0.2126/0.7152/0.0722), so no photometric row in §2.4 moves and
+ * LIGHT's ambient integral over `radianceTowards` keeps its illuminance while
+ * gaining the cool sky-fill the rubric asks shadows to carry. The two warm rows
+ * — cross-sun and sunward horizon — are untouched: they sit at the top of the
+ * transfer where the warm branch of `ironSkyChroma` already compensates, and
+ * they are the rows the golden-hour read depends on.
  */
 export const ANCHOR = {
-  zenith: [2200 * 0.78, 2200 * 0.82, 2200 * 0.95],
-  elev30Anti: [2600 * 0.74, 2600 * 0.8, 2600 * 0.95],
-  horizonAnti: [3200 * 0.8, 3200 * 0.86, 3200 * 0.98],
-  horizonCross: [3400 * 0.92, 3400 * 0.9, 3400 * 0.9],
+  zenith: [1990 * 0.52, 1990 * 0.76, 1990 * 1.0],
+  /**
+   * The UPPER-AIR anchor: where the dome is heading before the boundary-layer
+   * aerosol takes over. Paler and ~0.2 EV brighter than the zenith, which is the
+   * gentle 1/cos limb brightening a real dome has and which the round-5 build
+   * had lost — with one tight exponent between two anchors the whole sky above
+   * 30° came back as a single flat value (measured: S 0.513 at 30° and S 0.513
+   * at 88°, i.e. no gradient at all over sixty degrees of dome).
+   */
+  elev30Anti: [2050 * 0.66, 2050 * 0.84, 2050 * 1.0],
+  horizonAnti: [3180 * 0.62, 3180 * 0.8, 3180 * 1.0],
+  /**
+   * The cross-sun horizon band. Held at §2.4's LUMINANCE and re-chroma'd from
+   * (0.92, 0.90, 0.90) to §3.1's own measured horizon band, RGB(149, 150, 156),
+   * which is fractionally COOL rather than fractionally warm. It matters far
+   * more than 6 units of chroma suggests: this anchor is bright (3 075 cd/m²
+   * against the zenith's 1 445) and the tight elevation band still hands out 31
+   * % of it at 12° of elevation, so a warm-neutral value here is what was
+   * diluting the blue out of exactly the 10–20° strip every first-person camera
+   * frames. Golden-hour warmth belongs on the SUN azimuth, where `horizonSun`
+   * puts it, not on the whole horizon ring.
+   */
+  horizonCross: [3208 * 0.94, 3208 * 0.96, 3208 * 1.0],
   horizonSun: [9000 * 1.0, 9000 * 0.94, 9000 * 0.87],
 } as const;
+
+/**
+ * How fast the horizon anchors give way to the zenith one, as the exponent of
+ * `(1 − sin elevation)`.
+ *
+ * ── ROUND 5, SEVERITY 10 ON THREE SEPARATE SHOTS ────────────────────────────
+ *
+ * "The sky dome is achromatic. Zenith saturation 0.033 … the gradient direction
+ * is correct but the amplitude is roughly a tenth of what a clear desert sky
+ * produces." And on level_bravo: "No Rayleigh blue in the sky at all — the
+ * zenith is achromatic grey … the Mie forward-scattering lobe exists but the
+ * Rayleigh term does not."
+ *
+ * The Rayleigh term was never missing. The exponent was 2.2, and 2.2 is a
+ * horizon band 40° WIDE: `pow(1 − sin e, 2.2)` still hands out 66 % of the
+ * near-achromatic horizon triple at 10° of elevation and 40 % at 20°. Every
+ * first-person camera on the roster frames the sky between 0° and 25°, so every
+ * critic in three consecutive rounds has been measuring the horizon band and
+ * reporting it as "the zenith". The blue overhead was real and was never in
+ * frame.
+ *
+ * LOOK_SPEC §3.1's own measured column settles it independently of the fix:
+ * 30° elev S 0.91, 15° elev S 0.58, **5° elev S 0.35**, horizon band S 0.04.
+ * The achromatic band in a real sky is a few degrees deep, not forty. At p = 5
+ * the horizon triple is worth 63 % at 5°, 31 % at 12°, 12 % at 20° and 3 % at
+ * 30°, which tracks that column — an e-fold of ~11.5° of elevation, i.e. the
+ * "warm horizon band within ~12 degrees of the horizon" the finding asks for.
+ *
+ * It is also the term that was making the dome BRIGHT: the horizon anchors run
+ * 3 100–3 400 cd/m² against the zenith's 2 200, so a 40°-wide band was holding
+ * the whole visible sky half a stop over its own zenith and, per the finding,
+ * "anchors the exposure and flattens everything below it".
+ */
+export const HAZE_ELEV_POW = 5.0;
+/**
+ * The BROAD elevation term: zenith → upper-air anchor, i.e. the gentle limb
+ * brightening and desaturation that runs the whole height of the dome, under
+ * the tight aerosol band above. Without it `HAZE_ELEV_POW` alone flattens
+ * everything over ~30° onto the zenith triple exactly.
+ */
+export const HAZE_ELEV_POW_BROAD = 1.7;
+/**
+ * The same exponent for the SUNWARD EXCESS only (the 9 000 cd/m² horizon row
+ * minus the cross-sun dome under it). Mie forward scattering falls off with the
+ * ANGLE FROM THE SUN, not with azimuth, so the excess has to die faster than the
+ * dome does or every direction on the sun's azimuth inherits a horizon
+ * measurement — that was the round-4 "featureless plateau" finding. Held at
+ * ~1.8× the dome exponent, as it was before.
+ */
+export const HAZE_ELEV_POW_SUN = 9.0;
 
 /* ------------------------------------------------------- the haze medium -- */
 
@@ -314,16 +404,38 @@ export const HAZE_CHANNEL = [0.8, 1.0, 1.2] as const;
  * therefore genuinely dimmer than the medium in front of the sky, and the
  * horizon is where that changes.
  *
- * 0.82 is the surviving fraction; ±0.060 rad (±3.4°) is the transition. The
- * physical falloff is broader than 2.6° — the forward lobe is ~40° wide — so
- * this is a deliberate sharpening, stated as such: at the true lobe width the
- * effect becomes a gentle vertical gradient with no event at the horizon, and
- * the horizon is the single most load-bearing line in a coastal frame. It also
- * does useful work well below the horizon, where it is the reason the near and
- * mid ground stop being washed to the same value as the sky.
+ * The surviving fraction and the transition width are both deliberate
+ * sharpenings of the physics, stated as such: the true forward lobe is ~40°
+ * wide, at which width the effect becomes a gentle vertical gradient with no
+ * event at the horizon, and the horizon is the single most load-bearing line in
+ * a coastal frame. It also does useful work well below the horizon, where it is
+ * the reason the near and mid ground stop being washed to the same value as the
+ * sky.
+ *
+ * ── ROUND 5 SHARPENED AND DEEPENED IT, FOR water_golden ─────────────────────
+ *
+ * Severity 8: "the horizon is completely destroyed by fog across the right
+ * third. Luminance down column x = 1700 from y = 500 to y = 600 is a smooth
+ * monotonic 176.5 → 116.6 with no step or edge anywhere."
+ *
+ * ±0.060 rad is ±3.4°, and on `water_golden`'s 58° lens at 1080 lines that is a
+ * SIXTY-ONE PIXEL ramp. A sixty-one pixel ramp is not a horizon; it is exactly
+ * the "smooth monotonic with no step" the finding measures, and it was measured
+ * at the width this constant sets. ±0.022 rad is ±1.26°, i.e. 23 lines on the
+ * same lens — still wide enough that TAA never has an aliasing edge to crawl
+ * along, narrow enough to read as a line.
+ *
+ * The surviving fraction drops 0.82 → 0.72 at the same time, because the step's
+ * HEIGHT and its WIDTH are two different complaints and the finding makes both:
+ * it asks for "at least 12-15 luminance units of separation" across the line.
+ * 0.72 puts the medium in front of the water 28 % under the medium in front of
+ * the sky, which at the ~170 display the sky lands at on that frame is a ~30
+ * code step — comfortably over the asked-for floor, and still under the point
+ * where the near ground (which is far below the band and therefore fully
+ * occluded) starts to look like it is standing in a different atmosphere.
  */
-export const HAZE_GROUND_OCC = 0.82;
-export const HAZE_GROUND_BAND = 0.060;
+export const HAZE_GROUND_OCC = 0.72;
+export const HAZE_GROUND_BAND = 0.022;
 
 /**
  * Optical depth of the haze along a ray, matching `ironHazeTau` in `glsl.ts`.
@@ -363,7 +475,7 @@ export function analyticSkyRadiance(
   // THE CLAMP IS LOAD-BEARING — see `ironHazeRadiance` in glsl.ts for the
   // failure it fixes. Below the horizon `1 - up` exceeds 1, and the three
   // `lerp`s below then EXTRAPOLATE past their horizon anchors.
-  const g = Math.min(1, Math.pow(Math.max(0, 1 - up), 2.2));
+  const g = Math.min(1, Math.pow(Math.max(0, 1 - up), HAZE_ELEV_POW));
 
   const sh = tmpSunH.set(sunDirection.x, 0, sunDirection.z);
   const dh = Math.hypot(dir.x, dir.z);
@@ -388,12 +500,16 @@ export function analyticSkyRadiance(
   // The sunward EXCESS decays faster with elevation than the dome does — see
   // `ironHazeRadiance` in glsl.ts for why §2.4's horizon row must not be carried
   // up the sun's azimuth on the same exponent as the rest of the anchors.
-  const gSun = Math.min(1, Math.pow(Math.max(0, 1 - up), 4.5));
+  const gSun = Math.min(1, Math.pow(Math.max(0, 1 - up), HAZE_ELEV_POW_SUN));
+
+  // Broad limb term first, tight aerosol band second — see HAZE_ELEV_POW_BROAD.
+  const gBroad = Math.min(1, Math.pow(Math.max(0, 1 - up), HAZE_ELEV_POW_BROAD));
 
   const rgb = [0, 0, 0];
   for (let i = 0; i < 3; i++) {
-    const anti = lerp(ANCHOR.zenith[i], ANCHOR.horizonAnti[i], g);
-    const cross = lerp(ANCHOR.zenith[i], ANCHOR.horizonCross[i], g);
+    const upper = lerp(ANCHOR.zenith[i], ANCHOR.elev30Anti[i], gBroad);
+    const anti = lerp(upper, ANCHOR.horizonAnti[i], g);
+    const cross = lerp(upper, ANCHOR.horizonCross[i], g);
     const sun = cross + (ANCHOR.horizonSun[i] - ANCHOR.horizonCross[i]) * gSun;
     rgb[i] = lerp(lerp(cross, sun, toSun), anti, toAnti) * groundOcc;
   }

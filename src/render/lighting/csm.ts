@@ -43,6 +43,26 @@ import { SUN_PENUMBRA_SLOPE } from '@/render/lighting/photometry';
 const CASTER_DEPTH = 200;
 
 /**
+ * The last cascade's texel budget, in metres of world per shadow texel.
+ *
+ * A CSM's far distance is not a free parameter: `texelWorld = 2·R/tiles` and
+ * `R ≈ far`, so asking for 300 m of shadow out of a 2048-texel tile buys 0.29 m
+ * texels, and a straight caster edge quantised at 0.29 m and then dithered by a
+ * rotated kernel is the "shadows undulate by 10-15 px with lumpy contours"
+ * failure. 0.22 m is the coarsest the far band survives: at 120 m it is 2.0 px
+ * on a 1080-line frame, i.e. at the limit of what a viewer can resolve as a
+ * step, and the aerial perspective at that range hides the rest.
+ *
+ * The trade is shadow RANGE, and the trade is worth taking: LOOK_SPEC §2.6 says
+ * distant geometry dissolves into haze rather than carrying resolvable shadow
+ * detail, so a shorter, sharp cascade beats a long, melted one. `MIN_SHADOW_RANGE`
+ * is the floor the trade may never cross — the warehouse ridge / town roofline
+ * band that reviews specifically ask to see shadowed sits at 150 m.
+ */
+const FAR_TEXEL_BUDGET = 0.22;
+const MIN_SHADOW_RANGE = 155;
+
+/**
  * Layers that occlude the sun. Decals, water and the HUD do not.
  *
  * THE VIEWMODEL IS IN THE LIST AND LOOK_SPEC §2.6 IS WHY: "the viewmodel casts
@@ -98,7 +118,23 @@ function createDepthMaterial(): THREE.ShaderMaterial {
       }
     `,
     uniforms: {},
-    side: THREE.FrontSide,
+    // DOUBLE-SIDED, AND THIS IS A BUG FIX, NOT A PREFERENCE.
+    //
+    // Half the shadow-casting geometry in this level is SHEET geometry: stall
+    // canopy panels, awning valances, tarpaulins, trestle boards, corrugated
+    // roof panes, fence infill. A sheet emitted with one winding has a single
+    // face, and whether that face points at the sun is an accident of how the
+    // author ordered its corners. Under `FrontSide` every sheet whose normal
+    // happens to point away from the sun rasterises NOTHING into the atlas and
+    // casts no shadow at all — which is exactly the "the largest occluder in
+    // the frame casts no shadow" / "a 5x3 m roof 2.5 m above ground in full sun
+    // casts nothing" report, and exactly why it looked like a per-object
+    // exclusion rather than a global failure.
+    //
+    // It costs nothing on closed geometry. The atlas is a MINIMUM-depth buffer
+    // (depth test LESS), so for a closed mesh the light-facing hull still wins
+    // every texel and the back faces are simply rejected by the depth test.
+    side: THREE.DoubleSide,
   });
   material.name = 'iron:shadowDepth';
   return material;
@@ -137,14 +173,25 @@ export class ShadowCascades {
     this.count = Math.min(4, s.cascadeCount);
     this.cadence = s.updateCadence;
     this.atlasSize = s.atlasSize;
+    // Seeded with the nominal range so the very first frame — which shades
+    // before `update` has ever run — does not fade every shadow in the level out
+    // against a range of zero.
+    this.farDistance = s.maxDistance;
 
-    // 2×2 quadrants. The tier tables list per-cascade tile sizes that do not
-    // actually tile inside `atlasSize` (High asks for 2048 + 1536 across a 3072
-    // atlas), so each cascade gets its quadrant and is clamped to it — finer
-    // cascades still get the larger tile, which is the intent of the table.
+    // 2×2 quadrants, and EVERY CASCADE TAKES ITS WHOLE QUADRANT.
+    //
+    // The tier tables list per-cascade tile sizes that do not tile inside
+    // `atlasSize` (High asks for 2048 + 1536 + 1024 + 1024 across a 3072 atlas),
+    // and the previous code resolved that by clamping each cascade to
+    // `min(tileSizes[i], half)`. On High that handed cascades 2 and 3 a 1024
+    // tile inside a 1536 quadrant and left 56 % of two quadrants — a fifth of
+    // the whole atlas — permanently black. Those are precisely the cascades the
+    // "far-cascade shadows are melted" report is about: at 1024 texels the
+    // 110–220 m band runs ~0.45 m per texel, and 1.5× more texels for free is
+    // the cheapest resolution this lane can buy.
     const half = this.atlasSize / 2;
     for (let i = 0; i < this.count; i++) {
-      const texels = Math.min(s.tileSizes[i] ?? half, half);
+      const texels = half;
       const qx = (i % 2) * half;
       const qy = Math.floor(i / 2) * half;
       const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.05, 100);
@@ -193,6 +240,14 @@ export class ShadowCascades {
   readonly matrices = new Float32Array(64);
 
   /**
+   * The distance the cascade set actually reaches this frame, after the texel
+   * budget above has had its say. `service.ts` starts the shadow fade from it —
+   * fading out at a distance the atlas no longer covers would leave a hard ring
+   * where the last cascade ends.
+   */
+  farDistance: number;
+
+  /**
    * Fit, snap and (subject to cadence) re-render every cascade, then publish the
    * whole shadow state into the shared uniform block.
    */
@@ -224,11 +279,32 @@ export class ShadowCascades {
     // light plane and shadow the entire world.
     renderer.setClearColor(0x000000, 1);
 
+    // ---- how far the cascade set may reach, this camera, this frame ---------
+    // The bounding sphere of a frustum slice that ends at `far` is the far
+    // ring's circumcircle once the centre clamps to the far plane (see `fit`),
+    // so its radius is exactly `far · hypot(tanX, tanY)`. Inverting the texel
+    // budget through that gives the longest range this tile can hold sharp.
+    const tanY = Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
+    const tanK = Math.hypot(tanY * camera.aspect, tanY);
+    const lastTile = this.cascades[this.count - 1].tileTexels;
+    const budgeted = (FAR_TEXEL_BUDGET * lastTile) / (2 * tanK);
+    // Never shorter than the second-to-last split can hand over to, or the last
+    // cascade would be inverted and the frame would lose everything past it.
+    const handover = (s.splits[this.count - 2] ?? 0) * 1.3;
+    const effectiveFar = Math.min(
+      s.maxDistance,
+      Math.max(MIN_SHADOW_RANGE, handover, budgeted),
+    );
+    this.farDistance = effectiveFar;
+
     let rendered = false;
     for (let i = 0; i < this.count; i++) {
       const cascade = this.cascades[i];
       const near = i === 0 ? camera.near : (s.splits[i - 1] ?? 0);
-      const far = Math.min(s.splits[i] ?? s.maxDistance, s.maxDistance);
+      const far =
+        i === this.count - 1
+          ? effectiveFar
+          : Math.min(s.splits[i] ?? effectiveFar, effectiveFar);
       this.splits[i] = far;
 
       const cadence = Math.max(1, this.cadence[i] ?? 1);
@@ -318,7 +394,17 @@ export class ShadowCascades {
     const a = xn * xn + yn * yn;
     const b = xf * xf + yf * yf;
     let cz = (b - a + far * far - near * near) / (2 * (far - near));
-    cz = THREE.MathUtils.clamp(cz, near, far + (far - near));
+    // CLAMPED TO THE FAR PLANE, NOT PAST IT. When the equidistant solution lands
+    // beyond `far` — which it does for every slice longer than it is wide, i.e.
+    // for cascades 2 and 3 — the true minimal bounding sphere is the far ring's
+    // own circumsphere, centred ON the far plane. The old ceiling of
+    // `far + (far - near)` let the centre run up to a slice-length past it and
+    // paid for that with `sqrt(b + (far-cz)²)` instead of `sqrt(b)`: 257 m of
+    // radius where 233 m contains the same geometry, i.e. 10 % of the last
+    // cascade's texel density thrown away for nothing. The near ring is still
+    // inside — it is `hypot(sqrt(a), far-near)` from the centre, which is
+    // smaller than `sqrt(b)` for any slice this shape.
+    cz = THREE.MathUtils.clamp(cz, near, far);
     const radius = Math.sqrt(b + (far - cz) * (far - cz));
 
     this.centre.set(0, 0, -cz).applyMatrix4(camera.matrixWorld);

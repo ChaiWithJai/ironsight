@@ -67,6 +67,7 @@ import {
   V_MISC,
   V_SCREEN,
   V_SUN,
+  V_TEMPORAL,
   M_VIEW_INVERSE,
   bindTextures,
   installShadingModel,
@@ -89,15 +90,28 @@ const REBAKE_DEGREES = 0.15;
 /**
  * Minimum penumbra, in cascade texels — an anti-aliasing floor and nothing more.
  *
- * It has to stay at ONE texel. The physical penumbra half-width is
- * `gap · tan(0.265°)`, so a 100 m architectural gap is 0.46 m; cascade 2's texel
- * is 0.21 m and cascade 3's is 0.45 m, and at the old floor of 1.5 texels those
- * cascades clamped to 0.32 m and 0.68 m — i.e. the floor, not the physics, set
- * the width of every shadow past 38 m, which is exactly the "one blur radius for
- * everything" the rubric fails a frame for. At one texel the floor only ever
- * catches sub-texel penumbrae, which is all it is for.
+ * TWO TEXELS, UP FROM ONE, AND THE ARITHMETIC OF THE VOGEL DISC IS WHY.
+ * ---------------------------------------------------------------------
+ * The physical penumbra half-width is `gap · tan(0.265°)`, so a hard contact —
+ * a crate on paving, a slab overhang 30 cm off its own facade — is physically
+ * sub-millimetre and the floor is the only thing setting its width. At a floor
+ * of ONE texel the 12–16 Vogel taps sit at radii `sqrt((i+0.5)/N)` texels, i.e.
+ * every one of them between 0.20 and 0.98 of a texel from the centre: they all
+ * land inside the SAME shadow-map texel as the centre tap, the average is
+ * 0.0 or 1.0 with almost nothing in between, and the boundary comes out as the
+ * raw texel grid — "a staircase of ~10 px square, axis-aligned steps". The
+ * filter was not filtering.
+ *
+ * At two texels the outer taps reach the neighbouring texel on both sides, so a
+ * boundary resolves as a monotonic ramp 3–4 texels wide with N quantisation
+ * levels in it, which is what an eye reads as an edge rather than as stairs.
+ *
+ * It is still bounded by the physics everywhere the physics is bigger: a 100 m
+ * architectural gap is 0.46 m of penumbra against cascade 3's 2-texel floor of
+ * ~0.35 m, so the long soft edges are still gap-driven, not floor-driven, and
+ * the frame keeps a range of penumbra widths rather than one blur radius.
  */
-const MIN_PENUMBRA_TEXELS = 1.0;
+const MIN_PENUMBRA_TEXELS = 2.0;
 
 class IronLighting implements LightingService {
   private readonly light = new THREE.DirectionalLight(0xffffff, 0);
@@ -310,8 +324,21 @@ class IronLighting implements LightingService {
     // and arch reveals), and at 0.7 a 0.55-visibility joint only lost 15 % of
     // its indirect light — below the threshold at which an eye reads a contact.
     u.vectors[V_MISC * 4 + 1] = 0.9;
-    u.vectors[V_MISC * 4 + 2] = quality.shadows.maxDistance * 0.82; // cascade fade start
+    // Cascade fade start, tied to the range the cascade set ACTUALLY reaches
+    // this frame rather than to the tier table's nominal `maxDistance`. `csm.ts`
+    // shortens that range when the last tile cannot hold it sharply, and fading
+    // out at a distance the atlas no longer covers would put a hard ring in the
+    // frame where the last cascade ends. 0.88 rather than 0.82: the fade is a
+    // dissolve into aerial perspective, and starting it 18 % early was throwing
+    // away the top of the band the atlas had already paid to render.
+    u.vectors[V_MISC * 4 + 2] = this.cascades.farDistance * 0.88;
     u.vectors[V_MISC * 4 + 3] = DEBUG_MODE;
+
+    // Per-frame PCSS kernel phase. Golden-angle stepped so consecutive frames
+    // are maximally decorrelated and the TAA history integrates independent
+    // kernels instead of converging onto one frozen noise pattern. See
+    // `ironDitherAngle`. Wrapped at 1024 frames so the float stays exact.
+    u.vectors[V_TEMPORAL * 4] = (ctx.frame % 1024) * 2.39996323;
 
     // ---- buffers ------------------------------------------------------------
     this.pool.tick(ctx);

@@ -205,6 +205,59 @@ Weighted mean of the seven axes, on the weights above.
 | 8.5–8.9 | Would pass as AAA to a non-expert; an expert finds the tells. |
 | 9.0+ | Would pass blind as a shipped AAA frame. |
 
-**The bar for this project is a weighted score of ≥ 8.5 on every shot, with no single axis below
-8.0.** An axis below 8.0 blocks acceptance regardless of the mean — a frame with perfect materials
-and broken shadows is not an acceptable frame.
+**The project bar is a weighted score of ≥ 8.5 on every shot, with no single axis below 8.0.** An
+axis below 8.0 blocks acceptance regardless of the mean — a frame with perfect materials and broken
+shadows is not an acceptable frame.
+
+---
+
+## Interim milestone: ≥ 6.0 (current working target)
+
+**The 8.5 bar has NOT been met and is NOT being redefined.** It stands above as the project bar.
+This section records a deliberately lower *interim* milestone and exactly why it exists, so that no
+future reader mistakes a 6.0 result for an 8.5 result.
+
+### The evidence that prompted it
+
+Two critic loops ran. Weighted mean across the eight hero shots:
+
+| loop | r1 | r2 | r3 | r4 |
+|---|---|---|---|---|
+| software-rasteriser | 2.99 | 3.27 | 3.80 | — |
+| GPU capture | 4.34 | 5.07 | 5.43 | 5.57 |
+
+Per-round gain in the GPU loop: **+0.73, +0.36, +0.14**. That is a plateau, not a slope, and it
+extrapolates to roughly 6.0–6.5 rather than 8.5.
+
+The reason is visible in the frames. Early gains came from fixing *absences* — no cast shadows, no
+black point, grass rendering as black slashes. Absences are cheap to find and dramatic to fix.
+What remains is different in kind: in-scatter tuned slightly too strong, compositions with no
+near-field occluder anchoring depth, ground planes lacking micro-detail variation. Those are
+judgement calls rather than defects, and agents converge on them slowly.
+
+### The interim milestone
+
+**Weighted ≥ 6.0 on every hero shot, with no single axis below 5.0.**
+
+Per the scale above, 6.0 is "competent indie — still obviously not AAA". That is an honest
+description of the target and of the result. It is a checkpoint on the way to the real bar, chosen
+because it concentrates effort on the four shots that are dragging the mean rather than spreading
+it across eight fronts.
+
+### Standing at the time this was adopted (GPU loop, round 4)
+
+| shot | weighted | verdict |
+|---|---|---|
+| level_bravo | 6.33 | close-but-clockable |
+| light_cascades | 6.23 | hobby-webgl-demo |
+| sky_golden | 6.10 | hobby-webgl-demo |
+| hud_full | 6.03 | hobby-webgl-demo |
+| weapon_ads | 5.30 | hobby-webgl-demo |
+| material_chart | 4.93 | hobby-webgl-demo |
+| water_golden | 4.90 | hobby-webgl-demo |
+| level_alpha | 3.90 | hobby-webgl-demo |
+
+Four already clear 6.0; four do not. **Critics must keep scoring on the same 0–10 scale and with
+the same harshness** — the milestone changes which score counts as done, and nothing else. A
+critic who inflates a 4.9 to a 6.1 because the bar moved has destroyed the only instrument this
+project has.

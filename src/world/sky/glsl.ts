@@ -18,6 +18,9 @@
 import {
   ANCHOR,
   HAZE_CHANNEL,
+  HAZE_ELEV_POW,
+  HAZE_ELEV_POW_BROAD,
+  HAZE_ELEV_POW_SUN,
   HAZE_FLOOR,
   HAZE_GROUND_BAND,
   HAZE_GROUND_OCC,
@@ -198,8 +201,13 @@ const float IRON_HAZE_IN_NEAR = ${f(HAZE_INSCATTER_NEAR)};
 const float IRON_HAZE_IN_BUILD = ${f(HAZE_INSCATTER_BUILD)};
 const float IRON_HAZE_GOCC = ${f(HAZE_GROUND_OCC)};
 const float IRON_HAZE_GBAND = ${f(HAZE_GROUND_BAND)};
+/** Horizon-band width, as an exponent. See HAZE_ELEV_POW in model.ts. */
+const float IRON_HAZE_EPOW = ${f(HAZE_ELEV_POW)};
+const float IRON_HAZE_EPOW_SUN = ${f(HAZE_ELEV_POW_SUN)};
+const float IRON_HAZE_EPOW_BROAD = ${f(HAZE_ELEV_POW_BROAD)};
 const vec3  IRON_HAZE_CH = ${v3(HAZE_CHANNEL)};
 const vec3  IRON_ANCHOR_ZENITH = ${v3(ANCHOR.zenith)};
+const vec3  IRON_ANCHOR_UPPER = ${v3(ANCHOR.elev30Anti)};
 const vec3  IRON_ANCHOR_H_ANTI = ${v3(ANCHOR.horizonAnti)};
 const vec3  IRON_ANCHOR_H_CROSS = ${v3(ANCHOR.horizonCross)};
 const vec3  IRON_ANCHOR_H_SUN = ${v3(ANCHOR.horizonSun)};
@@ -262,10 +270,12 @@ float ironHazeDrift(vec3 mid) {
  */
 vec3 ironHazeRadiance(vec3 dir, vec3 sunDir, vec3 sunChroma, float turbidity, float overcast) {
   float up = clamp(dir.y, -1.0, 1.0);
-  // 2.2 rather than 1.6: at 1.6 the horizon triple still contributes 71 % of
-  // its value 11° up, which drags the whole lower sky toward the sunward
-  // anchor and costs the dome its blue. 2.2 has it at 57 % and lets the
-  // Rayleigh table own everything above ~25°.
+  // THE EXPONENT IS 5, NOT 2.2, AND THAT IS THE ROUND-5 SEVERITY-10 FIX.
+  // 2.2 is a horizon band forty degrees deep, so every first-person camera on
+  // the roster framed nothing but horizon band and three rounds of critics
+  // reported the result as "the zenith is achromatic". See HAZE_ELEV_POW in
+  // model.ts for the arithmetic and for LOOK_SPEC §3.1's own measured column,
+  // which puts the achromatic band at a few degrees rather than forty.
   //
   // THE min() IS LOAD-BEARING AND ITS ABSENCE WAS THE MILKY-FOREGROUND BUG.
   // This function is called by the aerial-perspective chunk with the WORLD
@@ -278,7 +288,7 @@ vec3 ironHazeRadiance(vec3 dir, vec3 sunDir, vec3 sunChroma, float turbidity, fl
   // 27 700. Against 2 200 cd/m² sunlit sandstone that is a 4× in-scatter, so
   // even the correct 13 % blend at 15 m whited the foreground out. The saturation
   // radiance of the medium cannot exceed its horizon value — clamp it there.
-  float g = min(1.0, pow(max(0.0, 1.0 - up), 2.2));
+  float g = min(1.0, pow(max(0.0, 1.0 - up), IRON_HAZE_EPOW));
 
   vec2 dh = dir.xz;
   vec2 sh = sunDir.xz;
@@ -327,10 +337,19 @@ vec3 ironHazeRadiance(vec3 dir, vec3 sunDir, vec3 sunChroma, float turbidity, fl
   // scattering excess on top of it", and giving only the EXCESS the tighter
   // exponent, leaves the horizon exactly on §2.4 (both exponents are 1 at
   // up = 0) and pulls 20° of elevation above the sun down by a third.
-  float gSun = min(1.0, pow(max(0.0, 1.0 - up), 4.5));
-  vec3 anti  = mix(IRON_ANCHOR_ZENITH, IRON_ANCHOR_H_ANTI, g) * groundOcc;
-  vec3 cross_ = mix(IRON_ANCHOR_ZENITH, IRON_ANCHOR_H_CROSS, g) * groundOcc;
-  vec3 sunward = (mix(IRON_ANCHOR_ZENITH, IRON_ANCHOR_H_CROSS, g)
+  float gSun = min(1.0, pow(max(0.0, 1.0 - up), IRON_HAZE_EPOW_SUN));
+  // TWO ELEVATION TERMS, NOT ONE. The tight exponent above is the aerosol band
+  // and it must stay tight (round 5), but on its own it flattens the entire dome
+  // above ~30° onto the zenith triple — measured S 0.513 at both 30° and 88°,
+  // sixty degrees of sky with no gradient in it. The broad term underneath it is
+  // the 1/cos limb brightening a real dome has: zenith → a paler, slightly
+  // brighter upper-air anchor, running the full height. See
+  // HAZE_ELEV_POW_BROAD / ANCHOR.elev30Anti in model.ts.
+  float gBroad = min(1.0, pow(max(0.0, 1.0 - up), IRON_HAZE_EPOW_BROAD));
+  vec3 upper = mix(IRON_ANCHOR_ZENITH, IRON_ANCHOR_UPPER, gBroad);
+  vec3 anti  = mix(upper, IRON_ANCHOR_H_ANTI, g) * groundOcc;
+  vec3 cross_ = mix(upper, IRON_ANCHOR_H_CROSS, g) * groundOcc;
+  vec3 sunward = (mix(upper, IRON_ANCHOR_H_CROSS, g)
                 + (IRON_ANCHOR_H_SUN - IRON_ANCHOR_H_CROSS) * gSun) * groundOcc;
 
   // The azimuthal blend is pow(cos, 5) toward the sun and pow(cos, 1.5) away.
@@ -466,8 +485,25 @@ vec3 ironSkyChroma(vec3 c) {
   // value that is no longer anywhere near the shoulder. 1.30 restores the
   // measured target; the warm branch is untouched because the sun-side horizon
   // genuinely does sit at display 0.95 and genuinely does lose its chroma there.
+  // ── ROUND 5 PUT THE COOL BRANCH BACK UP, AGAINST A MEASUREMENT ────────────
+  //
+  // 0.30 was fitted on the sky_diag frames, which are ~95 % sky by area, so the
+  // auto-exposure metered the dome itself and landed it at display 0.45 — well
+  // down AgX's linear section, where almost no chroma is lost and 0.30 was
+  // plenty. Every GRADED frame is 20–35 % sky metered off dark sandstone, which
+  // puts the same radiance at display 0.73–0.79: on the shoulder, and then
+  // through RCORE's 1 - 0.88*smoothstep(0.62, 0.95, L) chroma taper on top.
+  // Measured end to end on level_alpha, linear saturation 0.385 at the top of
+  // frame arrives as display 0.136 — a 2.8× loss that 0.30 cannot cover.
+  //
+  // 1.20 restores it: the same direction leaves here at linear S 0.67 and lands
+  // at display S 0.24, inside the finding's 0.20–0.35 band. The ramp still
+  // starts at |B−R| = 0.04·Y so §3.1's achromatic horizon band (S 0.04) is
+  // untouched by construction — only sky that is genuinely blue is expanded,
+  // and the warm branch, which is fitted against a different failure on a
+  // different part of the transfer, does not move.
   float gain = mix(1.0, 2.6, smoothstep(0.02, 0.13, warm))
-             + mix(0.0, 0.30, smoothstep(0.06, 0.34, cool));
+             + mix(0.0, 1.20, smoothstep(0.04, 0.30, cool));
   return max(vec3(0.0), mix(vec3(lum), c, gain));
 }
 `;

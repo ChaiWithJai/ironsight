@@ -35,6 +35,28 @@ export interface Pt2 {
   z: number;
 }
 
+/**
+ * SEA LEVEL, AND WHY THIS FILE HAS TO KNOW ABOUT IT.
+ *
+ * WATER's surface is y = 0. Everything in here is emitted against a height
+ * FUNCTION, and a height function does not stop at the shore: ask the macro
+ * terrain for the ground under a point 40 m out in the harbour and it answers
+ * with the seabed, quite happily, several metres down. A sand tongue or a rubble
+ * chip placed there is a piece of dressing sitting on the bottom of the sea.
+ *
+ * That is round 4's `hud_full` severity 8: *"about twelve flat tan planes float
+ * unmoored over the water at arbitrary angles with no contact, no shadow and no
+ * thickness."* They are not floating and they are not unmoored — they are
+ * `spillTongues` fans lying on the seabed, seen THROUGH a refracting water
+ * surface, which flattens them, kills their contact shadow and puts them at an
+ * apparent depth that has nothing to do with the geometry.
+ *
+ * So: nothing here is emitted below the waterline unless the caller explicitly
+ * passes a Y, which is how the quay's armour stone and the freighter's reef —
+ * the two things that ARE meant to be awash — are placed.
+ */
+const SHORE_Y = 0.35;
+
 const _t0 = new THREE.Vector3();
 const _t1 = new THREE.Vector3();
 const _t2 = new THREE.Vector3();
@@ -280,6 +302,95 @@ export function rock(
 }
 
 /**
+ * THE CONTACT BAND — the dark line in the angle, and the wash up the face.
+ *
+ * ROUND 5. Rounds 2–4 answered "the wall meets the floor on a hard line" with
+ * MORE GEOMETRY: a sand fillet, chips, rubble. Round 4 measured all three still
+ * failing on `level_alpha`, `level_bravo` and `light_cascades`, and the reason
+ * is that none of them changes the thing the eye actually uses to find a
+ * contact, which is VALUE. A sand drift on sandstone paving is a 4 % albedo
+ * step; the fillet is real and it is invisible past about eight metres.
+ *
+ * What a wall foot looks like in every frame of `reference/gameplay/` is a
+ * DARK line — the angle sees almost none of the sky hemisphere, water runs off
+ * the face and stops there, and nothing has ever swept it. `propFoot` bought
+ * that with albedo in round 3 (its `interior` grime collar) and it worked; this
+ * is the same trick for a straight run instead of a disc.
+ *
+ * Two strips, both in `interior` (0.09 linear — see `materials.ts`):
+ *
+ *  1. FLOOR BAND, 3–11 cm out from the face, 8 mm proud so it never z-fights
+ *     with the paving. Its outer edge is lobed on a world-space harmonic, so it
+ *     is a wandering dirty line rather than a drawn outline — the SSAO-halo
+ *     read the rubric names as its own defect.
+ *  2. WALL WASH, 4–22 cm up the face, 1 cm proud of it, with a per-station
+ *     irregular top. This is the splash-back stain, and it is what stops the
+ *     junction reading as a decal lying on the floor.
+ *
+ * The drift and the debris are emitted OVER it by the caller, so the dark line
+ * shows through where the drift is thin and is buried where it is deep — which
+ * is the correlation a painted band can never have.
+ *
+ * `in` must be a UNIT vector in world XZ pointing away from the vertical face.
+ */
+export function contactBand(
+  b: LevelBuild,
+  ax: number, az: number,
+  bx: number, bz: number,
+  y: number,
+  inX: number, inZ: number,
+  rng: Rng,
+  opts: { reach?: number; rise?: number; mat?: MatKey } = {},
+): void {
+  const len = Math.hypot(bx - ax, bz - az);
+  if (len < 0.3) return;
+  const reach = opts.reach ?? 1;
+  const rise = opts.rise ?? 1;
+  const ex = (bx - ax) / len;
+  const ez = (bz - az) / len;
+  // Same derived winding test as `seamDebris`: `cross(in, e).y`. It decides the
+  // facing of BOTH strips — see the derivation there and in `groundSkirt`.
+  const up = inZ * ex - inX * ez > 0;
+  const g = b.m(opts.mat ?? 'interior');
+  g.setUvShift(rng.range(0, 24), rng.range(0, 24));
+  const steps = Math.max(3, Math.round(len / 0.32));
+  const pIn = new THREE.Vector3();
+  const pOut = new THREE.Vector3();
+  const pTop = new THREE.Vector3();
+  const qIn = new THREE.Vector3();
+  const qOut = new THREE.Vector3();
+  const qTop = new THREE.Vector3();
+  for (let s = 0; s <= steps; s++) {
+    const t = s / steps;
+    const px = ax + (bx - ax) * t;
+    const pz = az + (bz - az) * t;
+    // Two incommensurate harmonics at different scales: a slow one that decides
+    // which bays are dirty and a fast one that keeps the edge from ever being
+    // parallel to the wall for more than half a metre.
+    const slow = 0.5 + 0.5 * Math.sin(px * 0.37 + pz * 0.71) * Math.sin(pz * 0.29 - px * 0.53);
+    const fast = 0.5 + 0.5 * Math.sin(px * 3.1 - pz * 2.3);
+    const d = (0.03 + slow * 0.06 + fast * 0.025) * reach;
+    const h = (0.04 + slow * 0.13 + fast * 0.05) * rise;
+    qIn.set(px + inX * 0.004, y + 0.008, pz + inZ * 0.004);
+    qOut.set(px + inX * d, y + 0.006, pz + inZ * d);
+    qTop.set(px + inX * 0.010, y + h, pz + inZ * 0.010);
+    if (s > 0) {
+      if (up) {
+        g.quad(qOut, qIn, pIn, pOut, 1);
+        g.quad(pTop, pIn, qIn, qTop, 1);
+      } else {
+        g.quad(pOut, pIn, qIn, qOut, 1);
+        g.quad(qTop, qIn, pIn, pTop, 1);
+      }
+    }
+    pIn.copy(qIn);
+    pOut.copy(qOut);
+    pTop.copy(qTop);
+  }
+  g.clearUvShift();
+}
+
+/**
  * DEBRIS ALONG A HARD SEAM.
  *
  * `groundSkirt` is for a building meeting TERRAIN: it samples the height field
@@ -297,6 +408,21 @@ export function rock(
  * step over set dressing is a bug.
  *
  * `in` must be a UNIT vector pointing away from the vertical face, in world XZ.
+ *
+ * ROUND 5, THREE CHANGES, all from measurements of the round-4 frames:
+ *
+ *  - `contactBand` first. Value, not geometry, is what makes a junction read;
+ *    see its header.
+ *  - THE FILLET WAS FACETED. Stations every 55 cm against a drift whose depth
+ *    swings 0 → 52 cm over one wavelength produced isolated triangular RAMPS —
+ *    `level_bravo` at (1180-1500, 880-1010) shows two of them with a clean
+ *    straight wall/deck line in between. Stations are now every 26 cm, the
+ *    depth has a floor so the strip never pinches to nothing, and a second
+ *    harmonic breaks the outer edge inside each lobe.
+ *  - THE DEBRIS MARCHED. One chunk per 1.1 m at a noise gate still reads as a
+ *    procession. Chunks are now drawn in CLUMPS of 1–4 around a gated station,
+ *    which is how spall actually lies: piles under the failures, nothing
+ *    between them.
  */
 export function seamDebris(
   b: LevelBuild,
@@ -305,7 +431,7 @@ export function seamDebris(
   y: number,
   inX: number, inZ: number,
   rng: Rng,
-  opts: { amount?: number; mat?: MatKey; chipMat?: MatKey } = {},
+  opts: { amount?: number; mat?: MatKey; chipMat?: MatKey; noBand?: boolean } = {},
 ): void {
   const len = Math.hypot(bx - ax, bz - az);
   if (len < 0.4) return;
@@ -314,13 +440,16 @@ export function seamDebris(
   const chipMat = opts.chipMat ?? 'rubble';
   const ex = (bx - ax) / len;
   const ez = (bz - az) / len;
+  if (!opts.noBand) {
+    contactBand(b, ax, az, bx, bz, y, inX, inZ, rng, { reach: amount, rise: amount });
+  }
   const g = b.m(mat);
   g.setUvShift(rng.range(0, 24), rng.range(0, 24));
 
-  // The fillet. One strip, stations every ~0.55 m, with the outer edge dropped
-  // 2 cm below the deck so it terminates by intersection rather than on an
-  // edge — the same trick `propFoot` uses, and for the same reason.
-  const steps = Math.max(2, Math.round(len / 0.55));
+  // The fillet. One strip, with the outer edge dropped 2 cm below the deck so
+  // it terminates by intersection rather than on an edge — the same trick
+  // `propFoot` uses, and for the same reason.
+  const steps = Math.max(3, Math.round(len / 0.26));
   /**
    * WINDING, DERIVED RATHER THAN GUESSED. `quad`'s normal is (b−a)×(d−a); with
    * a = the outer edge of the previous station, that works out to
@@ -342,8 +471,11 @@ export function seamDebris(
     // place and gone in the next, and neighbouring walls agree at their corner
     // because the field is world-space rather than parametric.
     const wave = 0.5 + 0.5 * Math.sin(px * 0.61 + pz * 1.07) * Math.sin(pz * 0.43 - px * 0.83);
-    const h = (0.012 + wave * 0.055) * amount;
-    const d = (0.1 + wave * 0.42) * amount;
+    // The fast term rides on the slow one and is scaled by it, so a deep drift
+    // has a ragged edge and a shallow one stays shallow instead of spiking.
+    const ripple = 0.5 + 0.5 * Math.sin(px * 2.7 + pz * 2.1) * Math.sin(pz * 1.9 - px * 3.3);
+    const h = (0.02 + wave * 0.05) * amount;
+    const d = (0.16 + wave * 0.34 + wave * ripple * 0.3) * amount;
     cur.set(px + inX * 0.02, y + h, pz + inZ * 0.02);
     curOut.set(px + inX * d, y - 0.02, pz + inZ * d);
     if (s > 0) {
@@ -355,19 +487,25 @@ export function seamDebris(
   }
   g.clearUvShift();
 
-  const chunks = Math.max(2, Math.round(len / 1.1));
-  for (let i = 0; i < chunks; i++) {
-    const t = (i + rng.range(0.1, 0.9)) / chunks;
+  const stations = Math.max(2, Math.round(len / 0.8));
+  for (let i = 0; i < stations; i++) {
+    const t = (i + rng.range(0.1, 0.9)) / stations;
     const px = ax + (bx - ax) * t;
     const pz = az + (bz - az) * t;
     const density = 0.5 + 0.5 * Math.sin(px * 0.91 + pz * 0.47) * Math.sin(pz * 1.19 - px * 0.71);
     if (density < 0.32) continue;
-    const off = rng.range(0.04, 0.7) * amount;
-    const qx = px + inX * off + ex * rng.range(-0.25, 0.25);
-    const qz = pz + inZ * off + ez * rng.range(-0.25, 0.25);
-    const s = rng.range(0.05, 0.18) * (0.7 + density * 0.6);
-    if (rng.bool(0.55)) blockChip(b, rng.bool(0.6) ? chipMat : mat, qx, y, qz, s, rng);
-    else rock(b, rng.bool(0.55) ? chipMat : mat, qx, y + s * 0.28, qz, s, s * 0.5, s * 1.1, rng, 6);
+    // A clump, not a chunk: 1–4 pieces sharing a centre, sizes falling off from
+    // the biggest, which is what a piece of spalled render looks like when it
+    // hits a flagstone.
+    const n = 1 + rng.int(1 + Math.round(density * 3));
+    for (let k = 0; k < n; k++) {
+      const off = rng.range(0.02, 0.6) * amount;
+      const qx = px + inX * off + ex * rng.range(-0.34, 0.34);
+      const qz = pz + inZ * off + ez * rng.range(-0.34, 0.34);
+      const s = rng.range(0.07, 0.27) * (0.7 + density * 0.6) / (1 + k * 0.55);
+      if (rng.bool(0.55)) blockChip(b, rng.bool(0.6) ? chipMat : mat, qx, y, qz, s, rng);
+      else rock(b, rng.bool(0.55) ? chipMat : mat, qx, y + s * 0.28, qz, s, s * 0.5, s * 1.1, rng, 6);
+    }
   }
 }
 
@@ -620,6 +758,9 @@ export function spillTongues(
     const px = ax + (cx - ax) * t;
     const pz = az + (cz - az) * t;
     if (0.5 + 0.5 * Math.sin(px * 0.7 + pz * 1.3) * Math.sin(pz * 0.41 - px * 0.9) < 0.34) continue;
+    // Not below the waterline. See SHORE_Y — this single test is the whole of
+    // the `hud_full` "twelve floating tan planes" finding.
+    if (groundAt(px, pz) < SHORE_Y) continue;
     const half = rng.range(0.5, 1.5);
     const deep = reach * rng.range(0.35, 1.15);
     const ex = (cx - ax) / len;
@@ -739,13 +880,37 @@ export function groundSkirt(
     const ez = c.z - a.z;
     const len = Math.hypot(ex, ez);
     if (len < 0.25) continue;
+    // An edge that runs out over the water gets no transition at all: see
+    // SHORE_Y. Both ends and the midpoint, because a quay corner can have one
+    // end on the apron and the other 20 m out in the basin.
+    if (Math.min(
+      groundAt(a.x, a.z),
+      groundAt(c.x, c.z),
+      groundAt((a.x + c.x) / 2, (a.z + c.z) / 2),
+    ) < SHORE_Y) continue;
     const nx = ez / len;
     const nz = -ex / len;
     // Windward faces get roughly twice the drift of leeward ones.
     const facing = Math.cos(Math.atan2(nz, nx) - wind);
     const exposure = 0.55 + 0.45 * facing;
 
-    const steps = Math.max(2, Math.round(len / 0.85));
+    /**
+     * THE CONTACT BAND, round 5 — `light_cascades`, severity 7: *"the near wall
+     * meets the ground in a hard clean line … no debris skirt, no dirt buildup
+     * fillet, no ground decal over an 830 px run."* The drift below WAS being
+     * emitted on that wall; it is sand laid on dirt, and at eleven metres the
+     * albedo step is smaller than the noise in either material. See
+     * `contactBand` for why the answer is value rather than more geometry.
+     *
+     * It is emitted first and the drift is laid over it, so the dark line is
+     * buried where the sand is deep and shows where the sand has blown away.
+     */
+    contactBand(
+      b, a.x, a.z, c.x, c.z, groundAt(a.x, a.z), nx, nz, rng,
+      { reach: 0.7 + amount * 0.5, rise: 0.8 + amount * 0.5 },
+    );
+
+    const steps = Math.max(3, Math.round(len / 0.4));
     let prevOutX = 0, prevOutZ = 0, prevOutY = 0, prevInY = 0, prevInX = 0, prevInZ = 0;
     for (let s = 0; s <= steps; s++) {
       const t = s / steps;
@@ -753,10 +918,14 @@ export function groundSkirt(
       const pz = a.z + ez * t;
       const g = groundAt(px, pz);
       // Two incommensurate sines plus noise from the stream: the drift varies
-      // along the wall instead of being a constant-section moulding.
+      // along the wall instead of being a constant-section moulding. A faster
+      // third term rides on the slow one so the outer edge is ragged INSIDE
+      // each lobe — without it the strip is a smooth swell whose own outline is
+      // as regular as the wall's.
       const wave = 0.5 + 0.5 * Math.sin(px * 0.9 + pz * 0.7) * Math.sin(pz * 1.7 - px * 0.4);
+      const ripple = 0.5 + 0.5 * Math.sin(px * 2.3 - pz * 3.1) * Math.sin(pz * 2.7 + px * 1.9);
       const h = (0.1 + wave * 0.34) * exposure * amount + rng.range(-0.03, 0.05);
-      const d = (0.42 + wave * 1.05) * exposure * amount;
+      const d = (0.42 + wave * 0.72 + wave * ripple * 0.55) * exposure * amount;
       const outX = px + nx * d;
       const outZ = pz + nz * d;
       const outY = groundAt(outX, outZ) - 0.06;
@@ -782,7 +951,39 @@ export function groundSkirt(
     // BLOCK: chamfered slabs lying flat with an arbitrary yaw, which is what
     // actually falls off a rendered wall, and which reads correctly at every
     // distance because it has a lit top face and a shadowed end.
-    const chunks = Math.max(2, Math.round(len / 0.95));
+    /**
+     * FALLEN BLOCK. Round 5, `level_alpha`: *"break the wall base line further
+     * with … 2-3 fallen blocks."* Everything else on this seam is under 40 cm,
+     * and 40 cm of debris against a 3.5 m wall does not break its base line
+     * from standing eye height — it sits below the line rather than across it.
+     * One 0.5–0.9 m block every six metres or so does, and in a frame where the
+     * whole wall foot is in shadow it is the ONLY thing that does, because a
+     * shadowed drift and shadowed paving return the same radiance and only the
+     * silhouette survives.
+     */
+    const blocks = Math.floor(len / 6.5);
+    for (let i = 0; i < blocks; i++) {
+      const t = (i + rng.range(0.15, 0.85)) / Math.max(1, blocks);
+      if (rng.bool(0.35)) continue;
+      const px = a.x + ex * t + nx * rng.range(0.25, 1.1);
+      const pz = a.z + ez * t + nz * rng.range(0.25, 1.1);
+      if (groundAt(px, pz) < SHORE_Y) continue;
+      const s = rng.range(0.28, 0.52) * (0.7 + amount * 0.45);
+      // Mostly angular BLOCK. A wall sheds cut stone and render, and a lathed
+      // lump at this size reads as a sandbag or a sack — which is exactly what
+      // the first round-5 capture of `light_cascades` showed.
+      if (rng.bool(0.78)) blockChip(b, rubbleMat, px, groundAt(px, pz), pz, s, rng);
+      else rock(b, rubbleMat, px, groundAt(px, pz) + s * 0.34, pz, s, s * rng.range(0.5, 0.8), s * rng.range(0.75, 1.2), rng, 7);
+      // A block that has fallen has broken: two or three fragments beside it.
+      for (let k = 0; k < 2 + rng.int(2); k++) {
+        const fs = s * rng.range(0.16, 0.38);
+        const fx = px + rng.range(-s * 1.6, s * 1.6);
+        const fz = pz + rng.range(-s * 1.6, s * 1.6);
+        blockChip(b, rng.bool(0.5) ? rubbleMat : sandMat, fx, groundAt(fx, fz), fz, fs, rng);
+      }
+    }
+
+    const chunks = Math.max(2, Math.round(len / 0.8));
     for (let i = 0; i < chunks; i++) {
       const t = (i + rng.range(0.1, 0.9)) / chunks;
       const px = a.x + ex * t + nx * rng.range(0.02, 0.62);
@@ -797,12 +998,29 @@ export function groundSkirt(
        */
       const density = 0.5 + 0.5 * Math.sin(px * 0.83 + pz * 0.51) * Math.sin(pz * 1.31 - px * 0.62);
       if (density < 0.3) continue;
-      const s = rng.range(0.13, 0.44) * (0.55 + amount * 0.4 + density * 0.5);
-      const mat = rng.bool(0.62) ? rubbleMat : sandMat;
-      if (rng.bool(blockFraction)) {
-        blockChip(b, mat, px, groundAt(px, pz), pz, s, rng);
-      } else {
-        rock(b, mat, px, groundAt(px, pz) + s * 0.32, pz, s, s * rng.range(0.4, 0.75), s * rng.range(0.7, 1.3), rng, 5);
+      // ROUND 5 — CLUMPS, not chunks. One piece per gated cell is still a
+      // procession, just a gappy one. Spall lies in heaps under the place the
+      // render actually failed, with bare wall between the heaps.
+      const clump = 1 + rng.int(1 + Math.round(density * 3));
+      for (let k = 0; k < clump; k++) {
+        const cxp = px + nx * rng.range(-0.14, 0.34) + (ex / len) * rng.range(-0.32, 0.32);
+        const czp = pz + nz * rng.range(-0.14, 0.34) + (ez / len) * rng.range(-0.32, 0.32);
+        if (groundAt(cxp, czp) < SHORE_Y) continue;
+        /**
+         * SIZE. Round 5 first tried 0.16–0.52 here and `light_cascades` came
+         * back with a continuous row of half-metre LUMPS along the plinth that
+         * read as sacks, not spall: at `amount` 1.45 the top of that range lands
+         * at 0.83 m, which is a boulder, and a boulder every 80 cm for eleven
+         * metres is a wall of them. The large silhouette break is the fallen
+         * BLOCK above, which is deliberately rare; this tier is chips.
+         */
+        const s = rng.range(0.11, 0.34) * (0.55 + amount * 0.4 + density * 0.5) / (1 + k * 0.5);
+        const mat = rng.bool(0.62) ? rubbleMat : sandMat;
+        if (rng.bool(blockFraction)) {
+          blockChip(b, mat, cxp, groundAt(cxp, czp), czp, s, rng);
+        } else {
+          rock(b, mat, cxp, groundAt(cxp, czp) + s * 0.32, czp, s, s * rng.range(0.4, 0.75), s * rng.range(0.7, 1.3), rng, 5);
+        }
       }
     }
     if (!opts.noScatter) {
@@ -815,6 +1033,7 @@ export function groundSkirt(
         const t = rng.next();
         const px = a.x + ex * t + nx * dist + rng.range(-0.4, 0.4);
         const pz = a.z + ez * t + nz * dist + rng.range(-0.4, 0.4);
+        if (groundAt(px, pz) < SHORE_Y) continue;
         const s = rng.range(0.07, 0.24);
         if (rng.bool(blockFraction * 0.7)) blockChip(b, rng.bool(0.5) ? rubbleMat : sandMat, px, groundAt(px, pz), pz, s, rng);
         else rock(b, rng.bool(0.5) ? rubbleMat : sandMat, px, groundAt(px, pz) + s * 0.25, pz, s, s * 0.5, s * 1.1, rng, 5);

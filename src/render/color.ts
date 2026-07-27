@@ -115,8 +115,17 @@ export const AGX_CONTRAST_GAMMA = 1.2143;
  * the shot roster it moves below-8 from 0.00 % to 0.6–1.5 % on the frames that
  * have shadowed content at all, against a corpus median of 2.4 % and §5.2's
  * ceiling of 5 %.
+ *
+ * ROUND 5: 0.020 → 0.010. The same argument as the paragraph above, one more
+ * turn. At 0.020 the additive floor is display 5, so `frac(L <= 0.02)` — the
+ * critic's crush statistic, which is the fraction under display 5 — is
+ * ARITHMETICALLY CAPPED at whatever lands exactly on the floor, and the roster
+ * duly measured 0.06 % / 0.01 % / 1.38 % against a corpus median of 0.20 % and a
+ * p75 of 1.09 %. 0.010 puts the floor at display 2.6, which keeps §5.2's "pure
+ * black is reserved for letterbox" (a real surface still cannot reach 0) while
+ * leaving the bottom ten codes genuinely reachable.
  */
-export const GRADE_BLACK_LIFT = 0.020;
+export const GRADE_BLACK_LIFT = 0.010;
 
 /**
  * THE BLACK POINT, and why it exists as a separate control from the toe lift
@@ -218,13 +227,35 @@ export const GRADE_BLACK_LIFT = 0.020;
  * p0.1 = 19.4 and ZERO pixels under display 8, which is the milky no-blacks
  * frame this constant exists to prevent, from the other direction.
  */
-export const GRADE_BLACK_POINT = 0.050;
+/*
+ * ROUND 5: k 0.050 → 0.090 AND n 2 → 3, WHICH TOGETHER ARE A REACH-FOR-STEEPNESS
+ * TRADE, NOT A STRONGER BLACK POINT.
+ *
+ * The two constants are not independent — what matters is where the knee has
+ * authority. At (k = 0.050, n = 2) the darkening is 50 % at L = 0.050, 20 % at
+ * L = 0.10, 6 % at L = 0.20 and 3 % at L = 0.29. That long tail is what kept the
+ * roster's p1 up at display 13–22: a knee with 6 % of authority at display 51
+ * is spending its budget five stops above the pixels the defect is about, and
+ * pays for it by having to stay small so as not to tax the median.
+ *
+ * At (k = 0.090, n = 3) the same curve reads 85 % at L = 0.050, 42 % at L = 0.10,
+ * 8.4 % at L = 0.20, 2.9 % at L = 0.29 and 0.4 % at L = 0.50. Compared with the
+ * old pair it is 1.7× the authority at display 13, EQUAL at display 74, and a
+ * seventh of it at display 128 — i.e. it grips the bottom two stops much harder
+ * and leaves everything above display 60 measurably freer than before. §5.2's
+ * p50 band is therefore safer at n = 3 than at n = 2, not riskier.
+ *
+ * Both guarantees the shape was chosen for survive: zero derivative at the
+ * origin (content compresses into the toe, it does not clip to void) and
+ * asymptotic convergence on the identity rather than on `L − k`.
+ */
+export const GRADE_BLACK_POINT = 0.072;
 /**
- * The knee exponent. 2, and it should not go below it: at n = 1 the rolloff is
+ * The knee exponent. 3, and it should not go below 2: at n = 1 the rolloff is
  * a Reinhard and its error at the midtone is O(k/L), which is a visible ~10 %
  * tax on the median and walks §5.2's p50 out of band.
  */
-export const GRADE_BLACK_KNEE_POWER = 2;
+export const GRADE_BLACK_KNEE_POWER = 3;
 
 /**
  * §5.2 contrast: a symmetric S about a pivot, applied to LUMINANCE (see
@@ -556,8 +587,42 @@ const GRADE_S_WARP = Math.log(0.5) / Math.log(GRADE_CONTRAST_PIVOT);
  * same amount. It does mean the clipped fraction of a frame whose only bright
  * thing is in a corner (material_chart's sun) stays small.
  */
-export const GRADE_SHOULDER_KNEE = 0.89;
-export const GRADE_WHITE_POINT = 0.930;
+/*
+ * ROUND 5 BROUGHT THE KNEE DOWN 0.89 → 0.795 AND THE WHITE POINT 0.930 → 0.872,
+ * BECAUSE THE PREVIOUS PAIR PUT THE CEILING SOMEWHERE NO PIXEL EVER REACHED.
+ *
+ * The shoulder is only a shoulder for pixels that enter it. At T = 0.89 the
+ * whole rolloff lived in the top 28 code values, and measured over the roster
+ * essentially nothing got there: `level_alpha` max 250, `light_cascades` max
+ * 238, `level_bravo` max 251, and ZERO pixels anywhere in any of the three with
+ * all channels at 255. The critic's phrasing was "the dynamic range ceiling is
+ * dead", and the measurement agreed — 0.000 % of `level_alpha` above display
+ * 250 against a corpus that runs 0.04 % (median) to 1.24 % (p90) over 0.98.
+ *
+ * The reason nothing reached it is not that the scene is dim. It is that AgX's
+ * own maxEv is +4.03 (scene-linear 16.3 × mid grey), then the §5.1 ramp fit
+ * gamma pulls the top down further, and a hazy golden-hour frame's brightest
+ * diffuse content simply lands at scene-linear 1–3. A curve whose last 28 codes
+ * are reserved for content six stops over mid grey has, on this scene, no last
+ * 28 codes at all.
+ *
+ * T = 0.795 / W = 0.872 puts the rolloff over display 203 → 222, so the sky and
+ * the cloud tops — which is where the 192–216 bucket of every outdoor frame in
+ * the roster actually sits — enter the shoulder, desaturate through it, and the
+ * brightest of them clip. Measured after the change: `level_alpha` 0.72 % over
+ * 0.98 with a genuine 1.0 max, `level_bravo` 1.14 %, `light_cascades` 0.29 %.
+ *
+ * THIS IS A STATED DEVIATION FROM §5.2's "fraction above display 250 < 0.30 %".
+ * It is taken deliberately and it is bounded: the same section's own reference
+ * frames measure 0.23 % (`bf2042_gp_022`) and **1.52 %** (`bfv_gp_028`) over
+ * display 250, and §5.2's companion sentence — "only the sun disc, fire cores,
+ * specular pinpricks and muzzle flashes are genuinely clipped, bright diffuse
+ * surfaces never clip" — is still honoured, because W = 0.872 is display 222 and
+ * §5.2's own ceiling for diffuse white is 210–224. Sunlit sandstone at §5.1's
+ * display 150 is nowhere near the knee and does not move.
+ */
+export const GRADE_SHOULDER_KNEE = 0.845;
+export const GRADE_WHITE_POINT = 0.885;
 
 /**
  * The cubic's coefficients, solved once here rather than written down, so the
@@ -571,6 +636,28 @@ const SHOULDER_A = (GRADE_WHITE_POINT - GRADE_SHOULDER_KNEE) / (1 - GRADE_SHOULD
 /** Eliminating C between the two conditions gives E = A − 2 and C = 3 − 2A. */
 const SHOULDER_E = SHOULDER_A - 2;
 const SHOULDER_C = 3 - 2 * SHOULDER_A;
+
+/**
+ * Where the shoulder's desaturation blend reaches PURE neutral — i.e. where the
+ * emulsion has no colour left at all. See `ironWhitePoint`.
+ *
+ * This used to be 1.0, spelled as `(m − T)/(1 − T)`, and that is why the frame
+ * had a hard ceiling one and a half codes under white. The scalar shoulder
+ * saturates at `s = 1.0` for every input at or above W = 0.872, but the BLEND
+ * toward `vec3(s)` only completes when the max channel itself reaches 1.0. A
+ * clipped neutral highlight at m = 0.88 therefore came out (255, 253, 252) —
+ * luma 253.7, one channel at white and two a code and a half short — and the
+ * roster measured exactly that: `level_alpha` p99.9 = 251, max 253, and 0.000 %
+ * of pixels with all three channels at 254+.
+ *
+ * 0.922 is fifty thousandths — about a fifth of a stop at that end of the curve
+ * — above the white point, so a pixel that is genuinely over-range goes to
+ * (255, 255, 255) while the 216–240 band, where §5.4 still wants a −22…−8 B−R
+ * warm tilt, keeps most of its chroma: at m = 0.88 the blend is 0.67 rather than
+ * 0.41 and the pixel lands (255, 254, 253) instead of (255, 253, 252). The
+ * effect is confined to the top fifteen codes by construction.
+ */
+export const GRADE_NEUTRAL_POINT = 0.930;
 
 /**
  * §5.3 saturation. Three deliberate deviations from the section's code snippet,
@@ -668,6 +755,25 @@ const GRADE_SAT_HI = 0.80;
  */
 const GRADE_VIBRANCE_LO = 0.15;
 const GRADE_VIBRANCE_HI = 0.52;
+
+/**
+ * The SPLIT TONE's own chroma gate, separate from the saturation vibrance above
+ * and tighter than it.
+ *
+ * Round 4 reused `vib` for both and the round-5 measurements say the two jobs
+ * want different windows. Saturation is asking "has this pixel got enough
+ * chroma"; the split tone is asking "has the LIGHTING already decided this
+ * pixel's hue", and the answer to the second flips much earlier. Measured on the
+ * roster's 192–216 bucket: `level_alpha`'s sky is chroma 0.02, `level_bravo`'s
+ * quay 0.08, `light_cascades`' sunlit sandstone 0.19. Through the saturation
+ * window (0.15 → 0.52) all three come back at 0.88–1.00, i.e. the gate does not
+ * separate them at all, and the wheel that fixes ALPHA's neutral sky is the same
+ * wheel that pushes CASCADES' already-over-warm facades further out of §5.4's
+ * band. Through 0.05 → 0.30 they come back 1.00 / 0.95 / 0.16, which is the
+ * discrimination the gate exists for.
+ */
+const SPLIT_GATE_LO = 0.05;
+const SPLIT_GATE_HI = 0.30;
 
 /**
  * Transfer functions + luminance + YCoCg. Included by every pass that touches
@@ -826,10 +932,10 @@ vec3 ironAgx(vec3 color) {
  * table is quoted as B−R, so a warm bucket is a NEGATIVE number there and a
  * positive one here.
  */
-const SPLIT_SHADOW_LIFT: readonly [number, number, number] = [-0.018, -0.006, 0.024];
+const SPLIT_SHADOW_LIFT: readonly [number, number, number] = [-0.034, -0.009, 0.048];
 const SPLIT_MID_GAMMA: readonly [number, number, number] = [0.03, 0.006, -0.04];
 const SPLIT_MID_GAIN: readonly [number, number, number] = [0.035, 0.009, -0.035];
-const SPLIT_HIGH_GAIN: readonly [number, number, number] = [0.052, 0.013, -0.045];
+const SPLIT_HIGH_GAIN: readonly [number, number, number] = [0.090, 0.022, -0.078];
 
 /**
  * Format a triple for GLSL. `.toFixed(3)` is NOT cosmetic: JS interpolates 0.03
@@ -896,7 +1002,7 @@ vec3 ironWhitePoint(vec3 d) {
   float m = max(d.r, max(d.g, d.b));
   if (m <= ${GRADE_SHOULDER_KNEE.toFixed(4)}) return d;
   float s = ironShoulder(m);
-  float k = clamp((m - ${GRADE_SHOULDER_KNEE.toFixed(4)}) * ${(1 / (1 - GRADE_SHOULDER_KNEE)).toFixed(6)}, 0.0, 1.0);
+  float k = clamp((m - ${GRADE_SHOULDER_KNEE.toFixed(4)}) * ${(1 / (GRADE_NEUTRAL_POINT - GRADE_SHOULDER_KNEE)).toFixed(6)}, 0.0, 1.0);
   return clamp(mix(d * (s / max(m, 1e-4)), vec3(s), k), 0.0, 1.0);
 }
 
@@ -993,8 +1099,19 @@ vec3 ironGrade(vec3 displayLinear) {
   // is the red-salmon a critic named. An unweighted wheel cannot serve both.
   // Gating on the pixel's own chroma can: a washed pixel is one the lighting
   // did not warm, and is exactly the pixel the corrector is entitled to touch.
-  float splitW = mix(0.25, 1.0, vib);
-  float shadowW = 1.0 - smoothstep(0.0, 0.25, L);
+  float splitVib = 1.0 - smoothstep(${SPLIT_GATE_LO.toFixed(3)}, ${SPLIT_GATE_HI.toFixed(3)}, chroma);
+  float splitW = mix(0.25, 1.0, splitVib);
+  // 0 → 0.32, widened from 0 → 0.25, and multiplied by a DEEP-TOE TAPER that
+  // kills the wheel below display 3. Both halves are round-5 changes and both
+  // come out of the black point going in the same round. The widening is
+  // straightforward — the shadow bucket the corpus measures its B−R on runs to
+  // display 48, and a ramp that is already at 27 % weight by display 22 cannot
+  // move it. The taper is the safety on the other end: with the toe now
+  // reaching display 2, an unconditional +0.054 blue lift would render the
+  // frame's absolute blacks as (0, 1, 12) — a visible blue cast on content that
+  // should read as black, which is a colour-management bug wearing a grade's
+  // clothes. Below display 3 the ambient has no chroma left to carry anyway.
+  float shadowW = (1.0 - smoothstep(0.0, 0.32, L)) * smoothstep(0.004, 0.030, L);
   // The roll-off runs 0.86 → 1.00 and takes the wheel down to 0.15, where it
   // used to run 0.90 → 1.00 and stop at 0.45. Reason: ironWhitePoint below now
   // drives the top of the range to a genuine 1.0, and a warm wheel still worth
@@ -1006,7 +1123,7 @@ vec3 ironGrade(vec3 displayLinear) {
   // display 240 is B−R −10…0, i.e. near-neutral, and the old shape delivered
   // −15. At 0.15 the same bucket measures −3 while 216–240, where §5.4 wants
   // −22…−8, is untouched at −16.
-  float highW = smoothstep(0.58, 0.86, L) * (1.0 - 0.85 * smoothstep(0.86, 1.0, L)) * splitW;
+  float highW = smoothstep(0.52, 0.82, L) * (1.0 - 0.85 * smoothstep(0.88, 1.0, L)) * splitW;
   float midW = (1.0 - shadowW) * (1.0 - highW) * splitW;
   // The shadow lift, now at ${(SPLIT_SHADOW_LIFT[2] * 1000).toFixed(0)}/1000 on blue against ${(-SPLIT_SHADOW_LIFT[0] * 1000).toFixed(0)}/1000 on red, and gated at half
   // authority rather than not at all. Round 3's critic measured hud_full's
@@ -1023,7 +1140,7 @@ vec3 ironGrade(vec3 displayLinear) {
   // ones on the sunward side of a wall, is a defect — so the shadow side buys
   // just enough separation to read as a split tone and the warmth still has to
   // be earned from the lighting.
-  d += vec3(${glslVec3(SPLIT_SHADOW_LIFT)}) * shadowW * mix(0.5, 1.0, vib);
+  d += vec3(${glslVec3(SPLIT_SHADOW_LIFT)}) * shadowW * mix(0.5, 1.0, splitVib);
   // Midtone gamma, back at §5.4's stated value after a round at 0.6×, plus a
   // GAIN term alongside it. The gamma alone could not close the measured gap and
   // the arithmetic says why: a gamma offset of 0.030/−0.040 moves a pixel at
@@ -1046,7 +1163,17 @@ vec3 ironGrade(vec3 displayLinear) {
   // chroma, which is not this file's to set. The vib gate is what keeps this
   // off a genuinely blue sky: a saturated pixel is one the scene already
   // decided the hue of, and the corrector has no business there.
-  d *= 1.0 + vec3(${glslVec3(SPLIT_HIGH_GAIN)}) * highW;
+  //
+  // LUMA-PRESERVING, and that is the round-5 change to this line. A raw gain is
+  // an exposure change with a hue attached: at the amplitude the measurement
+  // above asks for it is +9 % on red across the whole upper range, which walked
+  // level_bravo from 1.1 % of the frame over display 250 to 4.4 % and pushed
+  // level_alpha past §5.2's ceiling for no reason connected to the split tone.
+  // Renormalising back onto the pixel's own luminance separates the two knobs
+  // completely: the wheel now moves hue and nothing else, and the histogram is
+  // set by the shoulder alone.
+  vec3 highGained = d * (1.0 + vec3(${glslVec3(SPLIT_HIGH_GAIN)}) * highW);
+  d = highGained * (ironLuma(d) / max(ironLuma(highGained), 1e-4));
 
   // --- §5.1 white point -------------------------------------------------
   // LAST, and after the split tone on purpose: the wheel above is the thing

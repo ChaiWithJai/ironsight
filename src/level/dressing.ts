@@ -19,7 +19,7 @@ import * as THREE from 'three';
 import { CollisionGroup, SurfaceId, type Rng } from '@/engine/types';
 import type { LevelBuild } from '@/level/build';
 import { railing } from '@/level/kit/detail';
-import { propFoot, rock } from '@/level/kit/ground';
+import { propFoot, rock, seamDebris } from '@/level/kit/ground';
 import type { MatKey } from '@/level/materials';
 
 /**
@@ -843,7 +843,21 @@ export function palletStack(
   worldFoot(b, x, y, z, 0.55, rng);
 }
 
-/** A low boundary wall with a coping and a gap or two. Alleys and courtyards. */
+/**
+ * A low boundary wall with a coping and a gap or two. Alleys and courtyards.
+ *
+ * ROUND 5 — THE FOOT. This is the wall that fills the right two-thirds of
+ * `level_alpha`, and round 4 measured its base as *"a hard, unbroken line
+ * across its full ~900 px run"*. It was getting a row of `propFoot` discs, one
+ * per 0.9 m of segment, and a disc is the wrong primitive for a straight run:
+ * it puts a lobed mound in the MIDDLE of the wall face and leaves the two ends
+ * of every lobe as a clean intersection, which at a shallow angle reads as an
+ * unbroken line with some bumps on it.
+ *
+ * A run needs a run. Both faces now get `seamDebris`, which is a continuous
+ * fillet plus the dark `contactBand` in the angle plus clumped spall — and the
+ * discs are gone, because two treatments on the same seam only fight.
+ */
 export function lowWall(
   b: LevelBuild,
   x0: number, z0: number, x1: number, z1: number,
@@ -856,6 +870,14 @@ export function lowWall(
   if (len < 0.6) return;
   const yaw = Math.atan2(x1 - x0, z1 - z0);
   const segs = Math.max(1, Math.round(len / 3.2));
+  // Unit tangent and the wall's outward normal, in world XZ. `seamDebris` needs
+  // both, and it needs the face position rather than the centreline: the wall is
+  // 28 cm thick, so a fillet laid on the centreline is a fillet buried in stone.
+  const tx = (x1 - x0) / len;
+  const tz = (z1 - z0) / len;
+  const nx = tz;
+  const nz = -tx;
+  const halfT = 0.14;
   for (let i = 0; i < segs; i++) {
     if (rng.bool(0.12)) continue; // a collapsed bay
     const t0 = i / segs;
@@ -867,13 +889,19 @@ export function lowWall(
     const segLen = (len / segs) / 2;
     const m = new THREE.Matrix4().makeTranslation(mx, g - 0.35, mz).multiply(new THREE.Matrix4().makeRotationY(yaw));
     b.xf.pushAbsolute(m);
-    b.solid(mat, 0, (h + 0.35) / 2, 0, 0.14, (h + 0.35) / 2, segLen, { groundY: g });
+    b.solid(mat, 0, (h + 0.35) / 2, 0, halfT, (h + 0.35) / 2, segLen, { groundY: g });
     b.m('concrete').boxAt(0, h + 0.02, 0, 0.19, 0.05, segLen, 1, 0x3f);
-    for (let k = 0; k < Math.max(1, Math.round(segLen / 0.9)); k++) {
-      const along = rng.range(-segLen, segLen);
-      propFoot(b, rng.range(-0.24, 0.24), 0.35, along, 0.3, rng);
-    }
     b.xf.pop();
+    // Both faces, in world space — the drift follows the ground, not the wall.
+    // A quarter-metre of overlap past each end closes the corner where two
+    // segments meet, so the run reads continuous even where a bay is missing.
+    for (const s of [1, -1] as const) {
+      const ax = mx - tx * (segLen + 0.25) + nx * s * halfT;
+      const az = mz - tz * (segLen + 0.25) + nz * s * halfT;
+      const bx2 = mx + tx * (segLen + 0.25) + nx * s * halfT;
+      const bz2 = mz + tz * (segLen + 0.25) + nz * s * halfT;
+      seamDebris(b, ax, az, bx2, bz2, g, nx * s, nz * s, rng, { amount: 1.25, chipMat: mat });
+    }
   }
 }
 

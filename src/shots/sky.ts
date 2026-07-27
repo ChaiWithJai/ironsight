@@ -148,3 +148,4 @@ registerShot({
  * the dome and the cloud march, not here; the shots that show the dome's blue
  * are the ones that look away from the sun.
  */
+

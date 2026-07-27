@@ -75,7 +75,12 @@ export const V_BIAS = 6; // [depthBiasTexels, normalBiasTexels, blockerSearchTex
 export const V_MISC = 7; // [localLightCount, contactAoStrength, cascadeFadeStart, debugMode]
 /** Four tile rects in the atlas: [offsetU, offsetV, scaleU, scaleV]. */
 export const V_TILE0 = 8;
-export const V_LIGHT_BASE = 12;
+/**
+ * `[kernelPhase, 0, 0, 0]` — a per-FRAME rotation added to every PCSS kernel.
+ * See `ironDitherAngle`. Written by the lighting rig from `FrameCtx.frame`.
+ */
+export const V_TEMPORAL = 12;
+export const V_LIGHT_BASE = 13;
 export const VEC_COUNT = V_LIGHT_BASE + IRON_MAX_LOCAL_LIGHTS * 3;
 
 /**
@@ -258,10 +263,33 @@ vec3 ironWorldDir( const in vec3 viewDir ) {
   return mat3( ironMatrix[${M_VIEW_INVERSE}] ) * viewDir;
 }
 
-/** Per-pixel rotation angle. Interleaved gradient noise: cheap, well spread. */
+/**
+ * Per-pixel rotation angle. Interleaved gradient noise: cheap, well spread.
+ *
+ * PLUS A PER-FRAME PHASE, WHICH IS THE HALF OF IT THAT WAS MISSING AND WHICH
+ * COST THE FAR CASCADES THEIR STRAIGHT EDGES.
+ * ---------------------------------------------------------------------------
+ * IGN alone is a function of \`gl_FragCoord\` and NOTHING ELSE. Under a static
+ * camera — every shot in this repo — the kernel a given pixel uses is therefore
+ * identical in every frame of the capture, so both the blocker-search estimate
+ * and the filter estimate at that pixel carry the SAME sampling error frame
+ * after frame. TAA cannot average out an error that does not change: it
+ * converges straight onto it. What survives is a shadow boundary whose position
+ * jitters by a fraction of a texel from pixel to pixel and then stays there,
+ * which is read as "a straight caster edge producing a wavy, blobby contour
+ * that wobbles at a different frequency on every floor". A straight edge
+ * geometrically cannot do that, and it was not the geometry: it was 12 taps of
+ * frozen noise.
+ *
+ * Advancing the phase by the golden angle per frame decorrelates consecutive
+ * frames maximally, so the 8-frame TAA history integrates 8 independent kernels
+ * and the boundary resolves to its mean — which IS the straight line. It costs
+ * one uniform and one add.
+ */
 float ironDitherAngle() {
   vec3 m = vec3( 0.06711056, 0.00583715, 52.9829189 );
-  return fract( m.z * fract( dot( gl_FragCoord.xy, m.xy ) ) ) * 6.2831853;
+  return fract( m.z * fract( dot( gl_FragCoord.xy, m.xy ) ) ) * 6.2831853
+       + ironVec[${V_TEMPORAL}].x;
 }
 
 /** i-th point of an n-point Vogel disc, pre-rotated by \`phi\`. */

@@ -132,6 +132,36 @@ function buildLevel(ctx: BootContext): BuiltLevel {
   const terrain = ctx.services.terrain;
   const ground = groundSampler(terrain ? (x, z) => terrain.heightAt(x, z) : null);
 
+  /**
+   * THE SQUARE'S PAVING IS A FLOOR, exactly like the quay apron `apronGround`
+   * already models for BRAVO, and for round 5 it gets the same treatment.
+   *
+   * `buildSquare` lays a 48 × 44 m slab whose top is 12 cm above the terrace and
+   * everything else that lands inside that rectangle — the terrace's own
+   * retaining wall, boundary walls, street furniture, stalls, cover — is planted
+   * at `ground()`, i.e. 12 cm UNDER the floor the camera can see. The objects
+   * still show, because they are metres tall. Their ground transitions do not,
+   * because a drift is five centimetres tall and a chip is three: every skirt,
+   * fillet and prop foot in ALPHA was being emitted correctly and then buried
+   * under the flagstones.
+   *
+   * That is the whole of `level_alpha`'s round-4 severity 8 — *"no ground
+   * transitions anywhere in the frame … present at every single ground junction
+   * in the shot"* — and it is invisible in the source, because every call site
+   * looks right on its own. Diagnosed by tinting `sand` magenta and `interior`
+   * green and capturing: the dark contact band, which stands 22 cm, was the only
+   * part of the treatment tall enough to clear the paving and be seen.
+   *
+   * Anything standing in the square now samples the slab. Outside it, and for
+   * the 12 cm the slab is thick, nothing changes.
+   */
+  const sqDeckY = ground(ALPHA_SQUARE.x, ALPHA_SQUARE.z) + 0.12;
+  const townGround = (x: number, z: number): number => {
+    if (Math.abs(x - ALPHA_SQUARE.x) > ALPHA_SQUARE.hx) return ground(x, z);
+    if (Math.abs(z - ALPHA_SQUARE.z) > ALPHA_SQUARE.hz) return ground(x, z);
+    return Math.max(ground(x, z), sqDeckY);
+  };
+
   // Each subsystem gets its own forked stream, so editing the fort cannot
   // reshuffle the town and a diff of one landmark stays a diff of one landmark.
   const fork = (label: string): Rng => rootRng.fork(label);
@@ -212,10 +242,10 @@ function buildLevel(ctx: BootContext): BuiltLevel {
 
   ctx.report('building level: town');
   const rTown = fork('town-landmarks');
-  buildSquareTerrace(b, ground, rTown);
-  const hall = buildMarketHall(b, ground, rTown);
-  buildMosque(b, ground, rTown);
-  buildMinaret(b, ground, rTown);
+  buildSquareTerrace(b, townGround, rTown);
+  const hall = buildMarketHall(b, townGround, rTown);
+  buildMosque(b, townGround, rTown);
+  buildMinaret(b, townGround, rTown);
 
   ctx.report('building level: fort');
   const charlieFloorY = buildFort(b, ground, fork('fort'));
@@ -226,11 +256,11 @@ function buildLevel(ctx: BootContext): BuiltLevel {
   // ---- 2. the town --------------------------------------------------------
   ctx.report('building level: districts');
   const rDistrict = fork('districts');
-  buildStreets(b, ground, rDistrict);
-  const plots = generatePlots(ground, rDistrict);
-  buildTown(b, plots, ground, rDistrict);
+  buildStreets(b, townGround, rDistrict);
+  const plots = generatePlots(townGround, rDistrict);
+  buildTown(b, plots, townGround, rDistrict);
   buildSquare(b, ALPHA_SQUARE.x, ALPHA_SQUARE.z, ALPHA_SQUARE.hx, ALPHA_SQUARE.hz, ground, rDistrict, hall);
-  dressStreets(b, ground, rDistrict);
+  dressStreets(b, townGround, rDistrict);
 
   // ---- 3. geometry --------------------------------------------------------
   ctx.report('building level: meshes');

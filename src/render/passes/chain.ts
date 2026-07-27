@@ -30,21 +30,26 @@ import { RTId } from '@/engine/types';
  * grass at ~2 m, cranes at ~300 m and a mountain ridge are all at identical
  * sharpness — impossible for any real optic."
  *
- * Both scales are in px·m at 1080p: `CoC_px = scale · |1/d − 1/focus|`. That
- * constant is `f²/N · pixelsPerMillimetre` for a real lens and is INDEPENDENT
- * of focus distance, which is why racking focus does not change it.
+ * Both scales are in px·m at 1080p: `CoC_px = scale · |1/d − 1/focus|`. For a
+ * real lens that constant is `f²/N · pixelsPerMillimetre` and is independent of
+ * where the lens is focused — the FAR scale is exactly that and never moves. The
+ * NEAR scale is not: it is the aperture a photographer would have chosen for
+ * this frame, solved from the readable plane (see `DOF_READABLE_M`), and it is
+ * therefore a function of the metered focus. The two halves answer different
+ * questions and only one of them is optics.
  */
 export interface DofParams {
   /** False when the pass did not run this frame; the tonemap then skips the composite. */
   active: boolean;
   /** Focus distance in metres — the fallback when auto-focus finds no geometry. */
   focus: number;
-  /** px·m, applied where `d < focus`, once the lens has racked past `stopDownEnd`. */
-  nearScale: number;
   /**
-   * px·m, the near-side scale the lens uses when it is focused INSIDE
-   * `stopDownStart` metres. See `ironDofNearScale`.
+   * px·m on the near side: the lens WIDE OPEN, i.e. the ceiling the readable-plane
+   * solve in `ironDofNearScale` is allowed to reach. Never the value used
+   * directly.
    */
+  nearScale: number;
+  /** px·m, the FLOOR of the same solve. See `ironDofNearScale`. */
   closeNearScale: number;
   /** px·m, applied where `d > farStart`. */
   farScale: number;
@@ -114,34 +119,70 @@ export const ESTABLISHING_FOCUS_MIN_M = 0.4;
 export const ESTABLISHING_FOCUS_MAX_M = 55;
 
 /**
- * Where the lens starts and finishes stopping down as it focuses closer, in
- * metres. See `ironDofNearScale`.
+ * THE READABLE PLANE — the round-5 replacement for the stop-down ramp, and the
+ * single change that gives the roster a working near field.
+ *
+ * The old rule was a smoothstep on the metered focus: stopped down to f/17 below
+ * 5 m, wide open above 13 m. It was written to protect `material_chart` and it
+ * did, but it is the wrong control variable and the round-4 captures show it
+ * from both sides at once:
+ *
+ *   | shot           | metered focus | resulting aperture | CoC on its near field |
+ *   | level_alpha    |   6.0 m       |  4.25 px·m         | 1.6 px on 1.85 m sandbags |
+ *   | level_bravo    |  30.2 m       | 27.60 px·m         | 4.6 px on the 5 m DECK    |
+ *
+ * — i.e. the frame whose whole composition is a near-field occluder got no
+ * bokeh, and the frame whose composition is a playable cover corridor got its
+ * mid-ground melted. Three critics measured exactly those two things.
+ *
+ * The fault is that the aperture was tied to the focus distance, when what
+ * actually has to be held constant is the sharpness of the surface the PLAYER
+ * STANDS ON. In a first-person frame that surface is at 3–6 m whatever the
+ * camera is metered on, and it must stay readable; everything much nearer than
+ * it is composition and is allowed to melt. So the aperture is now solved from
+ * that constraint instead of dialled against focus:
+ *
+ *     nearScale = min(OPEN, READABLE_COC_PX / (1/readable − 1/focus))
+ *     readable  = min(READABLE_M, focus · READABLE_FRACTION)
+ *
+ * The second line is what stops the rule degenerating on a close-focused study
+ * frame: with a 2.9 m focus there IS no 4.5 m readable plane in front of the
+ * camera, so the plane falls back to a fixed fraction of the focus distance and
+ * the aperture closes with it. `material_nearfield` (focus 2.89 m) solves to
+ * 7.5 px·m, `material_chart` (9.4 m) to 13.9, `level_alpha` (6.0 m) to 15.7,
+ * `level_bravo` (30.2 m) to 9.4 — the two frames that were wrong move in
+ * opposite directions, from one formula, which is what says the control
+ * variable is now the right one.
  */
-export const DOF_STOP_DOWN_START_M = 5;
-export const DOF_STOP_DOWN_END_M = 13;
+/** Where a playable surface sits in a first-person frame, in metres. */
+export const DOF_READABLE_M = 4.5;
+/** …unless the lens is focused nearer than that; then this fraction of focus. */
+export const DOF_READABLE_FRACTION = 0.62;
+/**
+ * How much CoC the readable plane is allowed to carry, px at 1080p. 1.6 px is
+ * just inside LOOK_SPEC §6.2's "≤ 1.2 px beyond 40 m in ADS" order of
+ * magnitude and, measured, is the point at which a brick course at 5 m still
+ * reads its own mortar line. At 2.4 px it does not.
+ */
+export const DOF_READABLE_COC_PX = 1.85;
 
 export const GLSL_COC = /* glsl */ `
 /**
- * The near-side aperture, as a function of where the lens ended up focused.
+ * The near-side aperture, solved from the readable plane. See
+ * DOF_READABLE_M above for why it is solved rather than dialled.
  *
- * A FIXED APERTURE IS THE RIGHT MODEL FOR ONE LENS AND THE WRONG MODEL FOR A
- * PHOTOGRAPHER, and the roster contains both kinds of frame. A landscape or an
- * establishing shot is metered at 25-55 m and wants the near field frankly out
- * of focus; a close study — material_chart, material_nearfield, the bake charts
- * — is metered at 2-6 m and exists to show what a surface does at 0.3 m. Shot
- * wide open, the second kind measured as an unusable smear: at 27.6 px m and a
- * focus of 8 m, a wall at 1 m carries 24 px of CoC, and "surfaces that go smooth
- * as the camera approaches" is the rubric's own automatic fail.
- *
- * Real practice resolves it the same way: you stop down for a close subject and
- * open up for separation at distance. The ramp is on the METERED FOCUS, which is
- * the only signal available that says which kind of frame this is, and it is
- * computed identically here and in the full-resolution composite so the gather
- * and the composite cannot disagree.
+ * openScale is the physical wide-open aperture of the lens (a 35 mm f/2.8 at
+ * 1080p, 27.6 px·m); the rule can only ever stop DOWN from it, never invent
+ * more. closeScale is the floor, so a frame metered almost against the lens
+ * cannot end up with a pinhole and a visibly different microcontrast from the
+ * rest of the roster.
  */
-float ironDofNearScale(float focus, float closeScale, float farScale) {
-  return mix(closeScale, farScale,
-    smoothstep(${DOF_STOP_DOWN_START_M.toFixed(1)}, ${DOF_STOP_DOWN_END_M.toFixed(1)}, focus));
+float ironDofNearScale(float focus, float closeScale, float openScale) {
+  float readable = min(${DOF_READABLE_M.toFixed(2)}, focus * ${DOF_READABLE_FRACTION.toFixed(3)});
+  // The readable plane is in front of the focus plane by construction, so this
+  // difference is positive; the max() is a divide-by-zero guard, not a case.
+  float slope = max(1.0 / max(readable, 0.05) - 1.0 / max(focus, 0.05), 1.0e-3);
+  return clamp(${DOF_READABLE_COC_PX.toFixed(2)} / slope, closeScale, openScale);
 }
 
 /**

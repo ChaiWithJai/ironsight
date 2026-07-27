@@ -135,32 +135,40 @@ const ESTABLISHING_NEAR_SCALE = 27.6;
  */
 const ESTABLISHING_MAX_NEAR = 26;
 /**
- * The stopped-down end of the establishing lens, used when the metering cross
- * comes back inside `DOF_STOP_DOWN_START_M` metres. 3.2 px·m is the same 35 mm
- * at about f/17 — a documentary aperture rather than a portrait one — which puts
- * 2.1 px on 1 m and 0.9 px on 2 m against a 4 m focus.
+ * The FLOOR the readable-plane solve is allowed to stop down to, in px·m.
  *
- * See `ironDofNearScale` in `chain.ts` for why the aperture is a function of
- * focus at all. Short version: `material_chart` and `material_nearfield` are
- * metered at 2–6 m and exist to show what a surface does at 0.3 m; shot at the
- * open end they measured as an unusable smear, which is the rubric's own
- * automatic fail on the lane whose shots they are.
+ * 3.2 px·m is the same 35 mm at about f/17 — a documentary aperture rather than
+ * a portrait one. It is no longer a second operating point selected by a ramp
+ * (see `DOF_READABLE_M` in `chain.ts` for what replaced that); it is the bottom
+ * of the clamp, and it exists so that a frame metered almost against the lens
+ * cannot solve its way to a pinhole and then read with a visibly different
+ * microcontrast from every other frame in the roster.
  */
 const ESTABLISHING_CLOSE_NEAR_SCALE = 3.2;
 /**
- * The far side, off its own plane at 60 m. The number the critic asked for was
- * "a mild ~2–3 px CoC beyond ~150 m so the crane field separates from sky", and
- * the version of this that ran off the FOCUS plane delivered it — along with
- * 1.8 px on the sea at 30 m and on every building in the mid distance, which
- * halved the measured Laplacian energy of `water_golden`'s whole lower half and
- * turned the sun glitter into a smear. A landscape does not defocus at 30 m.
+ * The far side, off its own plane. ROUND 5 BROUGHT THE PLANE IN FROM 60 m TO
+ * 34 m AND THE CEILING UP FROM 2.0 px TO 2.8 px.
  *
- *   | d      | 30 m | 60 m | 100 m | 150 m | 300 m |  ∞   |
- *   | CoC px |  0   |  0   | 0.80  | 1.20  | 1.60  | 2.00 |
+ * The 60 m plane was set to stop `water_golden` softening its own sea at 30 m,
+ * and that constraint is real — but 60 m also puts ZERO blur on everything a
+ * town-scale establishing frame actually has in its background. Measured on
+ * `level_alpha`, whose deepest plane is the colonnade at ~70 m: the old curve
+ * asked for 0.29 px there, i.e. nothing, and the frame's 70 m band came back
+ * measurably SHARPER than its 1 m band. AAA_RUBRIC's calibration note 5 is
+ * explicit that both ends are supposed to carry bokeh.
+ *
+ * 34 m is chosen against `water_golden` rather than away from it: that frame
+ * meters at 54 m, and `ironCoc` runs the far half off `max(farStart, focus)`,
+ * so its own plane is still 54 m and its sea is still untouched. The plane only
+ * comes forward on frames metered NEARER than 34 m, which is precisely the set
+ * of frames that have a foreground subject and therefore want a background.
+ *
+ *   | d      | 34 m | 50 m | 70 m | 100 m | 150 m | 300 m |  ∞   |
+ *   | CoC px |  0   | 1.29 | 2.11 | 2.80  | 2.80  | 2.80  | 2.80 |
  */
-const ESTABLISHING_FAR_SCALE = 120;
-const ESTABLISHING_FAR_START_M = 60;
-const ESTABLISHING_MAX_FAR = 2.0;
+const ESTABLISHING_FAR_SCALE = 140;
+const ESTABLISHING_FAR_START_M = 34;
+const ESTABLISHING_MAX_FAR = 2.8;
 /** Fallback focus when the metering cross finds no geometry at all (camera on sky). */
 const ESTABLISHING_FALLBACK_FOCUS_M = 30;
 

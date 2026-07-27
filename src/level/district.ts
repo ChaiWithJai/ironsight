@@ -18,7 +18,7 @@ import * as THREE from 'three';
 import { CollisionGroup, SurfaceId, type Rng } from '@/engine/types';
 import type { LevelBuild } from '@/level/build';
 import { buildBuilding, type Plot } from '@/level/building';
-import { groundSkirt, spillTongues } from '@/level/kit/ground';
+import { groundSkirt, rock, spillTongues } from '@/level/kit/ground';
 import { laundryLine, stairs } from '@/level/kit/detail';
 import {
   barrel, bollard, concreteBarrier, crateStack, lowWall, marketStall,
@@ -486,6 +486,35 @@ export function buildSquare(
   // Paving slab. Sunk 4 cm into the terrace so its edge never shows.
   b.m('sandstone').boxAt(cx, y + 0.02, cz, hx, 0.1, hz, 0.5, 0x3f);
   b.deck(cx, y + 0.12, cz, hx, hz, 0, 0);
+  /**
+   * THE SQUARE'S FLOOR IS THE SLAB, NOT THE TERRAIN — round 5, and this one bug
+   * accounts for the whole of `level_alpha`'s severity-8 finding.
+   *
+   * Everything below used to be planted at `ground(px, pz)`. `ground` is the
+   * macro terrain; the surface the player and the camera actually see inside
+   * this rectangle is the slab, 12 cm above it. So every stall pole, trestle
+   * leg, barrier and crate in ALPHA was pushed 12 cm into the paving — and with
+   * it went every one of their ground transitions, because `propFoot`'s drift
+   * mound is at most 7.5 cm tall. The round-4 critique measured exactly that:
+   * *"the two support posts enter the paving as a clean geometric intersection
+   * — no dirt buildup, no debris ring, no decal, no contact darkening; the
+   * paving tile beneath each is unmodified … present at every single ground
+   * junction in the shot."* The feet were all there. They were all underground.
+   *
+   * `paved` is the surface a prop in the square stands ON: the slab inside the
+   * rectangle, the terrain outside it, with a 0.6 m feather at the edge so a
+   * prop straddling the boundary does not step.
+   */
+  const deckY = y + 0.12;
+  const paved = (px: number, pz: number): number => {
+    const ox = Math.abs(px - cx) - hx;
+    const oz = Math.abs(pz - cz) - hz;
+    const out = Math.max(ox, oz);
+    if (out <= 0) return deckY;
+    if (out >= 0.6) return ground(px, pz);
+    const k = 1 - out / 0.6;
+    return ground(px, pz) * (1 - k) + deckY * k;
+  };
   groundSkirt(
     b,
     [
@@ -511,6 +540,103 @@ export function buildSquare(
     // terrain — sampling `ground()` here would sink the tongues under it wherever
     // the terrace falls away from the square's centre.
     spillTongues(b, ax, az, bx, bz, ix, iz, () => y + 0.12, rng, 2.6);
+  }
+
+  /**
+   * SETTLED PAVING — round 5, from `level_alpha`: *"break the wall base line
+   * further with a few displaced or missing paving slabs, a sand drift
+   * accumulating against the wall on the windward side, and 2–3 fallen blocks."*
+   *
+   * The square's floor is ONE 48 × 44 m box, so its slab lines are a material
+   * property and every one of them is perfectly flat, perfectly aligned and
+   * perfectly intact. That is fine in the middle of the square, where nothing is
+   * close enough to read it; it is not fine in the four-metre band around the
+   * edge, which is where every wall, stall and piece of cover in the frame meets
+   * it and where the camera in every ALPHA shot is standing.
+   *
+   * So: a sparse overlay of INDIVIDUAL setts in that band only. A quarter of the
+   * cells get one, and each is drawn from four states — proud, sunk, tipped, or
+   * lifted out altogether, which leaves a shallow `interior` pit with sand
+   * washed into it and its slab lying beside the hole. Sparse is deliberate: a
+   * fully re-paved band reads as a different material, whereas one settled stone
+   * in four reads as a floor that has been walked on for eighty years.
+   */
+  {
+    const band = 4.2;
+    const cell = 1.15;
+    const nx2 = Math.round((hx * 2) / cell);
+    const nz2 = Math.round((hz * 2) / cell);
+    const cisternX = cx + hx * 0.62;
+    const cisternZ = cz - hz * 0.44;
+    for (let i = 0; i < nx2; i++) {
+      for (let j = 0; j < nz2; j++) {
+        const px = cx - hx + (i + 0.5) * cell;
+        const pz = cz - hz + (j + 0.5) * cell;
+        // Edge band, plus a thinning tail inward — otherwise the band's inner
+        // limit is itself a straight line four metres in from a straight line.
+        const edge = Math.min(hx - Math.abs(px - cx), hz - Math.abs(pz - cz));
+        const keep = edge <= band ? 1 : Math.max(0, 0.4 - (edge - band) * 0.11);
+        if (!rng.bool(keep)) continue;
+        if (!rng.bool(0.27)) continue;
+        if (inKeepOut(px, pz, 1.2)) continue;
+        if (Math.hypot(px - cisternX, pz - cisternZ) < 4.2) continue;
+        const yaw = rng.range(-0.05, 0.05) + (rng.bool(0.5) ? 0 : Math.PI / 2);
+        const hw = cell * 0.5 * rng.range(0.82, 0.96);
+        const hd = cell * 0.5 * rng.range(0.6, 0.9);
+        const state = rng.next();
+        if (state < 0.11) {
+          /**
+           * Lifted: the hole, then the slab tipped up on its own edge beside it.
+           *
+           * The hole is BEDDING SAND with a dark rim, not a black rectangle. The
+           * first pass made the whole pit `interior` and it read as a hole
+           * punched through the world — a 0.09-albedo rectangle in full sun is
+           * far darker than any real void of that depth, which only loses the
+           * bottom few degrees of the sky. Rim dark, floor light, gravel in it.
+           */
+          b.m('interior').boxAt(px, deckY - 0.022, pz, hw, 0.022, hd, 1, 0x3f);
+          b.m('sand').boxAt(px, deckY - 0.028, pz, hw - 0.035, 0.026, hd - 0.035, 1, 0x3f);
+          for (let r = 0; r < 3; r++) {
+            const rs = rng.range(0.02, 0.05);
+            rock(b, rng.bool(0.5) ? 'rubble' : 'sand',
+              px + rng.range(-hw * 0.7, hw * 0.7), deckY - 0.01,
+              pz + rng.range(-hd * 0.7, hd * 0.7), rs, rs * 0.5, rs * 1.1, rng, 5);
+          }
+          const om = new THREE.Matrix4()
+            .makeTranslation(px + Math.cos(yaw) * cell * rng.range(0.8, 1.3), deckY + 0.05, pz + Math.sin(yaw) * cell * rng.range(0.8, 1.3))
+            .multiply(new THREE.Matrix4().makeRotationY(rng.range(0, Math.PI * 2)))
+            .multiply(new THREE.Matrix4().makeRotationX(rng.range(-0.5, 0.5)))
+            .multiply(new THREE.Matrix4().makeRotationZ(rng.range(-0.35, 0.35)));
+          b.xf.pushAbsolute(om);
+          const g2 = b.m('sandstone');
+          g2.setUvShift(rng.range(0, 20), rng.range(0, 20));
+          g2.chamferBox(0, 0, 0, hw, 0.05, hd, 0.018, 1, rng, 0.3);
+          g2.clearUvShift();
+          b.xf.pop();
+        } else {
+          // Proud, sunk or tipped. The dark ring is emitted first and the stone
+          // sits inside it, so a sunk stone shows more of it than a proud one —
+          // which is the correlation that makes the joint read as a joint.
+          const sunk = state < 0.48;
+          const dy = sunk ? -rng.range(0.015, 0.038) : rng.range(0.006, 0.026);
+          // The joint. 2 cm of dark either side of the stone, 6 mm proud of the
+          // slab so it is a line and not a plate — anything thicker reads as a
+          // painted border round every stone.
+          b.m('interior').boxAt(px, deckY - 0.004, pz, hw + 0.022, 0.012, hd + 0.022, 1, 0x3f);
+          const sm = new THREE.Matrix4()
+            .makeTranslation(px, deckY + dy - 0.04, pz)
+            .multiply(new THREE.Matrix4().makeRotationY(yaw))
+            .multiply(new THREE.Matrix4().makeRotationX(rng.range(-0.03, 0.03)))
+            .multiply(new THREE.Matrix4().makeRotationZ(rng.range(-0.03, 0.03)));
+          b.xf.pushAbsolute(sm);
+          const g2 = b.m('sandstone');
+          g2.setUvShift(rng.range(0, 20), rng.range(0, 20));
+          g2.chamferBox(0, 0, 0, hw, 0.05, hd, 0.016, 1, rng, 0.22);
+          g2.clearUvShift();
+          b.xf.pop();
+        }
+      }
+    }
   }
 
   // Stepped fountain / cistern head. The one thing in the square you can stand
@@ -547,7 +673,7 @@ export function buildSquare(
     const pz = cz + Math.sin(a) * r;
     if (Math.hypot(px - fx, pz - fz) < 5) continue;
     if (inKeepOut(px, pz, 1.0)) continue;
-    marketStall(b, px, ground(px, pz), pz, rng.range(0, Math.PI * 2), rng);
+    marketStall(b, px, paved(px, pz), pz, rng.range(0, Math.PI * 2), rng);
   }
   // Hard cover at the square's edges: barriers, sandbags, a wreck.
   for (let i = 0; i < 9; i++) {
@@ -555,13 +681,13 @@ export function buildSquare(
     const px = cx + Math.cos(a) * hx * 0.9;
     const pz = cz + Math.sin(a) * hz * 0.9;
     if (inKeepOut(px, pz, 2.4)) continue;
-    const g = ground(px, pz);
+    const g = paved(px, pz);
     const face = Math.atan2(cx - px, cz - pz);
     if (i % 3 === 0) sandbagWall(b, px, g, pz, face, rng.range(3, 5), 5, rng, rng.range(-0.6, 0.6));
     else if (i % 3 === 1) concreteBarrier(b, px, g, pz, face, rng);
     else crateStack(b, px, g, pz, rng);
   }
-  wreckedCar(b, cx - hx * 0.72, ground(cx - hx * 0.72, cz + hz * 0.5), cz + hz * 0.5, 0.9, rng);
+  wreckedCar(b, cx - hx * 0.72, paved(cx - hx * 0.72, cz + hz * 0.5), cz + hz * 0.5, 0.9, rng);
   // Two flights down to the street on the seaward side — the square is a
   // terrace, and the stairs are how the fight arrives in it.
   for (const sx of [-0.5, 0.35]) {

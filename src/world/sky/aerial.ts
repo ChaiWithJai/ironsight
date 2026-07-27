@@ -194,7 +194,22 @@ ${HAZE_GLSL}
     // 0.18 of the equilibrium radiance is roughly what a MID-GREY SURFACE IN FULL
     // SUN returns against the sky it stands under, so a lit surface sits at 1 and
     // the gate is inert on everything the round-2 build got right.
-    float localVis = clamp(surfLum / max(0.18 * openLum, 1e-4), 0.06, 1.0);
+    // THE FLOOR IS 0.13, NOT 0.06 — ROUND 5, SEVERITY 8. "Particulate exists
+    // only beyond ~60 m … the colonnade, plaza, stalls and rubble inside 60 m
+    // sit in perfectly clear air with zero haze or dust." The gate above is
+    // what produced that: at the 0.06 floor a shaded near surface kept
+    // 0.50 × 0.06 = 3 % of the equilibrium in-scatter, so the §3.2 blend table's
+    // 17 % at 15 m arrived as half a per cent and the near field was, measurably,
+    // clear air — which is the rubric's #1 defect.
+    //
+    // 0.13 is not a free parameter: LOOK_SPEC §2.4 puts an enclosed shadow's sky
+    // visibility at 0.15–0.30 and an open one's at 1.0, and this term is
+    // standing in for exactly that quantity. A floor UNDER the physical minimum
+    // is not conservatism, it is a wrong answer. At 0.13 an unlit colonnade
+    // interior at 8 m carries ~2 % of veil where it carried 0.4 %, which is the
+    // "few percent of contrast" the finding asks for and is still six times
+    // less than the open-sky value the round-3 finding was about.
+    float localVis = clamp(surfLum / max(0.18 * openLum, 1e-4), 0.13, 1.0);
     float buildUp = mix(IRON_HAZE_IN_NEAR * localVis, 1.0, 1.0 - exp(-dist / IRON_HAZE_IN_BUILD));
     // 'ironSkyChroma' WRAPPED IT ABOVE AND THAT IS NOT OPTIONAL. The dome's
     // marine boundary layer saturates to 'ironSkyChroma(ironHazeRadiance(dir, …))'

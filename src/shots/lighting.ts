@@ -80,14 +80,14 @@ registerShot({
 registerShot({
   name: 'light_contact',
   description:
-    'The sand drift west of the market hall at standing eye height, looking ' +
-    'north along the arcade with the light travelling 91° across the sightline. ' +
-    'Proves contact-hardening PCSS and the short- and micro-radius occlusion ' +
-    'terms on one piece of sunlit ground: grass at 1-3 m throws a razor ' +
-    'terminator, debris chips and a kerb at 4-9 m throw shadows a few ' +
-    'centimetres wide, the drum and wedges at 9-16 m throw metres of softer ' +
-    'edge, and every one of them sits in a contact band darker than its own ' +
-    'cast shadow.',
+    'Kneeling height on the sunlit paving south-east of the market hall, ' +
+    'looking south with the light travelling 90° across the sightline. Proves ' +
+    'contact-hardening PCSS across three decades of penumbra on ONE continuous ' +
+    'piece of lit ground: grass blades at 1-3 m throw razor terminators, the ' +
+    'stall poles at 4-12 m throw crisp metre-long shadows that harden to a ' +
+    'point at their own feet, the stall canopy 2.2 m up throws an 11 m soft ' +
+    'band across the middle ground, and the mosque mass at 30 m lays the widest ' +
+    'edge of all across the terrace steps.',
   frames: 28,
   setup(ctx) {
     ctx.seed(0x11a8);
@@ -121,7 +121,25 @@ registerShot({
     // put 20+ px of CoC on the near sand, which is where the sharpest contact in
     // the frame is. Above 40 the pass stays on gameplay restraint and the whole
     // ground plane resolves.
-    ctx.poseCamera([60.5, 12.35, 73.5], [58.4, 12.05, 85.3], 44);
+    // ROUND 5 RE-STAGED IT AGAIN, ONTO GROUND THAT IS ACTUALLY IN THE SUN.
+    //
+    // A debug capture of the shadow term (service.ts DEBUG_SUN_SHADOW) and of
+    // the blocker gap (DEBUG_GAP) taken at the round-4 station shows the whole
+    // frame returning visibility ~0 with a blocker gap pinned at the 40 m
+    // ceiling: the drift west of the hall is inside the umbra of the western
+    // block, 40 m up-sun, and has been since the block grew. That is the one
+    // staging fault a contact-shadow shot cannot survive, because a contact
+    // shadow needs a LIT receiver to sit on. The old frame's whole ground plane
+    // was sky-lit only, so every prop in it correctly cast nothing.
+    //
+    // This station is on the square's paving instead, one metre above the deck
+    // (11.60 + 1.0 — deliberately below eye height, so the near ground fills the
+    // lower third and the contact bands are read at a grazing angle rather than
+    // from above). Sightline azimuth 315° against a light TRAVEL azimuth of 81°
+    // is 126° — inside LOOK_SPEC 2.3's 100-150 band and near enough to 90 off
+    // the travel direction that the stall's 5:1 shadow lies across the frame
+    // rather than behind its own poles.
+    ctx.poseCamera([87.3, 12.55, 87.6], [90.5, 11.55, 67.6], 48);
   },
 });
 

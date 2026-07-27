@@ -72,7 +72,17 @@ const TILE = 20;
  * for them is a wrap/Fresnel rim term in the material rather than anything in
  * this file.
  */
-const TAA_STATIC_BLEND = 0.10;
+/*
+ * ROUND 5: 0.10 -> 0.07. Same argument as the paragraph above, taken one step
+ * further now that the capture harness runs 24-28 frames per shot rather than
+ * the 12 it did when 0.10 was chosen. At N = 8 Halton positions the four-way
+ * weight spread is 26.4 / 24.6 / 22.8 / 21.2 % against 29.1 / 26.2 / 23.6 /
+ * 21.2 % at 0.10 -- a further third off the centroid error on a static edge --
+ * and (1 - 0.07)^28 = 0.13, so a 28-frame shot is still 87 % converged. The
+ * motion ramp is untouched, so nothing about ghosting in play changes: the
+ * moment a pixel moves at all, alpha goes to 0.32.
+ */
+const TAA_STATIC_BLEND = 0.07;
 
 /*
  * SPIKE REMOVAL — an ENERGY-PRESERVING firefly filter, run on the current frame
