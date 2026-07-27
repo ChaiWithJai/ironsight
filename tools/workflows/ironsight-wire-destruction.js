@@ -1,9 +1,9 @@
 export const meta = {
-  name: 'ironsight-wire-destruction',
-  description: 'Make destruction and explosions reachable by a player: bullets damage cover, G throws a frag',
+  name: 'ironsight-wire-gameplay',
+  description: 'Connect the built-but-unreachable systems: HUD feedback, destruction, explosions, ammo economy',
   phases: [
-    { title: 'Wire', detail: 'ballistics→destruction, and a frag grenade on G' },
-    { title: 'Verify', detail: 'soak proves a player can actually cause both' },
+    { title: 'Wire', detail: 'HUD feedback, bullets→destruction, frag grenade, ammo economy, container placement' },
+    { title: 'Verify', detail: 'soak + play proves each is actually reachable' },
   ],
 }
 
@@ -25,11 +25,22 @@ mechanics. They are not:
     explosive in the loadout at all: \`src/weapons/defs/\` holds four ballistic weapons (AR, DMR,
     LMG, SMG).
 
-Both systems are complete and tested. **This is connection work, not construction.** Do not rebuild
-either one; find the seam and wire it.
+  - **NO GAMEPLAY CODE CALLS THE HUD AT ALL.** \`grep -rn "services.hud\\." src/game/ src/weapons/
+    src/ai/\` returns NOTHING. Every hitmarker, killfeed line and damage indicator in the captured
+    shots comes from a scripted demo timeline in \`src/ui/system.ts\` (look for the \`at: 0.36\`,
+    \`at: 0.4\`, \`at: 0.75\` storyboard). **The HUD is currently decorative.** A player who kills
+    someone gets no hitmarker, no killfeed line, no confirmation of any kind.
+  - There is **no resupply mechanic**. The AR carries \`magazine: 30, reserve: 180\` — 210 rounds
+    total for the whole match, and then you are permanently dry.
 
-This matters beyond the feature: the shot harness will happily photograph a system that gameplay
-cannot reach, and twelve rounds of visual critics scored a destruction frame no player can cause.
+All of these systems are complete and tested. **This is connection work, not construction.** Do not
+rebuild any of them; find the seam and wire it.
+
+THE PATTERN, said plainly, because it is the most important thing on this project right now: each
+lane built its system AND its screenshot scene, and the wiring BETWEEN lanes was never finished.
+The shot harness photographs systems, not mechanics, so twelve rounds of visual critics scored a
+destruction frame no player can cause and a killfeed no kill produces. **When you finish, the test
+is not "does it render" — it is "can a human sitting at the keyboard make this happen".**
 
 READ FIRST: ${ROOT}/README.md (see "What is NOT yet a playable mechanic"), ${ROOT}/HANDOFF.md,
 ${ROOT}/docs/OWNERSHIP.md, ${ROOT}/src/engine/types.ts.
@@ -96,6 +107,70 @@ DONE when: pressing \`G\` in-game throws a grenade that detonates, damages, brea
 right, and you can prove it — see the soak instruction below.`,
       { label: 'wire:grenade', phase: 'Wire', effort: 'high' },
     ),
+  () =>
+    agent(
+      `${CONTEXT}
+
+=== YOUR TASK: MAKE THE HUD RESPOND TO REAL GAMEPLAY ===
+You own HUD (\`src/ui/**\`). GAME owns the damage model and the sim bus — subscribe to its events,
+do not edit it.
+
+Reported by a human playing: *"reticule needs to turn red when the enemy is killed so I know"* and
+*"killfeed or HUD saying I killed someone is missing"*.
+
+The HUD's own API is complete — \`showHitmarker('body'|'head'|'armour'|'kill')\`, \`pushKillFeed\`,
+\`addDamage\`, \`addDamageDirection\` all exist and all render correctly. They are called from ONE
+place: the scripted demo timeline used to stage \`hud_combat.png\`. Nothing in gameplay calls them.
+
+Wire the real events. The sim bus already carries what you need:
+- \`'projectile.impact'\` — carries the hit, so you can raise a body/head/armour hitmarker on a real
+  hit, with the pitch/shape difference the reference HUD uses for a headshot.
+- \`'entity.killed'\` (\`{ victim, killer, weapon, headshot }\`) — raise the **kill** hitmarker when
+  \`killer\` is the local player, and push a killfeed line for every kill regardless of who made it.
+  \`GameMode.nameOf(entity)\` resolves the callsigns.
+- Damage taken by the local player → the directional damage indicator.
+
+Match \`docs/HUD_SPEC.md\` for the visual treatment — it specifies the hitmarker shapes, the kill
+variant, killfeed layout and the motion curves, measured from real frames. The demo timeline is a
+good reference for what the finished thing should look like; the point is to drive it from events
+instead of from a clock.
+
+Leave the demo timeline working — \`hud_combat\` still needs to capture.
+
+DONE when: killing a bot in-game produces a kill hitmarker AND a killfeed line, and you can prove
+it from soak counters rather than by asserting it.`,
+      { label: 'wire:hud-feedback', phase: 'Wire', effort: 'high' },
+    ),
+  () =>
+    agent(
+      `${CONTEXT}
+
+=== YOUR TASK: AMMO ECONOMY, AND CONTAINERS THAT FLOAT ===
+Two unrelated items, both reported by a human playing. You own WEAPONS (\`src/weapons/defs/**\`) for
+the first and LEVEL (\`src/level/**\`) for the second.
+
+**(a) "need more ammo, gun runs out too fast".** The AR is \`magazine: 30, reserve: 180\` — 210
+rounds for an entire match, with **no resupply mechanic anywhere in the repo**. That is not a
+tuning nit; the game becomes unplayable a few minutes in. Fix it properly:
+- Raise reserve to something appropriate per weapon class (a reference AR carries ~7 magazines).
+- Add a real **resupply**: an ammo crate at each capture point that refills reserve on proximity or
+  on \`Btn.Use\` (\`F\`, already bound and already reaching PlayerIntent). The HUD already has an
+  \`'ammo'\` gadget-marker kind, so the world-space marker is available.
+- Balance across all four weapons in \`src/weapons/defs/\` — do not fix the AR alone.
+
+**(b) Floating containers.** In a player screenshot of the BRAVO container yard, several shipping
+containers hover clearly above the terrain with daylight under them. The yard is built in
+\`src/level/landmarks/harbour.ts\` ("The container yard. Stacks are placed on a loose grid…").
+Almost certainly placed at a constant Y instead of sampled terrain height. Fix it by sampling
+\`TerrainService.heightAt()\` per stack — and then **sweep the whole level for the same mistake**,
+because anything else placed on a constant Y has the same bug and only shows up where the ground
+slopes. The rubric counts "geometry floating above the terrain" as a worldcraft defect, and the
+critics missed it because it is outside the hero-shot framings.
+
+DONE when: a full match does not run you dry, and no prop in the level floats. Capture
+\`level_bravo\` and \`level_overview\` and READ them to confirm.`,
+      { label: 'wire:ammo-and-placement', phase: 'Wire', effort: 'high' },
+    ),
 ])
 
 phase('Verify')
@@ -121,17 +196,25 @@ a player. **The entire point of this task was that a system can look built and b
 so verify reachability specifically, not existence.
 
 Their reports:
---- BULLETS ---
+--- BULLETS -> DESTRUCTION ---
 ${work[0] ?? '(no report)'}
 --- GRENADE ---
 ${work[1] ?? '(no report)'}
+--- HUD FEEDBACK ---
+${work[2] ?? '(no report)'}
+--- AMMO + PLACEMENT ---
+${work[3] ?? '(no report)'}
 
 DO THIS YOURSELF:
 1. \`npm run typecheck\`, \`npm run boundaries\`, \`npm run build\`.
-2. **Grep for the call sites.** \`DestructionService.applyDamage\` must now be called from a
-   gameplay path, not only \`src/physics/scenario.ts\`. The explosion VFX must be spawned from
-   somewhere other than \`src/vfx/scenes.ts\`. If either is still only reachable from a test
-   scenario, the task FAILED regardless of what the reports say.
+2. **Grep for the call sites — this is the core check.** All three must now be reachable from
+   GAMEPLAY, not only from a scenario or a demo timeline:
+     - \`DestructionService.applyDamage\` called from somewhere other than \`src/physics/scenario.ts\`
+     - the explosion VFX spawned from somewhere other than \`src/vfx/scenes.ts\`
+     - \`grep -rn "services.hud\\." src/game/ src/weapons/ src/ai/\` returns NON-EMPTY (it returns
+       nothing today — the HUD is decorative)
+   If any is still reachable only from a test path, that item FAILED regardless of what its report
+   says.
 3. **Drive it through the soak.** Extend/use \`./tools/soak.sh\` with a scripted intent that fires at
    a destructible wall and throws a grenade, then report: destructible chunks spawned, damage
    events, explosion events, entities damaged. Zero of any of those means it does not work.

@@ -108,6 +108,10 @@ const LOD_LADDER: readonly number[] = [6, 13, 21, 32, 46, 68];
  */
 const SPAWN_SNAP_M = 6;
 
+/** Scratch for the spawn snap. Dedicated, so it cannot alias the tick's. */
+const SPAWN_ENTRY = new THREE.Vector3();
+const SPAWN_LANDED = new THREE.Vector3();
+
 /** Ticks between perception passes at the base rate, before LOD widening. */
 function strideFor(perceptionHz: number): number {
   return Math.max(1, Math.round(60 / Math.max(1, perceptionHz)));
@@ -300,9 +304,9 @@ class IronAi implements AiService {
     // The snap is bounded: past `SPAWN_SNAP_M` the nearest walkable ground is
     // somewhere else entirely and moving him there would be worse than
     // honouring the level's intent.
-    const entry = this.scratch.copy(spawn.position);
-    if (this.nav.sample(spawn.position, SPAWN_SNAP_M, this.scratchB)) {
-      entry.copy(this.scratchB);
+    const entry = SPAWN_ENTRY.copy(spawn.position);
+    if (this.nav.sample(spawn.position, SPAWN_SNAP_M, SPAWN_LANDED)) {
+      entry.copy(SPAWN_LANDED);
       // Keep whatever clearance LEVEL asked for above its own floor. The
       // navmesh height is a plane fit and sits a few centimetres either side of
       // the collision surface; starting BELOW it puts the capsule in the ground

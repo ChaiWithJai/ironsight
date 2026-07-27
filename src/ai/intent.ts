@@ -220,6 +220,12 @@ export function writeIntent(bot: Bot, world: AiWorld): void {
   }
 
   // ---- separation ----------------------------------------------------------
+  // Two capsules that have already touched are the commonest way a squad
+  // freezes on open ground: the goal term is a unit vector and the old push was
+  // capped at 0.85, so a bot walking into a mate's back kept walking into it
+  // while the controller refused both of them. The push therefore RAMPS — soft
+  // at arm's length, dominant on contact — and two bots at the same point get a
+  // deterministic shove apart rather than being skipped.
   AVOID.set(0, 0, 0);
   for (const other of world.bots) {
     if (other === bot || !other.alive) continue;
@@ -228,12 +234,25 @@ export function writeIntent(bot: Bot, world: AiWorld): void {
     const dx = self.state.position.x - actor.state.position.x;
     const dz = self.state.position.z - actor.state.position.z;
     const d2 = dx * dx + dz * dz;
-    if (d2 > SEPARATION * SEPARATION || d2 < 1e-5) continue;
+    if (d2 > SEPARATION * SEPARATION) continue;
+    if (d2 < 1e-4) {
+      // Exactly coincident. There is no separating direction to compute, so
+      // take one from the spawn slot — fixed per bot, so the pair pushes apart
+      // instead of both choosing the same way, and no RNG is drawn inside the
+      // simulation.
+      const a = bot.slot * 2.39996323;
+      AVOID.x += Math.cos(a);
+      AVOID.z += Math.sin(a);
+      continue;
+    }
     const d = Math.sqrt(d2);
-    AVOID.x += (dx / d) * (1 - d / SEPARATION);
-    AVOID.z += (dz / d) * (1 - d / SEPARATION);
+    const crowding = 1 - d / SEPARATION;
+    AVOID.x += (dx / d) * crowding;
+    AVOID.z += (dz / d) * crowding;
   }
-  DESIRED.addScaledVector(AVOID, 0.85);
+  const crowd = Math.hypot(AVOID.x, AVOID.z);
+  // 0.85 while merely near, up to 2.6 in contact — enough to out-vote the goal.
+  DESIRED.addScaledVector(AVOID, 0.85 + Math.min(1, crowd) * 1.75);
   const desiredLength = Math.hypot(DESIRED.x, DESIRED.z);
   if (desiredLength > 1) DESIRED.multiplyScalar(1 / desiredLength);
 
