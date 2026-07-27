@@ -171,6 +171,58 @@ DONE when: a full match does not run you dry, and no prop in the level floats. C
 \`level_bravo\` and \`level_overview\` and READ them to confirm.`,
       { label: 'wire:ammo-and-placement', phase: 'Wire', effort: 'high' },
     ),
+  () =>
+    agent(
+      `${CONTEXT}
+
+=== YOUR TASK: BOTS TRAVERSE THE MAP BUT NEVER FIGHT ===
+You own AI (\`src/ai/**\`). GAME owns the mode and squad orders — read it, call into it, do not edit it.
+
+A previous pass fixed bot LOCOMOTION and it is genuinely fixed: median distance went 21 m → 183 m
+over 60 s, 0 of 18 bots stationary. **They still never fight.** A skeptical verifier measured, over
+a full 60 s 9v9:
+
+    shots 82  ·  damage events 1  ·  KILLS 0
+    Engage behaviour: 448 of 64,510 bot-ticks (0.7%). Dominant behaviour: Advance ×61,542.
+
+And found the reason — **the two teams never meet**:
+
+    After 60 s: all 9 Coalition bots at x = +63…+120
+                all 9 Insurgent bots at x = −23…−174
+                zero overlap, 90–290 m apart
+
+Every bot walks to its own team's objective and stops there. Direct instrumentation of
+\`src/ai/perception.ts\` showed enemy line-of-sight succeeded 72 times against 1,489 blocked (4.6%),
+and **the count froze between t=2400 and t=3600 — zero enemy sightings in the final 20 seconds.**
+The four bots reporting a target were all seeing the scripted player walking past, not each other.
+
+**This is squad-goal selection, not perception and not movement.** Nothing pulls a bot toward
+contact. Fix the objective logic so a Conquest match actually produces a fight:
+- Bots should contest points the ENEMY holds or is capturing, not walk to a friendly-held point and
+  idle. Read \`GameMode\`'s capture state — \`CapturePointRuntime\` carries owner, contested and progress.
+- Once a point is secured, a proportion of the squad should push toward the next contested point
+  rather than all garrisoning.
+- React to contact: gunfire, a squadmate taking damage, or a spot should pull nearby bots toward it.
+- Verify with the soak: **the pass condition is non-zero kills in 60 s of 9v9**, and Engage as a
+  meaningful share of bot-ticks rather than 0.7%.
+
+ALSO FIX: two bots remain wedged. Entities 1048828 and 1048830 end 0.8 m apart at (84.9, 11.5, 99)
+with ~65% of the match frozen, longest unbroken freeze 9.38 s. The 0–5° slope band carries 27.8% of
+all frozen ticks — **flat ground**, so this is capsule-vs-geometry or capsule-vs-capsule, not slope.
+A bot frozen 9 s in one spot is something a human immediately reads as broken.
+
+TWO WARNINGS, both from the verifier instrumenting the previous pass's claims:
+1. \`nav.raycastWalkable\`'s 99.8% success headline is an ARTIFACT. 64,800 of 64,847 calls are the
+   zero-length self-probe at \`src/ai/intent.ts:128\` (\`from === to\`), which is trivially clear.
+   The real steering probe is a rounding error in that total. Do not trust that number.
+2. \`RESUBMIT_EPSILON\` path coalescing was claimed as the centrepiece of the last fix and measured
+   \`coalesced=0\` over a full run — it never fires. Do not tune it expecting an effect.
+
+AND ONE THING NOBODY HAS LOOKED AT: **29% of path solves return \`partial\`** (184 of 624), and the
+share is RISING through the run (6/100 at t=600 → 184/624 at t=3600). Bots are increasingly
+steering along truncated corridors. Find out whether that is a budget cap or a graph defect.`,
+      { label: 'wire:bots-fight', phase: 'Wire', effort: 'high' },
+    ),
 ])
 
 phase('Verify')
@@ -204,6 +256,8 @@ ${work[1] ?? '(no report)'}
 ${work[2] ?? '(no report)'}
 --- AMMO + PLACEMENT ---
 ${work[3] ?? '(no report)'}
+--- BOTS FIGHTING ---
+${work[4] ?? '(no report)'}
 
 DO THIS YOURSELF:
 1. \`npm run typecheck\`, \`npm run boundaries\`, \`npm run build\`.
@@ -218,8 +272,11 @@ DO THIS YOURSELF:
 3. **Drive it through the soak.** Extend/use \`./tools/soak.sh\` with a scripted intent that fires at
    a destructible wall and throws a grenade, then report: destructible chunks spawned, damage
    events, explosion events, entities damaged. Zero of any of those means it does not work.
-4. Capture \`destruction_wall\` and \`vfx_explosion\` and READ the PNGs — confirm they still render
-   correctly and were not regressed.
+4. Capture \`destruction_wall\`, \`vfx_explosion\` and \`ai_firefight\` and READ the PNGs — confirm
+   they still render correctly and were not regressed.
+4b. **Bot combat pass condition: NON-ZERO KILLS in a 60 s 9v9 soak.** The previous pass produced
+   82 shots / 1 damage / 0 kills and was correctly judged not-fixed. Do not accept "bots move" as
+   "bots fight" — check the kill count and the Engage share of bot-ticks.
 5. Confirm the README's "What is NOT yet a playable mechanic" table is now accurate — update it if
    these are genuinely reachable, and leave it alone if they are not.
 
