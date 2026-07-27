@@ -3,6 +3,44 @@
 This is the standard the visual critics judge against. It exists so "make it look AAA" becomes a
 list of falsifiable observations about a specific PNG rather than a matter of taste.
 
+## The instrument drifts. Score the gap, not the frame.
+
+**Read this before trusting any number in this document.**
+
+Absolute critic scores are not stable across rounds. Measured, laggard-loop round 1: three hero
+shots whose code was not touched by that round — `light_cascades`, `hud_full`, `sky_golden` — moved
+**−1.90, −1.76 and −1.42**. `light_cascades` was verified pixel-identical by eye. Nothing about the
+frames changed; the critics did.
+
+That drift (~1.7) is **larger than the entire per-round signal** (+0.14 to +0.73 in the preceding
+rounds). Any conclusion drawn from comparing absolute scores between rounds is therefore
+unsupported, including several drawn earlier in this project.
+
+The likely cause is instruction sensitivity. When the 6.0 interim milestone was adopted, critics
+were warned in strong terms against grade inflation ("a critic who inflates a 4.9 to a 6.1 has
+destroyed the only instrument this project has"). That warning appears to have biased them
+systematically downward — a caution intended to protect the measurement distorted it instead.
+
+### The fix: a blind calibration anchor, and a differential score
+
+Every critic scores **both panels of the blind A/B sheet** on all seven axes — ours and the real
+Battlefield frame — without knowing which is which. Three things follow:
+
+1. **`delta = score(ours) − score(reference)`** is the metric that matters. A harsh critic marks
+   both panels down and the delta survives; a lenient one marks both up and the delta survives.
+   It is robust to exactly the drift measured above.
+2. **The reference panel is a calibration check.** A real shipped AAA frame should land ≈8.5–9.5.
+   A critic who scores it 6.5 has demonstrated their scale is compressed, and their absolute
+   numbers can be discarded while their delta and their findings are kept.
+3. **Scoring both forces like-for-like reasoning.** A critic who has just scored a real frame's
+   materials at 9.0 cannot casually award ours 7.0 without being able to say what the gap is.
+
+Report `delta` as the headline. Target: **delta ≥ −2.0** for the interim milestone, **delta ≥ −0.5**
+for the project bar. Absolute scores stay useful *within* a round for ranking shots against each
+other; they are not comparable *between* rounds.
+
+---
+
 ## How a critic must work
 
 1. **Look at the image before reading anything about it.** Form a first impression cold.
