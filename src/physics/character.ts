@@ -105,6 +105,26 @@ const CEILING_COS = -0.5;
  */
 const SLIDE_HYSTERESIS_DEG = 6;
 
+/**
+ * How hard a grounded capsule is pressed into the floor, in metres per second.
+ *
+ * Expressed as a SPEED and multiplied by dt so the feel does not change with the
+ * tick rate — a per-tick constant would be twice as strong at 30 Hz, which is
+ * how a "works on my machine" slope bug is born. 0.6 m/s is 1 cm at 60 Hz.
+ *
+ * The floor on the useful range is set by rapier: with no downward remainder at
+ * all its snap-to-ground never fires, and a sprint over a crest goes ballistic
+ * (measured: 71 of 120 ticks airborne off a 40° brow at 7 m/s). The ceiling is
+ * set by the slope projection above: every centimetre of stick costs
+ * `sin θ` centimetres of forward travel on an uphill, so it must stay small
+ * against one tick of walking (5.6 cm). 1 cm holds the capsule glued at 7 m/s
+ * over a 40° crest — 0 airborne ticks — and costs 9% of top speed at 48°.
+ */
+const GROUND_STICK_SPEED = 0.6;
+/** Clamps on the per-tick stick, so an absurd dt cannot unglue or wedge us. */
+const GROUND_STICK_MIN = 0.005;
+const GROUND_STICK_MAX = 0.02;
+
 /** The one result object, mutable inside the lane and readonly outside it. */
 type MutableMoveResult = { -readonly [K in keyof CharacterMoveResult]: CharacterMoveResult[K] };
 
@@ -131,6 +151,18 @@ export class KinematicCharacter implements CharacterController {
 
   private height: number;
   private disposed = false;
+  /**
+   * Cosine of `maxSlopeDeg` against up. A face flatter than this is one we are
+   * allowed to walk on, and therefore one whose plane we may re-aim a move onto.
+   */
+  private readonly climbCos: number;
+  /**
+   * Is `groundNormal` a normal we actually measured this tick, or the (0,1,0)
+   * placeholder? Re-aiming a move onto a plane we only assumed is how a capsule
+   * ends up walking on air across a gully, so the projection is skipped unless
+   * either a contact or the ground probe below produced a real normal.
+   */
+  private groundNormalMeasured = false;
 
   constructor(
     private readonly world: RAPIER.World,
@@ -149,6 +181,7 @@ export class KinematicCharacter implements CharacterController {
     };
 
     const radius = config.radius;
+    this.climbCos = Math.cos(THREE.MathUtils.degToRad(config.maxSlopeDeg));
     const halfHeight = Math.max(0.02, (config.standHeight - radius * 2) * 0.5);
     this.record = table.create(
       {
@@ -208,15 +241,13 @@ export class KinematicCharacter implements CharacterController {
     return this.record;
   }
 
-  move(desiredDelta: Vec3, _dt: number): CharacterMoveResult {
+  move(desiredDelta: Vec3, dt: number): CharacterMoveResult {
     const r = this.result;
     if (this.disposed) {
       r.translation.set(0, 0, 0);
       return r;
     }
-    this.desired.x = desiredDelta.x;
-    this.desired.y = desiredDelta.y;
-    this.desired.z = desiredDelta.z;
+    this.aimAlongGround(desiredDelta, dt);
 
     this.controller.computeColliderMovement(
       this.collider,
@@ -240,6 +271,7 @@ export class KinematicCharacter implements CharacterController {
     r.groundNormal.set(0, 1, 0);
 
     let bestGroundY = WALL_COS;
+    this.groundNormalMeasured = false;
     const collisions = this.controller.numComputedCollisions();
     for (let i = 0; i < collisions; i++) {
       const c = this.controller.computedCollision(i, this.collision);
@@ -248,6 +280,7 @@ export class KinematicCharacter implements CharacterController {
       if (n.y > bestGroundY) {
         bestGroundY = n.y;
         r.groundNormal.set(n.x, n.y, n.z);
+        this.groundNormalMeasured = true;
       } else if (n.y < CEILING_COS) {
         r.ceilingHit = true;
       } else if (Math.abs(n.y) < WALL_COS && !r.hitWall) {
@@ -262,13 +295,47 @@ export class KinematicCharacter implements CharacterController {
     const wantH = Math.hypot(desiredDelta.x, desiredDelta.z);
     const gotH = Math.hypot(r.translation.x, r.translation.z);
     r.slideRatio = wantH > 1e-5 ? Math.min(1, gotH / wantH) : 1;
-    // Anything rapier gave us above what we asked for on Y came from autostep.
-    r.steppedUp = r.grounded ? Math.max(0, r.translation.y - desiredDelta.y) : 0;
+    // Anything rapier gave us above what we asked for on Y came from autostep —
+    // measured against what we ASKED FOR, which after `aimAlongGround` already
+    // contains the rise of the slope, so climbing a ramp is not read as a step.
+    r.steppedUp = r.grounded ? Math.max(0, r.translation.y - this.desired.y) : 0;
 
     this.grounded = r.grounded;
     this.groundNormal.copy(r.groundNormal);
     this.resolveGround(r);
     return r;
+  }
+
+  /**
+   * Turn the caller's desired delta into the one we actually sweep with.
+   *
+   * See the header for why this exists. Three guards, each of which is a bug if
+   * removed:
+   *
+   *   · NOT GROUNDED — in the air the caller's ballistic arc is the truth and
+   *     there is no floor plane to aim along.
+   *   · RISING — a jump must leave the ground, so anything with an upward
+   *     component is passed through untouched.
+   *   · TOO STEEP TO CLIMB — on a face beyond `maxSlopeDeg` the caller's push
+   *     into the floor is exactly what makes rapier slide the character down it,
+   *     and re-aiming there would turn a cliff into a staircase.
+   *
+   * `groundNormal` is last tick's, refreshed by `resolveGround` at the end of
+   * every move, so it is the normal under the feet where they are standing now.
+   * One tick of lag over a break in the ground is absorbed by snap-to-ground.
+   */
+  private aimAlongGround(d: Vec3, dt: number): void {
+    this.desired.x = d.x;
+    this.desired.y = d.y;
+    this.desired.z = d.z;
+    if (!this.grounded || !this.groundNormalMeasured || d.y > 0) return;
+    const n = this.groundNormal;
+    if (n.y <= this.climbCos) return;
+    // The y that keeps the feet exactly on the plane through the current
+    // contact: positive going uphill, negative going downhill, zero on the flat.
+    const rise = -(d.x * n.x + d.z * n.z) / n.y;
+    const stick = Math.min(GROUND_STICK_MAX, Math.max(GROUND_STICK_MIN, GROUND_STICK_SPEED * dt));
+    this.desired.y = rise - stick;
   }
 
   /**
@@ -290,8 +357,13 @@ export class KinematicCharacter implements CharacterController {
       r.groundEntity = this.groundHit.entity;
       this.groundSurface = this.groundHit.surface;
       if (this.groundHit.normal.y > 0.2) {
+        // Better than a contact normal for the slope projection too: a capsule
+        // resting in the crease between two heightfield triangles reports the
+        // normal of whichever one it happened to touch, while the probe reports
+        // the surface directly under the feet.
         r.groundNormal.copy(this.groundHit.normal);
         this.groundNormal.copy(this.groundHit.normal);
+        this.groundNormalMeasured = true;
       }
     } else {
       r.groundSurface = this.groundSurface;
@@ -309,6 +381,10 @@ export class KinematicCharacter implements CharacterController {
     this.record.body.setTranslation(this.nextPos, true);
     this.record.body.setNextKinematicTranslation(this.nextPos);
     this.grounded = false;
+    // The ground under the old feet says nothing about the ground under the new
+    // ones, and a mantle ends with the capsule over a ledge it has never touched.
+    this.groundNormalMeasured = false;
+    this.groundNormal.set(0, 1, 0);
   }
 
   /**

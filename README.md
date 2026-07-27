@@ -38,8 +38,6 @@ canvas to lock the pointer**. `Esc` releases it.
 | **Reload** | `R` |
 | **Lean left / right** | `Q` / `E` |
 | **Use / interact** | `F` |
-| **Melee** | `V` |
-| **Grenade** | `G` |
 | **Swap weapon** | `X`, or `1`–`9` |
 | **Fire mode** | `B` |
 | **Spot** | `T` |
@@ -47,6 +45,31 @@ canvas to lock the pointer**. `Esc` releases it.
 | **Spawn / deploy menu** | `M` |
 
 Gamepad is supported on the standard W3C mapping.
+
+#### Bound but NOT yet implemented
+
+These keys are in the binding table and reach the input layer, but nothing consumes them yet.
+Pressing them does nothing:
+
+| | |
+|---|---|
+| **Grenade** `G` | No explosive exists in the loadout. All four weapons are ballistic. |
+| **Melee** `V` | Not wired to the damage model. |
+
+### What is NOT yet a playable mechanic
+
+Some systems are fully built and visible in the captured shots, but **cannot currently be triggered
+by a player**. Being explicit so the screenshots do not oversell the game:
+
+| System | Built? | Reachable in play? |
+|---|---|---|
+| Bullet impacts, decals, surface-correct debris | yes | **yes** |
+| Destructible cover (Voronoi fracture, debris, dust) | yes | **no** — `applyDamage()` is only called from a test scenario; shooting a wall does nothing |
+| Explosions (fireball, pressure ring, debris, smoke column) | yes | **no** — only fired from a VFX demo scene |
+| Bot combat | yes | **partly** — bots spawn and are wired, but currently wedge on collision and never acquire a target |
+
+Connecting the first two is queued work: the systems exist and are tested, what is missing is the
+wiring from a bullet or a grenade to `DestructionService.applyDamage()`.
 
 ### The map — HARBOUR REACH
 

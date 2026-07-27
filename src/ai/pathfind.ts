@@ -28,7 +28,19 @@ export interface PathCorner {
 export type PathStatus = 'queued' | 'running' | 'ready' | 'failed';
 
 export class PathRequest {
-  status: PathStatus = 'queued';
+  /**
+   * `'failed'`, not `'queued'` — a request nobody has submitted is not waiting
+   * for anything, and a caller that reads the initial value as "a route is
+   * coming" will sit forever waiting for a search that was never started.
+   */
+  status: PathStatus = 'failed';
+  /**
+   * Owned by `PathQueue`: true between `submit` and the moment the queue
+   * finishes, fails or cancels this request. Callers ask THIS rather than
+   * inferring it from `status`, because the status a request happens to be
+   * holding is not the same question as whether the queue has it.
+   */
+  enqueued = false;
   readonly from = new THREE.Vector3();
   readonly to = new THREE.Vector3();
   readonly corners: PathCorner[] = [];
@@ -38,11 +50,22 @@ export class PathRequest {
   /** Set when the goal polygon was unreachable and the path is a best effort. */
   partial = false;
 
+  /**
+   * Re-aim this request at a new destination.
+   *
+   * `cornerCount` is DELIBERATELY LEFT ALONE. The corners belong to the last
+   * solve and stay valid until `extract` overwrites them, and this class's
+   * whole reason to exist is that "the bot keeps following its previous
+   * corridor until the new one lands" (see the file header). Zeroing it here
+   * made that sentence false: every re-path blanked the corridor and left the
+   * bot with nothing to walk along for the entire time the queue took to reach
+   * it. `generation` is what tells a reader the corridor is from the previous
+   * destination.
+   */
   reset(from: Vec3, to: Vec3): void {
     this.from.copy(from);
     this.to.copy(to);
     this.status = 'queued';
-    this.cornerCount = 0;
     this.partial = false;
     this.generation++;
   }
@@ -117,10 +140,6 @@ function triarea2(ax: number, az: number, bx: number, bz: number, cx: number, cz
 }
 
 /**
- * One reusable A* workspace. `stamp` is a generation counter so a search never
- * has to clear a 6 000-entry array it will touch forty cells of.
- */
-/**
  * How much the heuristic outweighs the cost so far. 1.0 is textbook A* and is
  * the wrong trade for a game navmesh: a 51 k-triangle town has thousands of
  * routes within a few metres of optimal, and plain A* expands most of them
@@ -143,6 +162,10 @@ const HEURISTIC_WEIGHT = 1.6;
  */
 const MAX_NODES_PER_SEARCH = 9000;
 
+/**
+ * One reusable A* workspace. `stamp` is a generation counter so a search never
+ * has to clear a 6 000-entry array it will touch forty cells of.
+ */
 export class NavSearch {
   private g = new Float32Array(0);
   private cameFrom = new Int32Array(0);
@@ -242,6 +265,7 @@ export class NavSearch {
       for (let e = g.adjStart[current]; e < end; e++) {
         const next = g.adjPoly[e];
         if ((g.flags[next] & NavFlag.Blocked) !== 0) continue;
+        if (this.closed[next] === this.generation) continue;
         const dx = g.centres[next * 3] - cx;
         const dy = g.centres[next * 3 + 1] - cy;
         const dz = g.centres[next * 3 + 2] - cz;
@@ -256,10 +280,15 @@ export class NavSearch {
           this.bestH = h;
           this.bestPoly = next;
         }
-        this.heap.push(next, tentative + h);
+        this.heap.push(next, tentative + h * HEURISTIC_WEIGHT);
       }
     }
     return false;
+  }
+
+  /** Node expansions spent so far by the search in progress. */
+  get expansions(): number {
+    return this.expanded;
   }
 
   /** True when the search reached the requested polygon rather than a fallback. */
@@ -455,6 +484,13 @@ function funnel(
  * workspace; requests are served oldest-first so a bot cannot starve behind a
  * neighbour that re-paths every tick.
  */
+/**
+ * How far a goal must move before a re-submit is worth restarting the search
+ * for. Below this the corridor already being computed lands within a stride of
+ * the new goal and the local steer covers the rest.
+ */
+const RESUBMIT_EPSILON = 6;
+
 export class PathQueue {
   private readonly search = new NavSearch();
   private readonly pending: PathRequest[] = [];
@@ -463,37 +499,44 @@ export class PathQueue {
   /** Diagnostics for the debug overlay. */
   searchesCompleted = 0;
   nodesLastTick = 0;
+  /** Routes asked for, routes that landed on a search already in flight. */
   submits = 0;
+  coalesced = 0;
+  /** Requests whose start or goal had no polygon under it at all. */
   startFails = 0;
-  readyResults = 0;
-  failedResults = 0;
+  /** Solves that ran out of graph or of budget and returned a best effort. */
   partialResults = 0;
-  droppedNoGraph = 0;
-  nodesThisSearch = 0;
-  readonly searchNodes: number[] = [];
-  readonly searchReached: number[] = [];
-  readonly searchLen: number[] = [];
-  nodesTotal = 0;
-  cancelledActive = 0;
-  wastedNodes = 0;
-  ticksIdle = 0;
-  ticksStarved = 0;
-  stepCalls = 0;
 
   setGraph(graph: NavGraph | null): void {
     this.graph = graph;
-    this.pending.length = 0;
-    this.active = null;
+    this.clear();
     if (graph) this.search.attach(graph);
   }
 
+  /**
+   * Queue a route request.
+   *
+   * RESUBMITTING A REQUEST THAT IS ALREADY BEING SERVED THROWS AWAY THE SEARCH.
+   * That is not a theoretical cost. Measured over 30 s with 18 bots before this
+   * guard existed: 305 submits, 115 of them landed on the request that was
+   * mid-search, and **74.5% of the lane's entire A* budget** — 3.03 M of 4.07 M
+   * node expansions — went into work that was discarded and restarted from the
+   * back of the queue. Only 92 routes ever completed, so 89% of all bot-ticks
+   * held a `queued` path, no corridor, and nothing to walk along. That is the
+   * whole of "my teammates aren't moving".
+   *
+   * So a re-submit for materially the same destination is now a NO-OP: the
+   * search already running is the answer to it. Only a goal that has genuinely
+   * moved is worth paying for again.
+   */
   submit(request: PathRequest, from: Vec3, to: Vec3): void {
     this.submits++;
-    if (this.active === request) {
-      this.cancelledActive++;
-      this.wastedNodes += this.nodesThisSearch;
+    if (request.enqueued && request.to.distanceToSquared(to) < RESUBMIT_EPSILON * RESUBMIT_EPSILON) {
+      this.coalesced++;
+      return;
     }
     request.reset(from, to);
+    request.enqueued = true;
     if (this.active === request) this.active = null;
     const at = this.pending.indexOf(request);
     if (at >= 0) this.pending.splice(at, 1);
@@ -504,9 +547,12 @@ export class PathQueue {
     const at = this.pending.indexOf(request);
     if (at >= 0) this.pending.splice(at, 1);
     if (this.active === request) this.active = null;
+    request.enqueued = false;
   }
 
   clear(): void {
+    for (const r of this.pending) r.enqueued = false;
+    if (this.active) this.active.enqueued = false;
     this.pending.length = 0;
     this.active = null;
   }
@@ -524,52 +570,49 @@ export class PathQueue {
     const g = this.graph;
     this.nodesLastTick = 0;
     if (!g) {
-      for (const r of this.pending) r.status = 'failed';
-      this.droppedNoGraph += this.pending.length;
+      for (const r of this.pending) {
+        r.status = 'failed';
+        r.enqueued = false;
+      }
       this.pending.length = 0;
       return;
     }
-    this.stepCalls++;
-    if (!this.active && this.pending.length === 0) this.ticksIdle++;
     let budget = nodeBudget;
     let starts = 0;
     while (budget > 0) {
       if (!this.active) {
-        if (starts >= maxStarts && this.pending.length > 0) this.ticksStarved++;
         if (this.pending.length === 0 || starts >= maxStarts) return;
         const next = this.pending.shift() as PathRequest;
         const startPoly = nearestPoly(g, next.from);
         const goalPoly = nearestPoly(g, next.to);
         if (startPoly < 0 || goalPoly < 0) {
           next.status = 'failed';
+          next.enqueued = false;
           this.startFails++;
           continue;
         }
         this.search.begin(g, startPoly, goalPoly, next.to);
-        this.nodesThisSearch = 0;
         next.status = 'running';
         this.active = next;
         starts++;
       }
       const slice = Math.min(budget, 512);
+      const before = this.search.expansions;
       const done = this.search.step(slice);
-      budget -= slice;
-      this.nodesLastTick += slice;
-      this.nodesThisSearch += slice;
-      this.nodesTotal += slice;
+      // Charge what was actually EXPANDED, not what was offered. A search that
+      // finishes three nodes into a 512-node slice used to be billed the whole
+      // slice, which silently threw away most of a tick's budget whenever the
+      // queue was short — the opposite of the behaviour the budget exists for.
+      const spent = Math.max(1, this.search.expansions - before);
+      budget -= spent;
+      this.nodesLastTick += spent;
       if (done) {
         const request = this.active;
         request.cornerCount = this.search.extract(request.from, request.to, request.corners, maxCorners);
         request.partial = !this.search.reachedGoal;
         request.status = request.cornerCount > 0 ? 'ready' : 'failed';
-        if (request.status === 'ready') this.readyResults++;
-        else this.failedResults++;
+        request.enqueued = false;
         if (request.partial) this.partialResults++;
-        if (this.searchNodes.length < 400) {
-          this.searchNodes.push(this.nodesThisSearch);
-          this.searchReached.push(this.search.reachedGoal ? 1 : 0);
-          this.searchLen.push(Math.round(request.from.distanceTo(request.to)));
-        }
         this.searchesCompleted++;
         this.active = null;
       }

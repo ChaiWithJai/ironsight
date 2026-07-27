@@ -262,18 +262,29 @@ export class Brain {
 
     bot.goalKind = kind as Bot['goalKind'];
     const moved = previous.distanceToSquared(bot.goal);
+    // A request that is queued or running is ALREADY the answer to "where do I
+    // go". Asking again while it is in flight is what turned this queue into a
+    // treadmill: 18 bots re-asking on a 1.4 s timer, each re-ask discarding a
+    // half-finished search, so almost nothing ever completed and almost no bot
+    // ever had a corridor. Only a goal that has genuinely moved elsewhere is
+    // worth interrupting for.
+    const inFlight = bot.path.enqueued;
+    const goalMovedFar = moved > 64;
     const needsPath =
-      bot.path.status === 'failed' ||
-      bot.pathGeneration !== bot.path.generation ||
-      moved > 9 ||
-      world.time > bot.repathAt;
+      (!inFlight || goalMovedFar) &&
+      (bot.path.status === 'failed' ||
+        bot.pathGeneration !== bot.path.generation ||
+        moved > 9 ||
+        world.time > bot.repathAt);
     if (needsPath && bot.goal.lengthSq() > 0) {
       // Re-path is rate limited per bot: a squad that all re-path on the same
       // tick is exactly the spike the queue budget exists to smear out.
       bot.repathAt = world.time + 1.4 + (bot.slot % 7) * 0.08;
       world.nav.submitPath(bot.path, self.state.position, bot.goal);
       bot.pathGeneration = bot.path.generation;
-      bot.corridorIndex = 0;
+      // NOT `corridorIndex = 0`. `intent.ts` rewinds the corridor when the new
+      // solve actually lands; until then the old corners are still the best
+      // route this bot has.
     }
   }
 

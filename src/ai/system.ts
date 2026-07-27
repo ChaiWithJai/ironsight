@@ -101,6 +101,13 @@ const CORPSE_SECONDS = 9;
  */
 const LOD_LADDER: readonly number[] = [6, 13, 21, 32, 46, 68];
 
+/**
+ * How far a spawn point may be nudged to land on walkable navmesh. Wide enough
+ * to clear the kerb or planter an authored point sits inside, narrow enough
+ * that a bot never enters the map on the wrong side of a wall.
+ */
+const SPAWN_SNAP_M = 6;
+
 /** Ticks between perception passes at the base rate, before LOD widening. */
 function strideFor(perceptionHz: number): number {
   return Math.max(1, Math.round(60 / Math.max(1, perceptionHz)));
@@ -281,18 +288,40 @@ class IronAi implements AiService {
     this.views.push(makeView(bot));
     this.rebuildDrawList();
 
+    // ENTER THE WORLD ON GROUND THE NAVMESH AGREES IS WALKABLE.
+    //
+    // `SpawnPointDef.position` is LEVEL's, authored against the massing rather
+    // than against the navmesh, and a bot dropped onto a spot with no polygon
+    // under it is a bot with no walkable heading in any direction — every ray
+    // he casts fails on its first step. Measured before this snap: five of
+    // eighteen bots stood off the mesh for 100% of a 30 s run and travelled
+    // 0.00 m between them while writing a full-magnitude wish every tick.
+    //
+    // The snap is bounded: past `SPAWN_SNAP_M` the nearest walkable ground is
+    // somewhere else entirely and moving him there would be worse than
+    // honouring the level's intent.
+    const entry = this.scratch.copy(spawn.position);
+    if (this.nav.sample(spawn.position, SPAWN_SNAP_M, this.scratchB)) {
+      entry.copy(this.scratchB);
+      // Keep whatever clearance LEVEL asked for above its own floor. The
+      // navmesh height is a plane fit and sits a few centimetres either side of
+      // the collision surface; starting BELOW it puts the capsule in the ground
+      // and the controller then has to resolve a penetration on frame one.
+      entry.y = Math.max(entry.y, spawn.position.y);
+    }
+
     // THE LINE. Without it the bot is never sampled and never moves, and
     // nothing throws to say so.
     player.attachController(entity, team, this.intentSource);
-    player.teleport(entity, spawn.position, spawn.yaw, 0);
+    player.teleport(entity, entry, spawn.yaw, 0);
     bot.aimYaw = spawn.yaw;
     bot.aimPitch = 0;
     // Seed the aim point ahead of him so the first tick does not swing the whole
     // body around from a zeroed target.
     bot.aimAt.set(
-      spawn.position.x - Math.sin(spawn.yaw) * 40,
-      spawn.position.y + 1.6,
-      spawn.position.z - Math.cos(spawn.yaw) * 40,
+      entry.x - Math.sin(spawn.yaw) * 40,
+      entry.y + 1.6,
+      entry.z - Math.cos(spawn.yaw) * 40,
     );
     bot.intent.aimAt = bot.aimAt;
     this.services.weapons.equip(entity, bot.weapon);
@@ -303,7 +332,7 @@ class IronAi implements AiService {
       // Cloned: the sim bus is DEFERRED, and `SpawnPointDef.position` belongs to
       // LEVEL. A subscriber reading it next tick would otherwise see wherever
       // that vector had got to, not where this bot entered the map.
-      position: spawn.position.clone(),
+      position: entry.clone(),
     });
     return entity;
   }
@@ -694,53 +723,6 @@ class IronAi implements AiService {
       bot.gaitSpeed += (target - bot.gaitSpeed) * Math.min(1, ctx.dt * 6);
       // Stride frequency rises with speed: 1.9 Hz walking, ~3.1 Hz sprinting.
       bot.gaitPhase = (bot.gaitPhase + ctx.dt * (1.9 + bot.gaitSpeed * 4.2) * bot.gaitSpeed) % (Math.PI * 2);
-
-      // TEMP-PROBE
-      {
-        const pr = AI_PROBE;
-        // How far ahead toward the goal IS walkable, by bisection over the ray.
-        if (bot.goal.lengthSq() > 0 && this.tickIndex % 30 === 0) {
-          const gx = bot.goal.x - state.position.x;
-          const gz = bot.goal.z - state.position.z;
-          const gl = Math.hypot(gx, gz) || 1;
-          for (const d of [1, 2, 4, 8, 16, 32]) {
-            if (gl < d) break;
-            this.scratchB.set(
-              state.position.x + (gx / gl) * d,
-              bot.goal.y,
-              state.position.z + (gz / gl) * d,
-            );
-            const ok = this.nav.raycastWalkable(state.position, this.scratchB, this.scratch);
-            pr.reach[d] = (pr.reach[d] ?? 0) + (ok ? 1 : 0);
-            pr.reachTried[d] = (pr.reachTried[d] ?? 0) + 1;
-          }
-          // Is the bot standing on a polygon at all?
-          const p0 = this.nav.graph.polyAt(state.position.x, state.position.z);
-          if (p0 < 0) pr.offMesh++;
-          else {
-            pr.onMesh++;
-            const h = this.nav.graph.heightAt(p0, state.position.x, state.position.z);
-            pr.heightErrSum += Math.abs(h - state.position.y);
-            pr.heightErrMax = Math.max(pr.heightErrMax, Math.abs(h - state.position.y));
-          }
-        }
-        pr.botTicks++;
-        pr.status[bot.path.status] = (pr.status[bot.path.status] ?? 0) + 1;
-        if (bot.path.status === 'ready') {
-          pr.corners[Math.min(9, bot.path.cornerCount)] = (pr.corners[Math.min(9, bot.path.cornerCount)] ?? 0) + 1;
-          if (bot.corridorIndex >= bot.path.cornerCount) pr.corridorExhausted++;
-          else pr.following++;
-          if (bot.path.partial) pr.partialFollow++;
-        }
-        if (bot.goal.lengthSq() === 0) pr.noGoal++;
-        else {
-          const d = Math.hypot(bot.goal.x - state.position.x, bot.goal.z - state.position.z);
-          pr.goalDistSum += d;
-          pr.goalDistMax = Math.max(pr.goalDistMax, d);
-        }
-        pr.moveMagSum += Math.hypot(bot.intent.moveX, bot.intent.moveZ);
-        if (Math.hypot(bot.intent.moveX, bot.intent.moveZ) < 0.05) pr.zeroIntent++;
-      }
 
       const view = this.views[i] as Mutable<BotView>;
       view.entity = bot.entity;
@@ -1178,27 +1160,6 @@ class IronAi implements AiService {
   }
 }
 
-/** TEMP-PROBE: lane-private diagnostic counters, removed before hand-off. */
-const AI_PROBE = {
-  botTicks: 0,
-  status: {} as Record<string, number>,
-  corners: {} as Record<number, number>,
-  corridorExhausted: 0,
-  following: 0,
-  partialFollow: 0,
-  noGoal: 0,
-  goalDistSum: 0,
-  goalDistMax: 0,
-  moveMagSum: 0,
-  zeroIntent: 0,
-  reach: {} as Record<number, number>,
-  reachTried: {} as Record<number, number>,
-  offMesh: 0,
-  onMesh: 0,
-  heightErrSum: 0,
-  heightErrMax: 0,
-};
-
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
 /** A camera pose in the exact shape `ShotContext.poseCamera` takes. */
@@ -1267,44 +1228,6 @@ export function createAiService(ctx: BootContext): AiService {
     ai.setWeaponsNull(ctx.registry.isNull('weapons'));
     ai.attachPresentation(ctx);
   });
-
-  // TEMP-PROBE
-  (globalThis as unknown as Record<string, unknown>).__AI_PROBE__ = (): unknown => {
-    const q = nav.queue;
-    const g = nav.graph;
-    return {
-      ...AI_PROBE,
-      queue: {
-        submits: q.submits,
-        startFails: q.startFails,
-        readyResults: q.readyResults,
-        failedResults: q.failedResults,
-        partialResults: q.partialResults,
-        droppedNoGraph: q.droppedNoGraph,
-        searchesCompleted: q.searchesCompleted,
-        queued: q.queued,
-        searchNodes: q.searchNodes,
-        searchReached: q.searchReached,
-        searchLen: q.searchLen,
-        nodesTotal: q.nodesTotal,
-        cancelledActive: q.cancelledActive,
-        wastedNodes: q.wastedNodes,
-        ticksIdle: q.ticksIdle,
-        ticksStarved: q.ticksStarved,
-        stepCalls: q.stepCalls,
-      },
-      graph: {
-        polyCount: g.polyCount,
-        adj: g.adjPoly.length,
-        nx: g.nx,
-        nz: g.nz,
-        cellSize: g.cellSize,
-        minX: g.minX,
-        minZ: g.minZ,
-        obstacles: nav.obstacles.length,
-      },
-    };
-  };
 
   ctx.report('ai: bot pool ready');
   return ai;

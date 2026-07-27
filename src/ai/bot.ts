@@ -65,6 +65,15 @@ export class Bot {
   readonly path = new PathRequest();
   pathGeneration = -1;
   corridorIndex = 0;
+  /**
+   * Which `path.generation` `corridorIndex` is counting through.
+   *
+   * The corridor is only rewound when a NEW solve lands, never when one is
+   * requested: a bot that blanked its corridor on every re-path spent the
+   * whole service time — up to a second and a half — with nothing to walk
+   * along, which is most of what "the bots don't move" looked like.
+   */
+  corridorGeneration = -1;
   readonly goal = new THREE.Vector3();
   goalKind: GoalKind = 'idle';
   goalStale = 0;
@@ -203,6 +212,7 @@ export class Bot {
     this.coverIndex = -1;
     this.exposure = 0;
     this.corridorIndex = 0;
+    this.corridorGeneration = -1;
     this.pathGeneration = -1;
     this.path.status = 'failed';
     this.path.cornerCount = 0;
