@@ -158,6 +158,36 @@ const RULES = [
  * that are interpolated bare into a GLSL literal while holding a whole value.
  * Route them through `.toFixed(n)`.
  */
+/**
+ * GLSL ES 3.00 reserves a pile of words that read like perfectly ordinary
+ * variable names. `patch` is a tessellation qualifier; `sample`, `filter`,
+ * `input`, `output`, `common`, `active` and friends are all reserved for future
+ * use. three.js compiles built-in materials as `#version 300 es`, so a local
+ * called `patch` produces:
+ *
+ *     ERROR: 0:3046: 'patch' : Illegal use of reserved word
+ *
+ * ...at a line number in the FULLY ASSEMBLED shader, which bears no relation to
+ * any line in our source. The material then fails to compile and whatever it was
+ * drawing silently disappears.
+ *
+ * Only flags DECLARATIONS (`float patch = …`), not uses of the word in prose or
+ * in a longer identifier, so `patchMask` and a comment about "patch masks" are
+ * both fine.
+ */
+const GLSL_RESERVED = [
+  'patch', 'sample', 'subroutine', 'resource', 'filter', 'common', 'partition',
+  'active', 'superp', 'input', 'output', 'asm', 'class', 'union', 'enum',
+  'typedef', 'template', 'this', 'goto', 'inline', 'noinline', 'public',
+  'static', 'extern', 'external', 'interface', 'long', 'short', 'half', 'fixed',
+  'unsigned', 'sizeof', 'cast', 'namespace', 'using', 'volatile',
+];
+const GLSL_DECL = new RegExp(
+  String.raw`\b(?:float|int|uint|bool|vec[234]|ivec[234]|uvec[234]|bvec[234]|mat[234](?:x[234])?)\s+(` +
+    GLSL_RESERVED.join('|') +
+    String.raw`)\b`,
+);
+
 function checkGlslNumericLiterals(rel, raw) {
   const out = [];
   // Whole-valued numeric consts declared in this file.
@@ -196,6 +226,23 @@ function checkGlslNumericLiterals(rel, raw) {
     // line-based scanner cannot tell from the real thing without a parser.
     // Every real instance of this bug has been prose. A checker that cries wolf
     // gets switched off, so this one only speaks when it is sure.
+    // Reserved-word declarations. Strip any trailing comment first so prose
+    // mentioning "patch masks" is not mistaken for a declaration.
+    const codeOnly = line.split('//')[0];
+    const reserved = GLSL_DECL.exec(codeOnly);
+    if (reserved) {
+      out.push({
+        rule: 'glsl-reserved-word',
+        file: `src/${rel}`,
+        line: i + 1,
+        text: line.trim().slice(0, 120),
+        message:
+          `"${reserved[1]}" is a RESERVED WORD in GLSL ES 3.00, which is what three compiles ` +
+          `built-in materials as. The material will fail to compile ("Illegal use of reserved ` +
+          `word") and whatever it draws silently vanishes. Rename it (e.g. "${reserved[1]}Mask").`,
+      });
+    }
+
     const commentAt = line.indexOf('//');
     if (commentAt >= 0 && /(^|[^\\])`/.test(line.slice(commentAt))) {
       out.push({
