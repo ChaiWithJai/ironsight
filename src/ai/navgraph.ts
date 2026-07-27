@@ -261,6 +261,24 @@ interface PendingAdj {
   at: number;
 }
 
+/**
+ * How a height discontinuity between two neighbouring polygons is traversed —
+ * or `null` when it cannot be.
+ *
+ * BOTH producers use this. Vaulting and dropping cost time a bot would rather
+ * spend running, so they are charged as extra metres rather than forbidden;
+ * anything beyond `maxDrop` is a fall, and a fall is not an edge. A navmesh
+ * that omits this last clause offers the pathfinder routes off cliffs, which
+ * present as bots standing at the top of one.
+ */
+function classifyLink(dy: number, agent: NavAgent): { kind: NavLink; penalty: number } | null {
+  const a = Math.abs(dy);
+  if (a <= agent.stepHeight) return { kind: NavLink.Walk, penalty: 0 };
+  if (a <= agent.vaultHeight) return { kind: NavLink.Vault, penalty: 4 };
+  if (a <= agent.maxDrop) return { kind: NavLink.Drop, penalty: 2.5 };
+  return null;
+}
+
 /** Longest run of cells merged into one rectangle. Caps portal length and A* fan-out. */
 const MAX_RECT = 10;
 /** Height spread tolerated inside one rectangle. Above this the ground is a ramp, not a floor. */
@@ -360,15 +378,7 @@ export function buildFromField(
 
   // ---- adjacency, unioned per polygon pair --------------------------------
   const pending = new Map<number, PendingAdj>();
-  const linkKind = (dy: number): { kind: NavLink; penalty: number } | null => {
-    const a = Math.abs(dy);
-    if (a <= agent.stepHeight) return { kind: NavLink.Walk, penalty: 0 };
-    // Vaulting and dropping both cost time a bot would rather spend running,
-    // so they are charged as extra metres rather than forbidden.
-    if (a <= agent.vaultHeight) return { kind: NavLink.Vault, penalty: 4 };
-    if (a <= agent.maxDrop) return { kind: NavLink.Drop, penalty: 2.5 };
-    return null;
-  };
+  const linkKind = (dy: number): { kind: NavLink; penalty: number } | null => classifyLink(dy, agent);
   const note = (pa: number, pb: number, kind: NavLink, penalty: number, vertical: boolean, at: number, lo: number, hi: number): void => {
     const key = pa * rects.length + pb;
     const found = pending.get(key);
@@ -528,16 +538,29 @@ export function buildFromNavmeshData(data: NavmeshData, agent: NavAgent, lookupC
     for (let e = 0; e < 3; e++) {
       const nb = data.polyNeighbours[t * 3 + e];
       if (nb < 0 || nb >= triCount) continue;
+      // HEIGHT DISCONTINUITIES ARE CLASSIFIED THE SAME WAY HERE AS IN
+      // `buildFromField`. The version this replaced called every step over
+      // `stepHeight` a `Drop`, charged it nothing, and made it TWO-WAY — so a
+      // nine-metre quay wall was a free edge the pathfinder would happily route
+      // both down AND up. Bots took those routes, walked to the lip, and stood
+      // there: the character controller will not climb a wall the navmesh
+      // promised. Measured symptom before this fix: clusters of bots parked at
+      // exactly the same point on the edge of the ALPHA plateau, at full
+      // throttle, for the whole run.
+      const drop = graph.centres[nb * 3 + 1] - graph.centres[t * 3 + 1];
+      const link = classifyLink(drop, agent);
+      if (!link) continue;
+      // A drop is one-way. `t → nb` exists only when `nb` is the lower of the
+      // two; the reverse direction is generated when the neighbour's own edge
+      // is visited, so nothing is lost by declining it here.
+      if (link.kind === NavLink.Drop && drop > 0) continue;
       const a = t * 9 + e * 3;
       const b = t * 9 + ((e + 1) % 3) * 3;
       adjacency.push({
         a: t,
         b: nb,
-        kind:
-          Math.abs(graph.centres[nb * 3 + 1] - graph.centres[t * 3 + 1]) <= agent.stepHeight
-            ? NavLink.Walk
-            : NavLink.Drop,
-        penalty: 0,
+        kind: link.kind,
+        penalty: link.penalty,
         portal: [
           graph.ringXyz[a],
           graph.ringXyz[a + 1],
