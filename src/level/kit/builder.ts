@@ -488,7 +488,15 @@ export class MeshBuilder {
       }
       for (let i = 0; i < segments; i++) {
         const a = base + i * 2;
-        this.index.push(a, a + 2, a + 3, a, a + 3, a + 1);
+        // WINDING. Vertices alternate bottom/top, so for segment i:
+        //   a = bottom_i, a+1 = top_i, a+2 = bottom_i+1, a+3 = top_i+1
+        // With x=cos, z=sin and angle increasing, this order is the one whose
+        // face normal agrees with the outward radial vertex normal above. The
+        // reverse (a, a+2, a+3 / a, a+3, a+1) winds every triangle INWARD, which
+        // leaves the mesh lit correctly — the vertex normals are unaffected — but
+        // backface-culled from outside, so the prop is visible only from within.
+        // Every silo, tank, drum and chimney in the level rendered inside-out.
+        this.index.push(a, a + 3, a + 2, a, a + 1, a + 3);
       }
     }
     if (caps) {
@@ -504,8 +512,11 @@ export class MeshBuilder {
           this.vertex(cx + Math.cos(a) * r, y, cz + Math.sin(a) * r, 0, dir, 0, Math.cos(a) * r * uvScale, Math.sin(a) * r * uvScale);
         }
         for (let i = 0; i < segments; i++) {
-          if (dir > 0) this.index.push(base, base + 1 + i, base + 2 + i);
-          else this.index.push(base, base + 2 + i, base + 1 + i);
+          // Same inversion as the side wall, and for the same reason: a top cap
+          // wound centre→i→i+1 has a face normal of −Y. Verified numerically
+          // against `dir` for both caps.
+          if (dir > 0) this.index.push(base, base + 2 + i, base + 1 + i);
+          else this.index.push(base, base + 1 + i, base + 2 + i);
         }
       }
     }
@@ -562,6 +573,14 @@ export class MeshBuilder {
     for (let i = 0; i < points.length - 1; i++) {
       for (let s = 0; s < sides; s++) {
         const a = base + i * ring + s;
+        // THIS WINDING IS CORRECT — do not "fix" it to match `cylinder` above.
+        // The two loops look identical and are mirror images: `cylinder` walks
+        // its ring as (x=cos, z=sin) about +Y, whereas this walks it as
+        // `normal*cos + binormal*sin` about the tangent, and those two
+        // parameterisations have OPPOSITE handedness. Verified numerically:
+        // this order puts every face normal along the outward radial vertex
+        // normal, and the cylinder's order does the same only after being
+        // reversed. Pattern-matching the two produced an inside-out tube.
         this.index.push(a, a + ring, a + ring + 1, a, a + ring + 1, a + 1);
       }
     }
