@@ -28,6 +28,52 @@
  * 4. A NON-ZERO SKIN. rapier's `offset` is the gap kept between the capsule and
  *    the world; at zero the solver has no room to resolve and the capsule sticks
  *    in inside corners, at 10 cm the character visibly floats off walls. 2 cm.
+ *
+ * AND THE FIFTH, WHICH IS WHY THE PLAYER COULD NOT WALK UPHILL
+ * -----------------------------------------------------------
+ * A GROUNDED MOVE IS RE-AIMED ALONG THE FLOOR BEFORE THE SWEEP, AND THE CALLER'S
+ * DOWNWARD GROUND-STICK IS NOT PASSED THROUGH. Both halves of that sentence are
+ * load-bearing, and the second one is the bug a human found in ten minutes that
+ * twelve rounds of screenshots could not.
+ *
+ * Callers integrate their own gravity and, while grounded, add a downward bias so
+ * the capsule stays glued over a crest instead of launching off it. GAME's was
+ * `snapToGroundDistance * 0.5` = 0.20 m PER TICK. Compare that with one tick of
+ * walking: 3.34 m/s at 60 Hz is 0.056 m. The desired delta therefore pointed 74°
+ * DOWNWARD, and collide-and-slide does exactly what it says — it projects that
+ * vector onto the floor plane. On a slope of angle θ the downward part projects
+ * to `stick·sin θ` pointing DOWNHILL, directly against the `h·cos θ` you asked
+ * for. They cancel at `sin θ = h / stick` — 15.5° with those numbers.
+ *
+ * Measured in an isolated rapier rig with this exact capsule and config, metres
+ * advanced in 2 s of holding forward (6.68 m is the request):
+ *
+ *     slope        0°    5°   10°   15°   20°   25°   30°   40°
+ *     0.20 stick 6.71  4.56  2.41  0.28  0.04  0.04  0.03  0.02   <- shipped
+ *     this file  6.68  6.57  6.40  6.37  6.29  6.21  6.14  6.06
+ *
+ * That is the whole reported bug: a wall you cannot see at a fifth of the 50°
+ * the config advertises. It is NOT a tuning value, NOT a transposed heightfield
+ * and NOT autostep — an isolated rapier world with one flat ramp and no terrain
+ * at all reproduces it exactly.
+ *
+ * So while grounded on a climbable face we (a) rotate the horizontal request
+ * onto the ground plane, which gives the sweep the vertical component it needs
+ * to climb and makes a descent follow the ground instead of stepping off it,
+ * and (b) replace whatever downward push the caller sent with ONE CENTIMETRE —
+ * enough for rapier to register floor contact and to arm its own snap-to-ground
+ * (which needs a downward remainder to fire, and which is the right tool for a
+ * crest: it is a cast, not a slide, so it cannot steal horizontal speed).
+ *
+ * The same projection also fixes the mirror-image bug nobody reported: running
+ * DOWNHILL, that 0.20 m stick projected into free speed. A 40° descent moved
+ * 15.67 m in the 2 s a 6.68 m walk was asked for — 2.3× the sprint. It is now
+ * 7.34 m.
+ *
+ * Two invariants this must not break, both verified in the same rig:
+ *   · Faces steeper than `maxSlopeDeg` are left entirely alone, so they still
+ *     slide the character down rather than becoming walkable cliffs.
+ *   · A vertical wall still stops you dead, and a ledge still drops you.
  */
 import * as RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';

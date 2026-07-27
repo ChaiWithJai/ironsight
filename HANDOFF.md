@@ -1,7 +1,16 @@
 # IRONSIGHT — HANDOFF
 
 **Read this first if you are picking this project up in a new session.**
-Then read `docs/BRIEF.md`, `docs/ARCHITECTURE.md`, `docs/OWNERSHIP.md`.
+Then read `README.md` (how to run and play it), `docs/BRIEF.md`, `docs/ARCHITECTURE.md`,
+`docs/OWNERSHIP.md`.
+
+> **The three things this project learned the hard way, if you read nothing else:**
+> 1. **Play the game.** Ten minutes of human play found four real bugs; twelve rounds of
+>    screenshot critics found none of them (§2.2).
+> 2. **Measure behaviour, not appearance.** `./tools/soak.sh` exists for this. A pretty frame
+>    proves nothing about whether anything in it works.
+> 3. **The critic score drifts ~1.7 between rounds.** Compare deltas against a reference, never
+>    absolute scores across rounds (§2.1).
 
 ---
 
@@ -25,25 +34,52 @@ There are two deliverables:
 
 | | |
 |---|---|
-| Code | ~79 k lines, 246 TS files, 12 commits |
+| Code | ~80 k lines, 247 TS files |
 | Gates | `npm run verify` (typecheck + boundary CI + build) — green |
-| Shots | 48 registered, all capture exit-0 |
-| Critic score | **3.80 / 8.5** weighted, **0/8** hero shots passing |
-| Verdict from blind critics | still "hobby-webgl-demo" on most frames |
+| Shots | 48 registered, all capture exit-0, ~1.5 s each on GPU |
+| Critic score | ~5.5–6.0 / 8.5 weighted, 0/8 hero shots passing — **but see §2.1, the number is unreliable** |
+| Playable? | Yes (`npm run dev`) — but **the character controller wedges**, see §2.2 |
 
-**The engine works. The game runs. It does not yet look AAA.** Do not let the size of the codebase
-or the quality of the infrastructure fool you — the visual bar is not met, and the critics are
-right about why.
+**The engine works. The game runs and is playable. It does not yet look AAA, and it has serious
+behavioural bugs.** Do not let the size of the codebase or the quality of the infrastructure fool
+you.
 
-### Critic trajectory
+### 2.1 The critic score is not trustworthy between rounds
 
-| loop | round 1 | round 2 | round 3 |
-|---|---|---|---|
-| Software-rasteriser loop | 2.99 | 3.27 | 3.80 |
-| GPU loop | *(was running at handoff — check `git log`)* | | |
+Measured: in laggard-loop round 1, three hero shots whose code was **not touched** by that round
+moved −1.90, −1.76 and −1.42. `light_cascades` was verified pixel-identical by eye and lost 1.90.
+The critics moved, not the frames.
 
-The first loop gained +0.27/round against a 4.7-point gap. That was not going to converge, and the
-reason was iteration rate, not agent quality — see §4.
+That drift (~1.7) is larger than the entire per-round signal (+0.14 to +0.73), so **every
+between-round trajectory reported earlier in this project is inside the noise floor.** The likely
+cause was a strongly-worded anti-inflation warning in the critic prompt that biased them downward.
+
+The fix is in `docs/AAA_RUBRIC.md`: critics score **both** blind panels and report
+`delta = ours − reference`. Delta survives a harsh or lenient critic; the reference panel doubles
+as a calibration check (a real shipped frame should land 8.5–9.5). **Use delta. Do not resurrect
+absolute between-round comparisons.**
+
+### 2.2 Screenshots are blind to behaviour — this cost the project a lot
+
+Twelve rounds of visual critics scored the *look* of `ai_firefight` without ever noticing that the
+bots in it do not move. A human played the game for ten minutes and found four real bugs
+immediately. **Play the game. Run the soak. Do not trust a pretty frame.**
+
+A 60-second headless soak (§6) measured:
+
+| | |
+|---|---|
+| Player stuck ticks, walking uphill | **94.5%** (longest single stall 56.4 s of 60) |
+| Player stuck ticks, flat forward | 78.1% |
+| Bot frozen ticks | 54.1% (longest unbroken freeze 43.1 s) |
+| Bots that ever acquired a target | **0 of 18** |
+| Shots fired by bots | 0 |
+
+Bots spawn correctly, attach to the locomotion controller correctly, the navmesh builds, and 15
+tick systems are registered — **none of that was the problem.** The controller wedges any capsule
+that tries to move, which is simultaneously the player's "can't walk uphill, have to jump" and the
+bots' apparent idleness. One root cause, three symptoms. The blind-bot perception failure
+(0 targets, 0 path requests) is a genuinely separate second bug.
 
 ---
 
@@ -122,11 +158,29 @@ into `tools/workflows/`, so the *method* survives even though the transcripts do
 npm install                          # once
 python3 tools/fetch-reference.py     # once — rebuild the calibration corpus
 npm run verify                       # typecheck + boundary CI + build. THE gate.
+npm run dev                          # PLAY IT. See README.md for controls.
 ./tools/shoot.sh --list              # 48 registered shots
 ./tools/shoot.sh light_cascades      # ~1.5 s on GPU
 ./tools/shoot.sh                     # everything
 ./tools/compare.sh --ours tools/shots/X.png --ref reference/gameplay/Y.jpg --out tools/compare/z.png
+./tools/soak.sh --seconds 60         # HEADLESS BEHAVIOUR TEST — see below
 ```
+
+### The soak harness — the instrument for anything that moves
+
+`tools/soak.sh` boots the game, runs the fixed-timestep simulation forward without rendering, and
+writes a JSON report plus verdicts to `tools/soak/`. It exists because the screenshot harness is
+structurally incapable of seeing behaviour, and that blindness hid three real bugs for the whole
+project (§2.2).
+
+It measures, among other things: bots spawned / attached / alive, **distance travelled and frozen-
+tick fraction per bot**, targets ever acquired, nav paths requested vs failed, shots fired, capture
+progress, registered tick systems per phase, and — driving the player with a scripted intent via
+`InputService.setScripted()` — **stuck ticks, stall episodes and the terrain slope where stalls
+happen.**
+
+**Any change to movement, physics, AI or the game mode must show its effect on these numbers.** A
+fix that does not move the stall fraction is not a fix.
 
 Node: nothing to configure. Vite scripts route through `tools/with-node.sh`, which finds a
 node ≥ 20.19 itself; `IRONSIGHT_NODE_BIN` overrides.
@@ -158,7 +212,28 @@ parse — the same bug class as §8.
 
 ## 7. What to do next, in priority order
 
-### A. Finish the critic loop (in progress)
+### A. MAKE IT PLAY CORRECTLY. This outranks everything visual.
+
+A workflow was mid-flight on these at handoff (`tools/workflows/ironsight-playability-*.js`).
+Check `git log` and re-run `./tools/soak.sh` to see whether they landed.
+
+**A1 — The character controller wedges (severity: blocking).** 94.5% stuck ticks walking uphill,
+78.1% on the flat, 54.1% frozen ticks for bots. Same root cause for the player and every bot.
+Leading suspect, from the code's own warning in `src/world/terrain/field.ts`: rapier's heightfield
+expects a specific row/column order, and handing our array over directly **transposes the map**. A
+transposed/offset/coarser collider means walking into invisible walls under smooth-looking ground.
+Verify by raycasting down at known (x,z) and comparing against `TerrainService.heightAt()`. Also
+check autostep's third argument, whether the move vector is flattened before the sweep, and whether
+snap-to-ground is fighting the climb.
+
+**A2 — Bots are blind (severity: high, separate bug).** 0 of 18 ever acquired a target, 0 path
+requests, 0 shots. Spawning, attachment, navmesh and tick registration are all verified fine, so
+the break is in perception/targeting. Even unwedged, bots would wander rather than fight.
+
+**A3 — Play the game after every one of these.** `npm run dev`. The four bugs that mattered most in
+this project were all found in ten minutes of human play, and none by twelve rounds of critics.
+
+### B. Finish the critic loop — but on DELTA scoring
 Re-run `tools/workflows/ironsight-critic-loop-gpu-*.js`. It fixes → re-shoots → blind-scores,
 re-ranking each round from the critics' own severity findings, and exits when every hero shot
 clears 8.5 with no axis below 8.0.
@@ -204,6 +279,18 @@ the cause. Has broken the build **three times**. Now caught by boundary CI
 never links, its draw is silently dropped, and *every frame comes out unexposed*. Latent, too: a
 constant is safe at 1.42 and breaks the moment someone tunes it to 2.0. Caught by
 `glsl-int-literal`.
+
+**GLSL ES 3.00 reserved words that look like ordinary variable names.** `patch` is a tessellation
+qualifier; `sample`, `filter`, `input`, `output`, `common`, `active` are all reserved. three
+compiles built-in materials as `#version 300 es`, so `float patch = …` fails with "Illegal use of
+reserved word" at a line number in the *fully assembled* shader that matches nothing in our source,
+and the material silently vanishes. Caught by `glsl-reserved-word`.
+
+**`MouseEvent.button` vs `MouseEvent.buttons`.** The first is an index (0 left, 1 middle, 2 right);
+the second is a bitmask where **2 is right**. Building your own mask with `1 << button` gives yet a
+third layout (right = 4). ADS was bound to the middle button for the project's whole life because
+`& 2` was tested against a `1 << button` mask — and left-click fire worked fine, because left is
+bit 0 in every layout, which hid it.
 
 **Integration-only failures.** Every serious bug in this project passed typecheck, boundaries and
 build, and existed only because lanes were finally in one frame: a shader permutation cap set

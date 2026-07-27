@@ -26,6 +26,7 @@ import { TickPhase } from '@/engine/types';
 import { attachDriver, markReady, setStatus } from '@/engine/harness';
 import { createRenderer } from '@/engine/renderer';
 import { createEngine } from '@/engine/engine';
+import { installSoak } from '@/engine/soak';
 import { tierName } from '@/engine/quality';
 import { SHOT_MODULE_COUNT } from '@/shots/index';
 
@@ -120,6 +121,12 @@ async function boot(): Promise<void> {
   progress(0.97, 'attaching harness');
   engine.debug.attach(container as HTMLElement);
   attachDriver(engine.driver);
+  // The BEHAVIOURAL counterpart to the screenshot harness. `tools/soak.mjs`
+  // waits on the same `__HARNESS__.ready` flag, then drives `__SOAK__.run()` to
+  // step the fixed-timestep simulation forward for N seconds and report what
+  // actually moved. A screenshot cannot show that a bot has stood still for a
+  // minute; this can.
+  installSoak(engine);
 
   // One frame before ready, so the very first thing the capture tool can grab is
   // a rendered image rather than the clear colour.

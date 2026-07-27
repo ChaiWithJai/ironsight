@@ -395,6 +395,28 @@ export class IronEngine implements Engine {
     this.runFrame(dt);
   }
 
+  /**
+   * SOAK entry point: exactly one tick at `dt` and NO render frame.
+   *
+   * `stepFrame` is ~95% renderer, which makes a 60-second behavioural soak a
+   * three-minute wait and discourages anyone from running one. This runs the
+   * fixed-timestep half only — the same `runTick` through the same `FrameLoop`,
+   * so the simulation cannot tell the difference.
+   *
+   * It deliberately does NOT touch `clock.frame`, `profiler.beginFrame` or the
+   * dynamic-resolution governor: those are frame-rate concepts and there is no
+   * frame here. `clock.tick` still advances, so `simTime` is exact.
+   *
+   * If a gameplay result ever differs between an all-`stepFrame` soak and an
+   * all-`stepSimOnly` one, that IS the finding: something in the simulation is
+   * reading presentation state, which §3.3 of the architecture forbids. The
+   * soak reports its render cadence for exactly this reason.
+   */
+  stepSimOnly(dt: number): void {
+    this.clock.beginFixedFrame(dt);
+    this.loop.advance(dt, this.runTick);
+  }
+
   setLoopSuspended(suspended: boolean): void {
     if (this.suspended === suspended) return;
     this.suspended = suspended;

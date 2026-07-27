@@ -48,6 +48,24 @@ export class FrameLoop {
   private accumulatorMicros = 0;
   private lastTickCount = 0;
 
+  /**
+   * Per-system CALL counts, off by default.
+   *
+   * `describe()` answers "what is REGISTERED at TickPhase.Ai", which is not the
+   * same question as "is it being CALLED every tick" — and the two failure modes
+   * (a lane that forgot to register, and a lane whose system runs but does
+   * nothing) are indistinguishable from the outside. The soak instrument
+   * (`src/engine/soak.ts`, driven by `tools/soak.mjs`) turns this on for the
+   * duration of a run and reports both numbers side by side, so "bots do not
+   * move" resolves to a phase rather than to a lane's honour.
+   *
+   * A Map lookup and an increment per system per tick is ~30 ops at 60 Hz; it is
+   * still gated so the live game pays literally nothing.
+   */
+  private counting = false;
+  private readonly tickCalls = new Map<string, number>();
+  private readonly renderCalls = new Map<string, number>();
+
   constructor(private readonly profiler: EngineProfiler) {}
 
   addTick(system: TickSystem): () => void {
@@ -137,6 +155,7 @@ export class FrameLoop {
     const list = this.ticks;
     for (let i = 0; i < list.length; i++) {
       const s = list[i].system;
+      if (this.counting) this.tickCalls.set(s.name, (this.tickCalls.get(s.name) ?? 0) + 1);
       this.profiler.begin(s.name);
       s.tick(ctx);
       this.profiler.end(s.name);
@@ -149,10 +168,28 @@ export class FrameLoop {
     const list = this.renders;
     for (let i = 0; i < list.length; i++) {
       const s = list[i].system;
+      if (this.counting) this.renderCalls.set(s.name, (this.renderCalls.get(s.name) ?? 0) + 1);
       this.profiler.begin(s.name);
       s.update(ctx);
       this.profiler.end(s.name);
     }
+  }
+
+  /** Start (or restart, zeroed) per-system call counting. See `counting`. */
+  setCounting(on: boolean): void {
+    this.counting = on;
+    if (on) {
+      this.tickCalls.clear();
+      this.renderCalls.clear();
+    }
+  }
+
+  /** Calls recorded since the last `setCounting(true)`. Empty when counting is off. */
+  callCounts(): { ticks: Record<string, number>; renders: Record<string, number> } {
+    return {
+      ticks: Object.fromEntries(this.tickCalls),
+      renders: Object.fromEntries(this.renderCalls),
+    };
   }
 
   /** Introspection for the debug overlay: what runs, in what order. */

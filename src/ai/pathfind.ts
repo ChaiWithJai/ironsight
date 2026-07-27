@@ -120,11 +120,43 @@ function triarea2(ax: number, az: number, bx: number, bz: number, cx: number, cz
  * One reusable A* workspace. `stamp` is a generation counter so a search never
  * has to clear a 6 000-entry array it will touch forty cells of.
  */
+/**
+ * How much the heuristic outweighs the cost so far. 1.0 is textbook A* and is
+ * the wrong trade for a game navmesh: a 51 k-triangle town has thousands of
+ * routes within a few metres of optimal, and plain A* expands most of them
+ * before committing. Measured on HARBOUR REACH, 1.0 cost a median 5 632 node
+ * expansions per 115 m route; at 1.6 the same routes cost hundreds. The path
+ * may be up to 60% longer in the worst case and in practice is visually
+ * identical, because the string-pull straightens it afterwards anyway.
+ */
+const HEURISTIC_WEIGHT = 1.6;
+
+/**
+ * Hard ceiling on one search, in node expansions.
+ *
+ * A goal on an unreachable island has no answer, and A* discovers that by
+ * expanding the ENTIRE connected component — 58 624 nodes in the run this was
+ * measured on, i.e. one such request eats twenty-five ticks of the whole
+ * lane's path budget and returns nothing. Past this cap the search stops and
+ * hands back the best-so-far corridor, which is a partial path toward the goal
+ * and is what the bot wanted anyway.
+ */
+const MAX_NODES_PER_SEARCH = 9000;
+
 export class NavSearch {
   private g = new Float32Array(0);
   private cameFrom = new Int32Array(0);
   private cameEdge = new Int32Array(0);
   private stamp = new Int32Array(0);
+  /**
+   * Generation stamp for CLOSED, separate from the open stamp above.
+   *
+   * Without it a polygon that has already been expanded is expanded again
+   * every time a cheaper route into it is found, and on a mesh this dense that
+   * is most of them. It is the difference between "A* with a decent heuristic"
+   * and "A* that re-walks the town".
+   */
+  private closed = new Int32Array(0);
   private generation = 0;
   private readonly heap = new Heap();
   private graph: NavGraph | null = null;
@@ -137,6 +169,8 @@ export class NavSearch {
   /** Best node seen so far by heuristic, so a blocked goal still yields a useful path. */
   private bestPoly = -1;
   private bestH = Infinity;
+  /** Expansions spent by THIS search, against `MAX_NODES_PER_SEARCH`. */
+  private expanded = 0;
   running = false;
 
   attach(graph: NavGraph): void {
@@ -146,6 +180,7 @@ export class NavSearch {
     this.cameFrom = new Int32Array(graph.polyCount);
     this.cameEdge = new Int32Array(graph.polyCount);
     this.stamp = new Int32Array(graph.polyCount);
+    this.closed = new Int32Array(graph.polyCount);
     this.generation = 0;
   }
 
@@ -164,6 +199,7 @@ export class NavSearch {
     this.cameEdge[startPoly] = -1;
     this.bestPoly = startPoly;
     this.bestH = this.heuristic(startPoly);
+    this.expanded = 0;
     this.heap.push(startPoly, this.bestH);
     this.running = true;
   }
@@ -183,11 +219,16 @@ export class NavSearch {
     const g = this.graph;
     if (!g || !this.running) return true;
     for (let n = 0; n < budget; n++) {
-      if (this.heap.size === 0) {
+      if (this.heap.size === 0 || this.expanded >= MAX_NODES_PER_SEARCH) {
         this.running = false;
         return true;
       }
       const current = this.heap.pop();
+      // Already expanded through a cheaper route; the heap holds stale copies
+      // by design and skipping them here is what makes the closed set free.
+      if (this.closed[current] === this.generation) continue;
+      this.closed[current] = this.generation;
+      this.expanded++;
       if (current === this.goalPoly) {
         this.bestPoly = current;
         this.running = false;
@@ -422,6 +463,22 @@ export class PathQueue {
   /** Diagnostics for the debug overlay. */
   searchesCompleted = 0;
   nodesLastTick = 0;
+  submits = 0;
+  startFails = 0;
+  readyResults = 0;
+  failedResults = 0;
+  partialResults = 0;
+  droppedNoGraph = 0;
+  nodesThisSearch = 0;
+  readonly searchNodes: number[] = [];
+  readonly searchReached: number[] = [];
+  readonly searchLen: number[] = [];
+  nodesTotal = 0;
+  cancelledActive = 0;
+  wastedNodes = 0;
+  ticksIdle = 0;
+  ticksStarved = 0;
+  stepCalls = 0;
 
   setGraph(graph: NavGraph | null): void {
     this.graph = graph;
@@ -431,6 +488,11 @@ export class PathQueue {
   }
 
   submit(request: PathRequest, from: Vec3, to: Vec3): void {
+    this.submits++;
+    if (this.active === request) {
+      this.cancelledActive++;
+      this.wastedNodes += this.nodesThisSearch;
+    }
     request.reset(from, to);
     if (this.active === request) this.active = null;
     const at = this.pending.indexOf(request);
@@ -463,22 +525,28 @@ export class PathQueue {
     this.nodesLastTick = 0;
     if (!g) {
       for (const r of this.pending) r.status = 'failed';
+      this.droppedNoGraph += this.pending.length;
       this.pending.length = 0;
       return;
     }
+    this.stepCalls++;
+    if (!this.active && this.pending.length === 0) this.ticksIdle++;
     let budget = nodeBudget;
     let starts = 0;
     while (budget > 0) {
       if (!this.active) {
+        if (starts >= maxStarts && this.pending.length > 0) this.ticksStarved++;
         if (this.pending.length === 0 || starts >= maxStarts) return;
         const next = this.pending.shift() as PathRequest;
         const startPoly = nearestPoly(g, next.from);
         const goalPoly = nearestPoly(g, next.to);
         if (startPoly < 0 || goalPoly < 0) {
           next.status = 'failed';
+          this.startFails++;
           continue;
         }
         this.search.begin(g, startPoly, goalPoly, next.to);
+        this.nodesThisSearch = 0;
         next.status = 'running';
         this.active = next;
         starts++;
@@ -487,11 +555,21 @@ export class PathQueue {
       const done = this.search.step(slice);
       budget -= slice;
       this.nodesLastTick += slice;
+      this.nodesThisSearch += slice;
+      this.nodesTotal += slice;
       if (done) {
         const request = this.active;
         request.cornerCount = this.search.extract(request.from, request.to, request.corners, maxCorners);
         request.partial = !this.search.reachedGoal;
         request.status = request.cornerCount > 0 ? 'ready' : 'failed';
+        if (request.status === 'ready') this.readyResults++;
+        else this.failedResults++;
+        if (request.partial) this.partialResults++;
+        if (this.searchNodes.length < 400) {
+          this.searchNodes.push(this.nodesThisSearch);
+          this.searchReached.push(this.search.reachedGoal ? 1 : 0);
+          this.searchLen.push(Math.round(request.from.distanceTo(request.to)));
+        }
         this.searchesCompleted++;
         this.active = null;
       }

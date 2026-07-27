@@ -35,3 +35,6 @@ tools/compare/
 
 dist-*/
 tmp-*/
+
+# Soak reports — regenerate with ./tools/soak.sh
+tools/soak/

@@ -695,6 +695,53 @@ class IronAi implements AiService {
       // Stride frequency rises with speed: 1.9 Hz walking, ~3.1 Hz sprinting.
       bot.gaitPhase = (bot.gaitPhase + ctx.dt * (1.9 + bot.gaitSpeed * 4.2) * bot.gaitSpeed) % (Math.PI * 2);
 
+      // TEMP-PROBE
+      {
+        const pr = AI_PROBE;
+        // How far ahead toward the goal IS walkable, by bisection over the ray.
+        if (bot.goal.lengthSq() > 0 && this.tickIndex % 30 === 0) {
+          const gx = bot.goal.x - state.position.x;
+          const gz = bot.goal.z - state.position.z;
+          const gl = Math.hypot(gx, gz) || 1;
+          for (const d of [1, 2, 4, 8, 16, 32]) {
+            if (gl < d) break;
+            this.scratchB.set(
+              state.position.x + (gx / gl) * d,
+              bot.goal.y,
+              state.position.z + (gz / gl) * d,
+            );
+            const ok = this.nav.raycastWalkable(state.position, this.scratchB, this.scratch);
+            pr.reach[d] = (pr.reach[d] ?? 0) + (ok ? 1 : 0);
+            pr.reachTried[d] = (pr.reachTried[d] ?? 0) + 1;
+          }
+          // Is the bot standing on a polygon at all?
+          const p0 = this.nav.graph.polyAt(state.position.x, state.position.z);
+          if (p0 < 0) pr.offMesh++;
+          else {
+            pr.onMesh++;
+            const h = this.nav.graph.heightAt(p0, state.position.x, state.position.z);
+            pr.heightErrSum += Math.abs(h - state.position.y);
+            pr.heightErrMax = Math.max(pr.heightErrMax, Math.abs(h - state.position.y));
+          }
+        }
+        pr.botTicks++;
+        pr.status[bot.path.status] = (pr.status[bot.path.status] ?? 0) + 1;
+        if (bot.path.status === 'ready') {
+          pr.corners[Math.min(9, bot.path.cornerCount)] = (pr.corners[Math.min(9, bot.path.cornerCount)] ?? 0) + 1;
+          if (bot.corridorIndex >= bot.path.cornerCount) pr.corridorExhausted++;
+          else pr.following++;
+          if (bot.path.partial) pr.partialFollow++;
+        }
+        if (bot.goal.lengthSq() === 0) pr.noGoal++;
+        else {
+          const d = Math.hypot(bot.goal.x - state.position.x, bot.goal.z - state.position.z);
+          pr.goalDistSum += d;
+          pr.goalDistMax = Math.max(pr.goalDistMax, d);
+        }
+        pr.moveMagSum += Math.hypot(bot.intent.moveX, bot.intent.moveZ);
+        if (Math.hypot(bot.intent.moveX, bot.intent.moveZ) < 0.05) pr.zeroIntent++;
+      }
+
       const view = this.views[i] as Mutable<BotView>;
       view.entity = bot.entity;
       view.team = bot.team;
@@ -1131,6 +1178,27 @@ class IronAi implements AiService {
   }
 }
 
+/** TEMP-PROBE: lane-private diagnostic counters, removed before hand-off. */
+const AI_PROBE = {
+  botTicks: 0,
+  status: {} as Record<string, number>,
+  corners: {} as Record<number, number>,
+  corridorExhausted: 0,
+  following: 0,
+  partialFollow: 0,
+  noGoal: 0,
+  goalDistSum: 0,
+  goalDistMax: 0,
+  moveMagSum: 0,
+  zeroIntent: 0,
+  reach: {} as Record<number, number>,
+  reachTried: {} as Record<number, number>,
+  offMesh: 0,
+  onMesh: 0,
+  heightErrSum: 0,
+  heightErrMax: 0,
+};
+
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
 /** A camera pose in the exact shape `ShotContext.poseCamera` takes. */
@@ -1199,6 +1267,44 @@ export function createAiService(ctx: BootContext): AiService {
     ai.setWeaponsNull(ctx.registry.isNull('weapons'));
     ai.attachPresentation(ctx);
   });
+
+  // TEMP-PROBE
+  (globalThis as unknown as Record<string, unknown>).__AI_PROBE__ = (): unknown => {
+    const q = nav.queue;
+    const g = nav.graph;
+    return {
+      ...AI_PROBE,
+      queue: {
+        submits: q.submits,
+        startFails: q.startFails,
+        readyResults: q.readyResults,
+        failedResults: q.failedResults,
+        partialResults: q.partialResults,
+        droppedNoGraph: q.droppedNoGraph,
+        searchesCompleted: q.searchesCompleted,
+        queued: q.queued,
+        searchNodes: q.searchNodes,
+        searchReached: q.searchReached,
+        searchLen: q.searchLen,
+        nodesTotal: q.nodesTotal,
+        cancelledActive: q.cancelledActive,
+        wastedNodes: q.wastedNodes,
+        ticksIdle: q.ticksIdle,
+        ticksStarved: q.ticksStarved,
+        stepCalls: q.stepCalls,
+      },
+      graph: {
+        polyCount: g.polyCount,
+        adj: g.adjPoly.length,
+        nx: g.nx,
+        nz: g.nz,
+        cellSize: g.cellSize,
+        minX: g.minX,
+        minZ: g.minZ,
+        obstacles: nav.obstacles.length,
+      },
+    };
+  };
 
   ctx.report('ai: bot pool ready');
   return ai;
