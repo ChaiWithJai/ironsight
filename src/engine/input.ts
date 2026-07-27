@@ -37,6 +37,23 @@ const RAD_PER_COUNT = 0.022 * DEG2RAD;
 /** Anything larger than this in one event is a pointer-lock warp, not a flick. */
 const MAX_DELTA_PER_EVENT = 900;
 
+/**
+ * Our own mouse-button mask, built from `MouseEvent.button` via `1 << button`.
+ *
+ * DO NOT confuse this with `MouseEvent.buttons`, which is a DIFFERENT bitmask:
+ *
+ *   MouseEvent.button   0 = left,  1 = middle, 2 = right   (an index)
+ *   1 << button         1 = left,  2 = middle, 4 = right   (what we build)
+ *   MouseEvent.buttons  1 = left,  2 = RIGHT,  4 = middle  (the DOM's own mask)
+ *
+ * Right is bit 2 here but bit 1 there. Testing `& 2` against our mask silently
+ * binds the action to the MIDDLE button — which is exactly how ADS ended up
+ * doing nothing on right-click while left-click fire worked fine, because left
+ * is bit 0 in both layouts and hides the discrepancy.
+ */
+const MOUSE_LEFT = 1 << 0;
+const MOUSE_RIGHT = 1 << 2;
+
 export const KEY_BINDINGS: Readonly<Record<string, Btn>> = {
   Space: Btn.Jump,
   ShiftLeft: Btn.Sprint,
@@ -253,8 +270,8 @@ export class EngineInputService implements InputService {
       const bit = KEY_BINDINGS[code];
       if (bit) buttons |= bit;
     }
-    if (this.mouseButtons & 1) buttons |= Btn.Fire;
-    if (this.mouseButtons & 2) buttons |= Btn.Ads;
+    if (this.mouseButtons & MOUSE_LEFT) buttons |= Btn.Fire;
+    if (this.mouseButtons & MOUSE_RIGHT) buttons |= Btn.Ads;
 
     const sens = this.sensitivity * adsSensitivityScale * RAD_PER_COUNT;
     let yaw = -dx * sens;
