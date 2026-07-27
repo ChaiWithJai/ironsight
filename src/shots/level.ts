@@ -41,6 +41,23 @@
  * 20–35 % rule: the old frames were empty-foreground, which is the composition
  * that reads flat next to the reference corpus.
  *
+ * WHAT §2.3 DOES NOT GUARANTEE — the round-6 correction, from `level_alpha`
+ * -----------------------------------------------------------------------
+ * The arithmetic above is necessary and it is not sufficient, and `level_alpha`
+ * spent four rounds proving it. That pose measured 121° off-light — comfortably
+ * inside the window — and still read as flat front-light in every critique,
+ * because the station and the sightline both sat inside a 60 m shadow cast by
+ * the town blocks west of the square. A frame containing no directly lit surface
+ * is indistinguishable from a front-lit one; the angle rule can only arrange
+ * light that is actually reaching the geometry.
+ *
+ * So the staging check has a second half now, and it is the one worth running
+ * first: for a sun at elevation e, every occluder of height H upwind of the
+ * station shadows 1/tan(e) · H metres downwind of itself — 5.14·H at our 11°.
+ * Sum that over the blocks around the objective BEFORE choosing a station, and
+ * put the sightline so it crosses the terminator rather than running parallel to
+ * it. `level_alpha`'s note below carries the worked example.
+ *
  * NEAR FIELD AND APERTURE — the round-2 re-stage
  * ---------------------------------------------
  * Round 1 shipped `level_alpha` and `level_bravo` with nothing inside 10 m and
@@ -58,8 +75,9 @@
  *                 0.5 × 0.62 m sandstone course capped with concrete at deck
  *                 +1.34, i.e. 28 cm below a standing eye) runs diagonally out of
  *                 the bottom-right corner at 2 m.
- *   level_alpha   the cover wall the square's east edge is dressed with, at
- *                 3.5 m and 24° right of the sightline.
+ *   level_alpha   superseded in round 6 — the near mass is now the market
+ *                 hall's east arcade, 3–18 m down the left third. See that
+ *                 shot's own note.
  *
  * The APERTURE comes from the same change. `src/render/passes/dof.ts` switches
  * from gameplay restraint (CoC ≤ 3 px, §6.2) to a real cinematic aperture when
@@ -92,60 +110,113 @@ import { registerShot } from '@/engine/harness';
 registerShot({
   name: 'level_alpha',
   description:
-    'ALPHA, the market square, at standing eye height from the north-east ' +
-    'corner looking seaward across the point. Proves: the square has real hard ' +
-    'cover in it, the market hall is an enterable arcade, every wall meets the ' +
-    'paving through a sand drift rather than a hard seam, and the terrace steps ' +
-    'down into the town with the minaret and the headland behind it.',
+    'ALPHA, the market square, at standing eye height in the shadow of the ' +
+    'market hall arcade, looking south-south-west across the square to the ' +
+    'terrace lip and the town beyond. Proves: the hall is an enterable arcade ' +
+    'with real arches and piers, every wall meets the paving through a sand ' +
+    'drift rather than a hard seam, the square carries hard cover and working ' +
+    'stalls, and the mosque wall and minaret close the east side.',
   frames: 28,
   setup(ctx) {
     ctx.seed(0x41);
+    // Fog is 0.0038 rather than the 0.0028 this shot carried for four rounds.
+    // The rubric's first calibration note is that no reference frame contains
+    // clear air, and ALPHA's sightlines are the shortest on the map, so it had
+    // the least aerial perspective of any shot in the set. 0.0038 is as far as
+    // this scene goes: at 0.006 and above the water shader's fog term saturates
+    // and the sea renders flat green, which was captured and is WATER's bug, not
+    // a value to design around. Overcast 0.20 (from 0.05) is the other half of
+    // the same fix - it puts a real cumulus bank across the upper third instead
+    // of the flat blue wedge the old pose framed.
     ctx.setTimeOfDay(17.4);
-    ctx.setWeather(0.05, { wind: 4.0, fog: 0.0028 });
+    ctx.setWeather(0.2, { wind: 4.0, fog: 0.0038 });
     ctx.setOverlays({ viewmodel: false, hud: false });
-    // Station: the square's NE corner, moved 2.2 m up the round-1 sightline so
-    // the stacked cover wall `buildSquare` dresses the east edge with closes to
-    // 2.5 m and becomes the near-field mass §7.2 asks for. Sightline 202° and
-    // the lens are otherwise round 1's, and both were re-chosen the hard way.
-    //
-    // A 40° cinematic lens on a 186° sightline was captured and rejected. Two
-    // things went wrong and both are worth writing down. The lens engages the
-    // aperture path in `src/render/passes/dof.ts`, which AUTO-FOCUSES on the
-    // centre pixel — and 186° puts the square's east compound wall under that
-    // pixel at 11 m, so focus locked to 11 m and the minaret, the mosque and the
-    // whole town went to 20 px of CoC. The narrower lens then cropped the
-    // sightline down to that wall, and a flat wall across the middle distance is
-    // a worse frame than the empty one it replaced. ALPHA is an establishing
-    // shot of a square, not a subject-at-4-m portrait; it needs the wide read.
-    // The near-field requirement is met by occlusion and luminance banding —
-    // which is what §7.2 actually specifies — not by bokeh.
-    //
-    // Why THIS corner. Looking seaward (−Z) is the only direction out of ALPHA
-    // with anything behind it: the square, then the terrace lip, then the town
-    // rooflines stepping down, then the minaret at 44 m and the harbour cranes
-    // in haze through the gap between the two blocks that close the south side.
-    // Every other sightline out of the square ends on a facade at 35 m, which is
-    // a frame with one depth plane in it.
-    //
-    // The sun is 59° to the LEFT and 11° up, just outside the left edge at this FOV,
-    // so stall fabric rim-lights and every shadow in the square — stalls,
-    // crates, the cistern head, the hall — rakes right-to-left ACROSS the paving
-    // toward the camera. That is the whole point of the re-stage; the old 36°
-    // pose hid every one of those shadows behind its own object.
-    //
-    // FOUR depth planes, and the near one is the round-2 fix. The cover wall now
-    // stands 2.5 m from the lens and 17° left of the axis: its top course sits
-    // 0.62 m below the eye, so it cuts the bottom-left quarter of the frame as a
-    // hard dark mass against the sunlit paving beyond it. Behind it: the market
-    // hall's south-east corner at 20 m on the left, the cistern head and stalls
-    // across the square at 13–26 m, the minaret at 26° right and 38 m, then the
-    // town roofline and the pylons at 150 m. Foreground, midground and
-    // background are separable by luminance alone, which is what §7.2 asks for.
-    //
-    // Paving deck is 11.60 (buildSquare sinks the slab 4 cm into the 11.5
-    // terrace), so 1.62 m standing eye puts the camera at 13.22. Pitch −1.5°
-    // keeps the horizon 3 % above the centreline, inside §7.2's ±6 %.
-    ctx.poseCamera([98.12, 13.22, 103.79], [81.26, 12.04, 62.07], 52);
+    /*
+     * ROUND 6 - WHY THIS SHOT WAS THE WORST FRAME IN THE PROJECT, AND WHAT
+     * ACTUALLY FIXED IT.
+     *
+     * The finding, which four rounds of tuning never reached, is a fact about
+     * the level and the hour rather than about the camera:
+     *
+     *     AT 17.4 h THE MARKET SQUARE IS IN SHADOW.
+     *
+     * The sun is at azimuth 261 deg, elevation 11 deg, so light travels along
+     * 81 deg and an occluder of height H shadows 5.14*H downwind of itself. The
+     * blocks on the square's west side (`BLOCKS` at (34,100) and (22,96), 9-12 m
+     * tall) therefore lay 46-62 m of shadow straight across it, and the market
+     * hall itself (5.6 m + roof, east face at x = 84) lays another 30 m over the
+     * square's whole north-east quadrant. Every round-1..5 ALPHA pose stood
+     * inside that shadow and pointed at more of it. That is why the critics kept
+     * writing "no cast shadows visible", "every vertical face at the same
+     * value", "flat, front-lit": there was no direct light in the frame at all,
+     * and the flatness read as front-lighting because unlit and front-lit look
+     * identical.
+     *
+     * An azimuth sweep from four stations (16 captures) mapped the terminator.
+     * The square's SOUTH strip, everything at z < ~93, clears both shadows and is
+     * in full raking sun; the north half is not. So the frame has to STRADDLE the
+     * terminator, and this pose does: the camera stands in the hall's shadow and
+     * the sightline runs out of it into the lit strip 14 m ahead. That is
+     * section 7.2's luminance banding delivered by real light rather than by a
+     * grade.
+     *
+     * STATION. (91.5, 13.22, 104.6) - inside the square, 7.5 m east of the
+     * market hall's east arcade line and 1.4 m south of its north end. Paving deck is
+     * 11.60 (`buildSquare` sinks the slab 4 cm into the 11.5 terrace), so a
+     * 1.62 m standing eye is at 13.22. Nothing about this camera is above head
+     * height and nothing about it is a drone shot; the round-4
+     * "third-person-looking" note came from the empty foreground, not from the
+     * elevation.
+     *
+     * SIGHTLINE 197.3 deg. Off-light is 197.3 - 81 = 116 deg, inside section 2.3's
+     * 100-150 deg window (the old pose measured 121 deg, so the RULE was already
+     * satisfied and was never the problem - the problem was that the frame
+     * contained no lit surface for the rule to act on).
+     *
+     * WHAT IS IN THE FRAME, near to far, and why each is there:
+     *
+     *   0-2 m   shadowed paving with the settled-sett band, grass tufts and
+     *           spall. Dark, low-chroma, and it is the bottom of the histogram.
+     *   3-18 m  THE ARCADE, left third. Three bays of `buildMarketHall`'s east
+     *           colonnade - pier, impost, voussoired arch - running away from the
+     *           lens as the near-field occluding mass section 7.2 asks for (it
+     *           reads ~2.5x darker than the lit strip beyond it) and as the
+     *           leading line. The sand drift and spall banked along its plinth
+     *           crosses the lower third diagonally: this shot's "no hard seam"
+     *           proof is now 400 px wide instead of a 12 px sliver at the
+     *           horizon.
+     *   14-30 m THE LIT STRIP. Raking sun across open paving, a working stall
+     *           with produce on the trestle, the terrace's sandbagged stair head.
+     *           Warm, and the only warm thing in the near half of the frame.
+     *   3 m    a SECOND near mass, bottom right: the stall at (94.2, 100.7),
+     *           entering as its canopy edge, awning post and trestle. Both bottom
+     *           corners are now anchored, which is the arrangement `level_bravo`
+     *           (6.33, the best frame in the set) uses and which ALPHA has never
+     *           had. It also carries the frame's only warm near-field pixels.
+     *   26 m    the mosque compound wall down the right edge, with its coping
+     *           lit and its face sky-lit - section 2.3's "lit face and sky-lit
+     *           face on one object" satisfied on the biggest object in the frame
+     *           - plus the sunlit kiosk, which carries the frame's brightest
+     *           non-sky pixels.
+     *   38 m    THE MINARET, upper right, against sky. The vertical anchor. It
+     *           was in the old frame too, jammed into and cropped by the right
+     *           edge; five degrees of yaw is the whole difference.
+     *   55-90 m the town over the terrace lip, already veiled.
+     *
+     * THE POSE THAT WAS REJECTED, so it is not retried. Standing UNDER a stall
+     * canopy or inside the hall was captured five times and is unusable: the
+     * interior loses all sky light, auto-exposure meters the sunlit exterior, and
+     * the near 60 % of the frame crushes to 0-15 luma with no readable material.
+     * A dark near field is wanted; a black one is not. The arcade has to be
+     * beside the camera, not over it.
+     *
+     * Pitch is -0.74 deg, horizon at 51 % of frame height, inside section 7.2's
+     * +/-6 %. FOV 52 is deliberately NOT the 38-40 deg cinematic lens: that path
+     * in `src/render/passes/dof.ts` auto-focuses on the centre pixel, which here
+     * is paving at 20 m, and it cropped the minaret and the cloud bank out of
+     * frame for a bokeh the composition does not need.
+     */
+    ctx.poseCamera([91.5, 13.22, 104.6], [79.5, 12.7, 66.1], 52);
   },
 });
 
@@ -285,5 +356,3 @@ registerShot({
     ctx.poseCamera([152, 236, 300], [-70, 10, 2], 45);
   },
 });
-
-

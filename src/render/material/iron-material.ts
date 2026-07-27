@@ -118,26 +118,47 @@ interface BlockLattice {
   readonly amp: number;
   /** Quantise stochastic tile offsets to whole cells. */
   readonly lattice: boolean;
+  /**
+   * Draw the analytic MORTAR JOINT on this cell grid.
+   *
+   * Separate from `amp`, and the separation is the fix for a defect that had
+   * been shipping on three surfaces at once. The cell grid has two jobs: it is
+   * the unit of the per-stone TONAL field ("two bricks in a wall are never the
+   * same colour"), and it is the line along which the POINTING runs. Every
+   * surface in the game wants the first. Only surfaces built out of laid or cast
+   * units have the second.
+   *
+   * Driving both off `amp` put a 9 mm recessed joint, its two chipped arrises
+   * and its bevel on a 1.6 m grid across the SAND, on a 7x7 grid across every
+   * RUBBLE boulder, and on a 0.75 m grid across STUCCO. Which is to say: a
+   * regular rectangular lattice, in world space, on the three surfaces in the
+   * game that have no straight lines in them at all. That is the "diagonal
+   * lattice tiling pattern on the sand" and the turtle-shell look on the
+   * boulders, and neither was a tiling artefact — the shader was drawing it.
+   */
+  readonly joints: boolean;
 }
 
-const ASHLAR: BlockLattice = { cells: [4, 8], bond: 0.5, amp: 1.0, lattice: true };
-const PANELS: BlockLattice = { cells: [2, 3], bond: 0, amp: 0.5, lattice: true };
-const PLANKS: BlockLattice = { cells: [5, 3], bond: 0, amp: 0.55, lattice: true };
-const COBBLES: BlockLattice = { cells: [7, 7], bond: 0, amp: 1.0, lattice: false };
+const ASHLAR: BlockLattice = { cells: [4, 8], bond: 0.5, amp: 1.0, lattice: true, joints: true };
+const PANELS: BlockLattice = { cells: [2, 3], bond: 0, amp: 0.5, lattice: true, joints: false };
+const PLANKS: BlockLattice = { cells: [5, 3], bond: 0, amp: 0.55, lattice: true, joints: true };
+const COBBLES: BlockLattice = { cells: [7, 7], bond: 0, amp: 1.0, lattice: false, joints: true };
 /** Unpatterned mineral — 0.4–0.6 m weathering patches on a half-brick bond. */
-const PATCHES: BlockLattice = { cells: [3.2, 4.0], bond: 0.5, amp: 0.7, lattice: false };
-const DRIFT: BlockLattice = { cells: [1.6, 1.6], bond: 0, amp: 0.4, lattice: false };
-const NO_LATTICE: BlockLattice = { cells: [1, 1], bond: 0, amp: 0, lattice: false };
+const PATCHES: BlockLattice = { cells: [3.2, 4.0], bond: 0.5, amp: 0.7, lattice: false, joints: false };
+const DRIFT: BlockLattice = { cells: [1.6, 1.6], bond: 0, amp: 0.4, lattice: false, joints: false };
+const NO_LATTICE: BlockLattice = { cells: [1, 1], bond: 0, amp: 0, lattice: false, joints: false };
+/** Broken stone: a lump, not a unit. Cell tone yes, pointing absolutely not. */
+const LUMPS: BlockLattice = { cells: [7, 7], bond: 0, amp: 1.0, lattice: false, joints: false };
 
 const BLOCK_LATTICE: Partial<Readonly<Record<SurfaceId, BlockLattice>>> = {
   [SurfaceId.Sandstone]: ASHLAR,
   [SurfaceId.Tile]: ASHLAR, // aliased onto the sandstone bake — laid units, grout courses
   [SurfaceId.Stucco]: PATCHES,
   [SurfaceId.Plaster]: PATCHES,
-  [SurfaceId.Concrete]: { ...PATCHES, amp: 0.9 },
+  [SurfaceId.Concrete]: { ...PATCHES, amp: 0.9 },  // cast, not laid: no pointing
   [SurfaceId.Cobble]: COBBLES,
-  [SurfaceId.Rubble]: COBBLES,
-  [SurfaceId.Gravel]: { ...COBBLES, amp: 0.85 },
+  [SurfaceId.Rubble]: LUMPS,
+  [SurfaceId.Gravel]: { ...LUMPS, amp: 0.85 },
   [SurfaceId.Sand]: DRIFT,
   [SurfaceId.WetSand]: DRIFT,
   [SurfaceId.Dirt]: { ...DRIFT, amp: 0.5 },
@@ -389,6 +410,10 @@ function definesFor(
   const d: Record<string, string> = {};
   if (f & MaterialFeature.Triplanar) d.IRON_TRIPLANAR = '1';
   if (block.amp > 0) d.IRON_STONE = '1';
+  // The pointing is its own permutation, and a cheap one: it only ever splits
+  // the IRON_STONE subset, and the half that loses it also loses four hashes,
+  // a smoothstep pair and the bevel's analytic derivative.
+  if (block.amp > 0 && block.joints) d.IRON_JOINTS = '1';
   // One permutation for the whole sheet-metal stack — rib, seam, bolts and the
   // three rust generations ride the same handful of noise calls, and splitting
   // them into separate bits would multiply programs for no shading benefit.
@@ -483,13 +508,22 @@ export function buildIronMaterial(opts: IronMaterialOptions): IronMaterialResult
   const { spec, textures, globals } = opts;
   const f = spec.features;
 
+  // ANISOTROPY FLOOR. `QualitySettings.maxAnisotropy` is 4 on the low tier, and
+  // 4 is not enough for this game's staging: at an 11 deg sun every hero surface
+  // is read at 70-85 deg incidence, where the texture footprint is 8-16x longer
+  // than it is wide. A 4x sampler answers that by dropping four mips, so the
+  // NEAREST wall in the frame is the blurriest one - the exact "goes smooth as
+  // it approaches the camera" defect the rubric fails a frame for. three clamps
+  // this to the driver's real maximum in WebGLTextures, so asking for 16 is
+  // safe on hardware that cannot do it.
+  const aniso = Math.max(opts.anisotropy, 16);
   const albedoHeight = textures.albedoHeight;
   const normalRoughAo = textures.normalRoughAo;
   const wear = textures.wear ?? normalRoughAo;
   for (const t of [albedoHeight, normalRoughAo, wear]) {
     t.wrapS = THREE.RepeatWrapping;
     t.wrapT = THREE.RepeatWrapping;
-    if (t.anisotropy < opts.anisotropy) t.anisotropy = opts.anisotropy;
+    if (t.anisotropy < aniso) t.anisotropy = aniso;
   }
 
   const hasWear = textures.wear !== undefined;

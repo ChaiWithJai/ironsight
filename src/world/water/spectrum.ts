@@ -23,9 +23,16 @@
  *                      wind sea, and the interference between the two is what
  *                      makes crests short-crested: they build, run a few
  *                      wavelengths and die, instead of striping the frame.
- *   CHOP     7–34 m    displaces geometry, wide spread, carries the crests that
- *                      break into whitecaps
- *   RIPPLE 0.09–4.5 m  NORMAL ONLY, evaluated per-fragment. These are the waves
+ *   CHOP     5–34 m    displaces geometry, wide spread, carries the crests that
+ *                      break into whitecaps. TEN components, not five, for the
+ *                      same reason the ripple band has sixteen: once the shading
+ *                      band-limit went anisotropic this band is resolved out to
+ *                      four hundred metres instead of sixty, and five sinusoids
+ *                      spread over a whole frame of sea read as regular parallel
+ *                      corduroy. Renormalisation is per band, so doubling the
+ *                      count halves each component and buys irregularity at no
+ *                      cost in sea state.
+ *   RIPPLE 0.09–3.4 m  NORMAL ONLY, evaluated per-fragment. These are the waves
  *                      the glitter path is actually made of: at 11° sun a 1.5 m
  *                      ripple with 8 cm amplitude has a 20° slope, which is
  *                      exactly the facet population that throws the sun at the
@@ -50,8 +57,25 @@ import type { Rng } from '@/engine/types';
 
 export const SWELL_COUNT = 3;
 export const CROSS_COUNT = 2;
-export const CHOP_COUNT = 5;
-export const RIPPLE_COUNT = 8;
+export const CHOP_COUNT = 10;
+/**
+ * SIXTEEN, NOT EIGHT, AND THE REASON IS A LATTICE.
+ *
+ * Eight ripple components was enough while the shading band-limit was isotropic,
+ * because past ~30 m the filter had faded all of them out and nobody ever saw
+ * the band at full amplitude over more than a few square metres. With an
+ * anisotropic band limit the same eight sinusoids are now resolved across the
+ * whole near and mid field at once — and eight sinusoids at full amplitude over
+ * a hundred metres of sea do not read as chop, they read as WOVEN CLOTH: two of
+ * them happen to cross near 90° at similar wavelengths and their product is a
+ * regular rectangular grid that tiles the frame. It is the same failure the
+ * CROSS band exists to prevent one octave up, and the fix is the same one — more
+ * components, wider spread — because what makes real capillary water look like
+ * water is that its crests are SHORT: they build, run two or three wavelengths
+ * and die, which is what a dense set of nearby wavenumbers does and what a
+ * sparse one cannot.
+ */
+export const RIPPLE_COUNT = 16;
 /** Bands that displace geometry. The CPU height query evaluates exactly these. */
 export const DISPLACING_COUNT = SWELL_COUNT + CROSS_COUNT + CHOP_COUNT;
 export const WAVE_COUNT = DISPLACING_COUNT + RIPPLE_COUNT;
@@ -132,12 +156,18 @@ const BANDS: readonly BandSpec[] = [
   // enough that the two systems beat rather than lock, narrow enough that it
   // still reads as a swell and not as noise.
   { count: CROSS_COUNT, lambdaMin: 30, lambdaMax: 64, spread: 0.3, bearing: 1.08, variance: 0.14 },
-  { count: CHOP_COUNT, lambdaMin: 7, lambdaMax: 34, spread: 0.66, bearing: -0.26, variance: 0.27 },
+  { count: CHOP_COUNT, lambdaMin: 5, lambdaMax: 34, spread: 0.78, bearing: -0.26, variance: 0.27 },
   {
     count: RIPPLE_COUNT,
     lambdaMin: 0.09,
-    lambdaMax: 4.5,
-    spread: 1.08,
+    lambdaMax: 3.4,
+    // 1.45 rad of half-spread is nearly isotropic, and at this scale that is
+    // correct: capillary waves are raised by the local turbulence in the wind's
+    // surface layer, not by the mean wind, so their directional distribution is
+    // much broader than the swell's. It is also what breaks the lattice — two
+    // components can only weave if there are few enough of them for one crossing
+    // to dominate.
+    spread: 1.45,
     bearing: 0.34,
     variance: 0.09,
   },

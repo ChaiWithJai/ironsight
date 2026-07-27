@@ -133,14 +133,19 @@ export function buildViewmodelMaterials(materials: MaterialFactory): RoleMateria
       base: [0.0552, 0.0602, 0.0492],
       // Cerakote over 7075 aluminium: what shows through is bright bare metal.
       substrate: [0.322, 0.334, 0.351],
-      roughness: 0.42,
+      roughness: 0.60,
       // Paint is a dielectric FILM over metal, so the unworn finish is barely
       // metallic; only where it is gone does the substrate assert itself.
       metalness: 0.10,
-      substrateMetalness: 0.95,
-      wear: 0.85,
+      // 0.78 rather than 0.95. Cerakote does not come off down to a mirror; it
+      // wears through to aluminium that has itself been handled for years, and
+      // a near-perfect metal on a viewmodel edge reflects whatever half of the
+      // sky it happens to face, which is how a chamfer highlight turns into a
+      // gold band.
+      substrateMetalness: 0.78,
+      wear: 0.62,
       fouling: 0.7,
-      streak: 0.13,
+      streak: 0.21,
       grain: 0.9,
     }),
   );
@@ -152,13 +157,13 @@ export function buildViewmodelMaterials(materials: MaterialFactory): RoleMateria
       // phosphate conversion coat is porous and scatters.
       base: [0.118, 0.121, 0.128],
       substrate: [0.505, 0.512, 0.527],
-      roughness: 0.34,
+      roughness: 0.44,
       metalness: 1.0,
       substrateMetalness: 1.0,
       wear: 0.95,
       // The barrel, the muzzle device and the gas block take nearly all of it.
       fouling: 1.0,
-      streak: 0.16,
+      streak: 0.24,
       grain: 0.7,
     }),
   );
@@ -202,16 +207,52 @@ export function buildViewmodelMaterials(materials: MaterialFactory): RoleMateria
       // frame that had two. It sits BETWEEN the dark receiver and the tan
       // furniture, which is where a real glove sits and is what lets the hand
       // separate from both.
-      base: [0.0622, 0.0538, 0.0424],
+      base: [0.0470, 0.0412, 0.0334],
       // Knuckle plate and finger ridges scuff pale and dusty, not shiny.
-      substrate: [0.1080, 0.0905, 0.0668],
+      substrate: [0.0880, 0.0742, 0.0556],
       roughness: 0.90,
       metalness: 0.0,
       substrateMetalness: 0.0,
       wear: 0.40,
       fouling: 0.0,
       streak: 0.0,
-      grain: 1.4,
+      grain: 1.1,
+      // ISOTROPIC, unlike every other role here. The 8:1 default is a machining
+      // comb, and running it on a glove gave the support hand a corduroy nap
+      // 11 mm long — at ADS scale a 40-px rib pattern that made a fist read as a
+      // rolled-up sleeve. 3.3 mm each way is a woven weave, which is what Nomex
+      // is, and it is the difference between a hand and a bolt of cloth.
+      grainU: 300,
+      grainV: 300,
+    }),
+  );
+
+  /* THE CAVITY FINISH — the inside of the optic tube, and nothing else.
+   *
+   * The viewmodel carries no self-shadow (see `viewmodel/rig.ts`), which is the
+   * right trade on convex geometry and indefensible inside a bore: a cavity is
+   * nothing but self-shadowing, so with a 20 000 lux key and no occlusion term
+   * the far inner wall of the housing rendered as a blown ochre crescent INSIDE
+   * the sight picture. Near-black and fully rough is the only combination that
+   * cannot produce a specular crescent at grazing incidence, and it is also
+   * simply what the inside of a real optic is: matte black anodising, chosen by
+   * the people who build them for exactly this reason.
+   *
+   * Everything that would fight that is off — no edge wear (there is no hand on
+   * the inside of a tube), no brushing streak, no fouling.
+   */
+  materials.registerSurface(
+    'weapon.cavity',
+    weaponSurfaceChunk({
+      base: [0.0102, 0.0104, 0.0110],
+      substrate: [0.0180, 0.0182, 0.0190],
+      roughness: 0.94,
+      metalness: 0.0,
+      substrateMetalness: 0.0,
+      wear: 0.10,
+      fouling: 0.0,
+      streak: 0.0,
+      grain: 0.5,
     }),
   );
 
@@ -226,7 +267,7 @@ export function buildViewmodelMaterials(materials: MaterialFactory): RoleMateria
     surfaceShader: 'weapon.receiver',
     tilingScale: WEAPON_TILING,
     baseColor: 0x33362f,
-    roughness: 0.44,
+    roughness: 0.60,
     metalness: 0.18,
     detailScale: 9,
   });
@@ -240,7 +281,7 @@ export function buildViewmodelMaterials(materials: MaterialFactory): RoleMateria
     surfaceShader: 'weapon.steel',
     tilingScale: WEAPON_TILING,
     baseColor: 0x4a4a4c,
-    roughness: 0.31,
+    roughness: 0.42,
     metalness: 1.0,
     detailScale: 10,
   });
@@ -262,6 +303,20 @@ export function buildViewmodelMaterials(materials: MaterialFactory): RoleMateria
     roughness: 0.68,
     metalness: 0.0,
     detailScale: 11,
+  });
+
+  const cavity = materials.create({
+    ...solid,
+    id: 'weapon.cavity',
+    surface: SurfaceId.PaintedMetal,
+    layer: layer('weapon.cavity', SurfaceId.PaintedMetal),
+    features: MaterialFeature.None,
+    surfaceShader: 'weapon.cavity',
+    tilingScale: WEAPON_TILING,
+    baseColor: 0x151515,
+    roughness: 0.94,
+    metalness: 0.0,
+    detailScale: 9,
   });
 
   // The optic combiner. Transparent, DEPTH-WRITE OFF and driven by
@@ -324,5 +379,5 @@ export function buildViewmodelMaterials(materials: MaterialFactory): RoleMateria
     detailScale: 14,
   });
 
-  return { receiver, steel, polymer, glass, reticle, glove };
+  return { receiver, steel, polymer, glass, reticle, glove, cavity };
 }

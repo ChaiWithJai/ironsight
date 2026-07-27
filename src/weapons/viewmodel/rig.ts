@@ -822,7 +822,7 @@ class IronViewmodel implements ViewmodelRig {
     // × d² because this is a point light standing in for a directional one:
     // three's inverse-square attenuation divides it straight back out at the
     // weapon, so what lands on the receiver is `sunLux · 0.42` lux exactly.
-    this.keyLight.intensity = sunLux * 0.42 * VM_LIGHT_FALLOFF;
+    this.keyLight.intensity = sunLux * 0.155 * VM_LIGHT_FALLOFF;
 
     // Ground bounce, computed rather than dialled: the horizontal illuminance
     // falling on the street times the street's albedo is what comes back up.
@@ -852,7 +852,7 @@ class IronViewmodel implements ViewmodelRig {
     // rather than letting the ambient swallow the weapon again now that the key
     // has come down.
     const hemisphereLux = Math.max(skyLux, bounceLux);
-    this.fillLight.intensity = hemisphereLux * 0.62 * 0.72;
+    this.fillLight.intensity = hemisphereLux * 0.62 * 0.58;
     // Colours carry the RATIO between the two halves; the intensity carries the
     // magnitude. Sky is the LOOK_SPEC teal shadow chroma, ground is sandstone.
     // The shares divide by the UNSCALED hemisphere, not by the scaled intensity:
@@ -894,7 +894,7 @@ class IronViewmodel implements ViewmodelRig {
     // direction is a unit vector, so dropping its `y` leaves a horizontal run
     // SHORTER than `VM_LIGHT_DISTANCE` by cos(elevation) and the rim would come
     // out up to 20 % hot at a high sun.
-    this.rimLight.intensity = skyLux * 0.80 * this.rimLight.position.distanceToSquared(eye);
+    this.rimLight.intensity = skyLux * 0.68 * this.rimLight.position.distanceToSquared(eye);
     this.keyLight.updateMatrixWorld(true);
     this.rimLight.updateMatrixWorld(true);
 
@@ -1030,7 +1030,7 @@ function stanceSteadiness(ctx: FrameCtx): number {
  * the point where the hand still reads on the rail and the arm still leaves the
  * frame on the correct side. A real wrist joint is the proper fix.
  */
-const HAND_L_EULER = { x: -0.18, y: -0.20, z: 1.0 } as const;
+const HAND_L_EULER = { x: -0.22, y: -0.20, z: 1.16 } as const;
 /** The firing hand matches the grip's 16° rake, authored in `models/build.ts`. */
 const HAND_R_EULER = { x: -0.30, y: 0.0, z: 0.04 } as const;
 

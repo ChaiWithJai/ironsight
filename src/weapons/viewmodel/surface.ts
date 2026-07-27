@@ -101,6 +101,18 @@ export interface WeaponSurfaceParams {
   readonly streak: number;
   /** Micro-relief amplitude, in normal-slope units. */
   readonly grain: number;
+  /**
+   * Micro-relief cycles per metre ACROSS the bore and ALONG it.
+   *
+   * The 8:1 default is a machining artefact and belongs only on machined parts:
+   * a bead-blasted receiver is combed by the tool path, so its grain is
+   * stretched down the bore and reads as brushing. A woven Nomex glove has no
+   * tool path and no preferred direction, and running the metal figures on it
+   * gave the support hand a corduroy nap that made it read as a rolled sleeve
+   * rather than as a fist — a defect visible at ADS scale and at no other.
+   */
+  readonly grainU?: number;
+  readonly grainV?: number;
 }
 
 /**
@@ -131,7 +143,7 @@ export function weaponSurfaceChunk(p: WeaponSurfaceParams): SurfaceChunk {
       // 1.4 mm across, 11 mm along: bead-blast grain combed by the machining
       // pass. The 8:1 aspect IS the anisotropy — an isotropic grain at this
       // frequency reads as sand.
-      float wpnGrain = wpnFbm( vec2( wpnBore * 88.0, wpnUv.y * 700.0 ) );
+      float wpnGrain = wpnFbm( vec2( wpnBore * ${f(p.grainU ?? 88)}, wpnUv.y * ${f(p.grainV ?? 700)} ) );
       // ~4.5 mm: cerakote orange-peel and anodising density.
       //
       // ROUND 3 TOOK THIS FROM 56 (1.8 cm) TO 210. The frequency is the whole
@@ -175,15 +187,47 @@ export function weaponSurfaceChunk(p: WeaponSurfaceParams): SurfaceChunk {
       // 0.6 mm machining chamfer. That is a real curvature signal with a real
       // zero, which is what an edge-wear mask needs and what puts the silver on
       // the rail teeth and the magwell lip instead of over everything.
+      //
+      // ROUND 5 DIVIDED IT BY THE TEXEL FOOTPRINT, AND THAT TURNED A SCREEN-SPACE
+      // MEASURE INTO A PHYSICAL ONE. This is the fix for a defect that made the
+      // same weapon look like two different objects at two distances.
+      //
+      // sqrt(|dNdx|^2 + |dNdy|^2) is radians of normal swing PER PIXEL, so its
+      // value at a given chamfer depends entirely on how many pixels that
+      // chamfer happens to occupy. A 0.6 mm chamfer at the ADS eye relief is 3 px
+      // and reads 0.5; the same chamfer at the hipfire distance is under a pixel
+      // and reads 1.0 — and so does every smooth-shaded facet on the barrel and
+      // the optic tube, because at that scale everything is curvy. The mask
+      // therefore SATURATED across the whole weapon in hipfire, took the albedo
+      // to the 0.322 substrate and the metalness to 0.78, and rendered a
+      // cerakoted carbine as a brass one. Measured on the round-4 hipfire frame:
+      // the weapon's sunlit side ran 0.75/0.60/0.35 sRGB, which is polished
+      // bronze, not a service rifle.
+      //
+      // Dividing by fwidth(uv) — metres of surface per pixel, which the
+      // weapon-space box map gives us for free — converts the numerator to
+      // radians per METRE, a property of the geometry alone. A flat panel is 0
+      // whatever the distance, a 20 mm-radius tube is 1/R = 50, and a 0.6 mm
+      // machining chamfer is ~2600. The band below sits between the last two, so
+      // the wear lands on chamfers and only on chamfers, at every distance.
       vec3 wpnDnx = dFdx( vNormal );
       vec3 wpnDny = dFdy( vNormal );
-      float wpnCurv = clamp( sqrt( dot( wpnDnx, wpnDnx ) + dot( wpnDny, wpnDny ) ) * 3.1, 0.0, 1.0 );
-      float wpnEdge = smoothstep( 0.18, 0.62, wpnCurv );
+      float wpnTexel = max( length( vec2( fwidth( wpnUv.x ), fwidth( wpnUv.y ) ) ), 1e-6 );
+      float wpnCurv = sqrt( dot( wpnDnx, wpnDnx ) + dot( wpnDny, wpnDny ) ) / wpnTexel;
+      // Radians per metre. 500 is ten times a 20 mm-radius smooth tube and a
+      // fifth of a 0.6 mm chamfer, so a cylinder never reaches it and every
+      // machined break does.
+      float wpnEdge = smoothstep( 500.0, 1800.0, wpnCurv );
 
       // Broken by the macro band so the wear is a history rather than an
       // outline: a rifle has a bright rail and a bright magwell lip, not a
       // uniform silver rim around every single feature.
-      float wpnWear = clamp( wpnEdge * ( 0.30 + 1.05 * wpnMacro ) * ${f(p.wear)}, 0.0, 1.0 );
+      // The macro modulation is HALVED from round 3 (0.30 + 1.05 m). It is
+      // there so the wear reads as a history rather than as an outline, but at
+      // the old spread a 7 cm noise band was doubling the wear on one end of a
+      // rail and killing it on the other, which on a part that is 51 identical
+      // teeth reads as staining rather than as handling.
+      float wpnWear = clamp( wpnEdge * ( 0.52 + 0.55 * wpnMacro ) * ${f(p.wear)}, 0.0, 1.0 );
 
       // ---- carbon fouling --------------------------------------------------
       // Gas rifles blow soot back over the last 60 mm of the muzzle device and
@@ -224,9 +268,9 @@ export function weaponSurfaceChunk(p: WeaponSurfaceParams): SurfaceChunk {
       // swinging the specular lobe hard enough to speckle on its own, on top of
       // everything the wear mask was doing.
       wpnRough += ( wpnGrain - 0.5 ) * 0.08;
-      wpnRough += ( wpnMeso - 0.5 ) * 0.05;
+      wpnRough += ( wpnMeso - 0.5 ) * 0.09;
       // Handled edges polish: worn metal is SMOOTHER than the finish it lost.
-      wpnRough -= wpnWear * 0.26;
+      wpnRough -= wpnWear * 0.14;
       // Fouling is soot, and soot is matte.
       wpnRough += wpnSoot * 0.30;
       // The axial brushing line. One long low-roughness streak down the bore
@@ -244,9 +288,36 @@ export function weaponSurfaceChunk(p: WeaponSurfaceParams): SurfaceChunk {
       // metric step on each, because the grain is 8:1 anisotropic. Stepping the
       // same 1.6 mm on both would cross a whole cell in y and return a
       // decorrelated sample rather than a gradient, which is noise, not relief.
-      float wpnGx = wpnFbm( vec2( wpnBore * 88.0 + 0.14, wpnUv.y * 700.0 ) ) - wpnGrain;
-      float wpnGy = wpnFbm( vec2( wpnBore * 88.0, wpnUv.y * 700.0 + 0.14 ) ) - wpnGrain;
-      mat3 wpnTbn = ironTangentFrame( normal, vWorldPosition, wpnUv );
+      float wpnGx = wpnFbm( vec2( wpnBore * ${f(p.grainU ?? 88)} + 0.14, wpnUv.y * ${f(p.grainV ?? 700)} ) ) - wpnGrain;
+      float wpnGy = wpnFbm( vec2( wpnBore * ${f(p.grainU ?? 88)}, wpnUv.y * ${f(p.grainV ?? 700)} + 0.14 ) ) - wpnGrain;
+
+      // ROUND 5: THE TANGENT FRAME — AND THE WHOLE NORMAL — IS REBUILT ON THE
+      // INTERPOLATED VERTEX NORMAL, WHICH DISCARDS THE BAKE'S NORMAL MAP
+      // OUTRIGHT. This is the fix for the defect four earlier rounds chased
+      // through frequency, amplitude and curvature-source changes without ever
+      // removing the cause.
+      //
+      // normal arriving here has been through mat.rusted_metal's normal map
+      // — 2.6 m of corroded sheet, divided by WEAPON_TILING to a 186 mm
+      // repeat. In ADS the rear of the receiver passes within 90 mm of the eye,
+      // where 186 mm of surface spans roughly 1900 px, so what lands on the
+      // near third of the frame is the bake's 20-50 mm corrosion dents blown up
+      // to 200-500 px. They are far too large to read as texture and far too
+      // irregular to read as form, and — this is the mechanism — a dent's two
+      // flanks tilt opposite ways, so against the viewmodel's sky-over-ground
+      // hemisphere one flank samples the teal half and the other the sandstone
+      // half. That is the blue-and-gold mottle every round-2/3/4 critic has read
+      // as "lichen on concrete", measured directly: with this one line changed
+      // to vNormal and nothing else touched, the mottle disappears completely.
+      //
+      // Nothing of value is lost. The bake's normal map is authored for a
+      // 2.6 m sheet of rusted steel; a rifle has no such relief at any scale.
+      // Its AO and roughness channels are still consumed upstream, and every
+      // band of relief a weapon does have — bead blast, broaching, chamfer wear —
+      // is written analytically below at the right frequency for a 44 mm part.
+      vec3 wpnFlat = normalize( vNormal );
+      normal = wpnFlat;
+      mat3 wpnTbn = ironTangentFrame( wpnFlat, vWorldPosition, wpnUv );
       // NEGATED, because the tangent-space normal of a height field h is
       // (-dh/du, -dh/dv, 1): a rising slope tilts the normal BACKWARDS. With
       // symmetric noise the sign is statistically invisible, which is exactly
@@ -323,7 +394,7 @@ export function weaponSurfaceChunk(p: WeaponSurfaceParams): SurfaceChunk {
  */
 export function opticLensChunk(): SurfaceChunk {
   return {
-    common: '',
+    common: HELPERS,
     shade: /* glsl */ `
     {
       // THE GEOMETRIC NORMAL, taken back from the position derivatives.
@@ -376,9 +447,36 @@ export function opticLensChunk(): SurfaceChunk {
       // green ring round the sight picture rather than a soft graduation.
       diffuseColor.rgb = vec3( 0.030, 0.098, 0.086 ) * ( 0.4 + 0.9 * wpnFres + 0.5 * wpnRim );
 
+      /* WHAT IS ON THE GLASS, WHICH IS THE PART NOBODY MODELS AND EVERYBODY SEES.
+       *
+       * A combiner that has been in a chest rig for a fortnight is not optically
+       * clean, and in ADS it is 40 % of the frame's height with the player's eye
+       * fixed on it — the least forgiving surface in the game. Two layers, both
+       * on the pane's own 0..1 plane UVs so they sit on the GLASS and do not
+       * swim when the weapon moves:
+       *
+       *  1. FINGERPRINT AND SMEAR, at ~4 mm. Sebum does not block light, it
+       *     SCATTERS it: the reflectance rises a little and the polish drops a
+       *     lot, so a smear is invisible against a dark target and flares into a
+       *     soft milky patch when there is a bright sky behind it — which is
+       *     exactly when a shooter notices it, and exactly what this shot has.
+       *  2. DUST, at ~0.8 mm and much sparser, riding the top of the same field.
+       *
+       * Both are deliberately weak. The test for this term is that you cannot
+       * see it until you look for it; a lens with a visible pattern on it is a
+       * dirty window, not an optic.
+       */
+      float wpnSmudge = wpnFbm( vUv * 11.0 + vec2( 3.1, 7.7 ) );
+      wpnSmudge = smoothstep( 0.46, 0.86, wpnSmudge );
+      float wpnDust = smoothstep( 0.72, 0.95, wpnFbm( vUv * 62.0 ) ) * wpnSmudge;
+      diffuseColor.a = clamp( diffuseColor.a + wpnSmudge * 0.045 + wpnDust * 0.10, 0.0, 0.96 );
+      // The smear picks up the warm side of the sky rather than the coating's
+      // blue-green residual: it is sitting ON the coating, not in it.
+      diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.115, 0.101, 0.086 ), wpnSmudge * 0.5 + wpnDust * 0.4 );
+
       // Optical polish. The specular lobe is what carries the reflection, and
       // it is already being scaled by the alpha above, so it needs no help.
-      material.roughness = 0.035;
+      material.roughness = 0.035 + wpnSmudge * 0.16 + wpnDust * 0.22;
       material.metalness = 0.0;
     }
 `,

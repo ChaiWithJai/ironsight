@@ -92,7 +92,27 @@ export function arService(mesh: AssetKey<MeshAsset>): WeaponDef {
       fovMultiplier: 0.78,
       sensitivityMultiplier: 0.72,
       magnification: 1,
-      eyeRelief: 0.235,
+      /*
+       * ROUND 5 TOOK EYE RELIEF FROM 0.235 TO 0.300, AND IT IS A COMPOSITION
+       * NUMBER RATHER THAN AN ERGONOMIC ONE.
+       *
+       * `adsBlock` puts the sight point exactly this far in front of the eye, so
+       * this single figure sets how much of the frame the optic owns. At 0.235
+       * the 56 mm housing subtended 23 % of frame HEIGHT. The corpus's only
+       * clean iron-sight ADS frame, `bf2042_gp_000`, puts its sight at 12 %, and
+       * `bf6_gp_004`'s holo at 14 %; 23 % is not a sight picture, it is a sight
+       * filling the screen, and it drags two other things with it. The rear of
+       * the receiver ended up level with the eye, so the near field was an
+       * exploding 30 %-wide wedge of receiver top at 80 mm — the worst distance
+       * in the frame for the DOF near clamp — and the support hand, 22 cm out,
+       * fell entirely behind that wedge.
+       *
+       * 0.300 puts the housing at 17 %, the receiver's breech face 60 mm in
+       * front of the eye rather than level with it, and the weapon column at
+       * roughly the width the reference frames carry. Nothing about the weapon
+       * changed; the eye moved back, which is what a shooter's head does.
+       */
+      eyeRelief: 0.300,
       // SOLVED, not dialled in, and then checked against a render. Through the
       // viewmodel camera's fixed 55° vertical FOV at 16:9 this puts the optic at
       // (66%, 58.5%), the muzzle up and inboard of it at (55%, 59%) and the

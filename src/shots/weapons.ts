@@ -92,6 +92,17 @@ registerShot({
     'the ADS transition fully settled after its eased 195 ms curve.',
   frames: 30,
   setup(ctx) {
+    // ROUND 5 NOTE ON WHAT THIS FRAME NOW SHOWS, because four rounds of critics
+    // read the same three defects and all three were in the WEAPON, not here:
+    //   · the rail runs the full length of the upper, so the near third of the
+    //     frame is 51 recoil slots instead of a bare top plate (`models/build.ts`);
+    //   · the eye sits 300 mm behind the sight rather than 235, which puts the
+    //     housing at 17 % of frame height — the reference band — and gets the
+    //     support hand out from behind the receiver (`defs/ar-service.ts`);
+    //   · the weapon is shaded off its own vertex normals, not the harbour's
+    //     rusted-sheet bake, which is what removed the blue-and-gold mottle
+    //     (`viewmodel/surface.ts`).
+    //
     // 53° = the 68° base FOV × `AdsDef.fovMultiplier` (0.78, `defs/ar-service.ts`).
     // The harness pose lock bypasses `CameraRig`'s own ADS blend, so the shot has
     // to state the settled value the rig is publishing in

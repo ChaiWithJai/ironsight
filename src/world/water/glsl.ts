@@ -204,17 +204,74 @@ vec3 ironWaterDisplace(vec2 base, float t, float shoal, out vec3 outNormal, out 
  * the limit for reconstructing the SIGNAL; the shading is a fifth-power Fresnel
  * and a 1/α² specular lobe applied to that signal, and those need several
  * samples per period before they stop aliasing into salt-and-pepper.
+ *
+ * THE BAND LIMIT IS ANISOTROPIC, AND THAT IS THE WHOLE OF "THE DISTANCE GOES
+ * FLAT". A pixel on the sea at 300 m from a 6 m eye is not a disc: it is a
+ * SLIVER, ~8 cm across and ~4 m long, because the surface is seen at under two
+ * degrees. An isotropic cutoff has to take the long axis — otherwise the waves
+ * running across the sightline alias — and so it throws away every band under
+ * four metres, in EVERY direction, including the direction in which the pixel
+ * still resolves eight centimetres. That is a factor of fifty of real, resolvable
+ * wave detail discarded per pixel, and it is discarded on exactly the pixels this
+ * shot is composed around. What it leaves is the swell alone: a smooth satin
+ * sheet with a smeared white river down the middle of it.
+ *
+ * The honest measure is the PHASE GRADIENT. A wave's contribution to this pixel
+ * is cos(k·d·p), so what decides whether the pixel can carry it is how much that
+ * phase moves across the pixel — g = |grad_screen (k d·p)| — which for a wave
+ * running along the sliver's short axis stays small out to the horizon. Passing
+ * the two world-space footprint VECTORS (the screen derivatives of the surface
+ * point) instead of one scalar costs two dot products per wave and restores the
+ * cross-sightline bands: the streaky, glittering, long-in-x/short-in-y structure
+ * that real water has at grazing range and that no isotropic filter can produce.
+ *
+ * Whatever the pixel still cannot carry is handed to outResidualMss — the
+ * exact mean-square slope of the amplitude this loop faded out, and it is a
+ * vec2 (world X, world Z) rather than a scalar for the same reason the filter
+ * is two vectors. An anisotropic filter leaves an ANISOTROPIC residual: at
+ * 300 m down this sightline the bands running across the view are resolved and
+ * the bands running along it are not, so the slope the pixel has to hand to the
+ * roughness lives almost entirely in one direction. Averaging that into one
+ * number is what makes a distant glitter path a continuous white spill instead
+ * of a field of streaks — a lobe widened in the direction the surface is
+ * genuinely rough and left narrow in the direction it is genuinely smooth is
+ * exactly why real sun glitter is made of radial DASHES.
  */
-vec3 ironWaterShadeNormal(vec2 base, float t, float shoal, float cutoff, float rippleGain,
-                          out float outJacobian) {
+vec3 ironWaterShadeNormal(vec2 base, float t, float shoal, vec2 fpX, vec2 fpY, float rippleGain,
+                          out float outJacobian, out vec2 outResidualMss) {
   float jxx = 0.0, jxz = 0.0, jzx = 0.0, jzz = 0.0;
   float nx = 0.0, nz = 0.0;
+  vec2 residual = vec2(0.0);
   for (int i = 0; i < ${WAVE_COUNT}; i++) {
     vec4 wa = uWaterWaveA[i];
     vec4 wb = uWaterWaveB[i];
-    float lambda = 6.2831853 / wa.z;
-    float visible = smoothstep(cutoff * 5.0, cutoff * 13.0, lambda);
-    if (visible <= 0.002) continue;
+    // Radians of this wave's phase per pixel, along each screen axis, and then
+    // the pixel's own reconstruction filter applied to that.
+    //
+    // A GAUSSIAN, NOT A BAND EDGE, and the difference is visible from across
+    // the room. A smoothstep window is what a band limit looks like when you
+    // write it as a threshold, and it leaves a POPULATION OF WAVES SITTING AT
+    // FULL AMPLITUDE right at the cutoff. Those are the shortest waves the
+    // pixel carries, so they are the ones whose crests are a few pixels apart —
+    // and because the ripple band is nearly isotropic there is always a
+    // symmetric pair of them either side of the sightline. Two short waves at
+    // full amplitude crossing at a shallow angle multiply into a regular
+    // diamond lattice a few pixels on a side, and that lattice, printed across
+    // the 200-400 m band, is a cross-hatched mesh lying on the sea. It reads as
+    // a compression artefact.
+    //
+    // Averaging cos(k·d·p) over the pixel's reconstruction filter is the honest
+    // answer and it has no edge to pile up against: for a Gaussian footprint it
+    // is exp(-sigma^2 g^2 / 2), a monotone roll-off that is already down a
+    // third at half a radian per pixel and is gone well before Nyquist. Nothing
+    // is ever resolved AND about to disappear, so nothing beats. 0.8 is
+    // sigma^2/2 for a ~1.3 px filter — measured, against 1.1 (visibly cleaner
+    // than the threshold but a tenth of the sea's local contrast poorer) and
+    // against the threshold itself (block sigma 22.9 vs 22.2 in the near field,
+    // and the lattice).
+    float gx = wa.z * dot(wa.xy, fpX);
+    float gy = wa.z * dot(wa.xy, fpY);
+    float visible = exp(-0.8 * (gx * gx + gy * gy));
     // The ripple band does not displace (wb.y is zero for it), so the same loop
     // covers both bands: its Jacobian terms vanish and it contributes slope only.
     // Its shoaling gain is capped harder than the swell's because a 0.7 m ripple
@@ -223,7 +280,13 @@ vec3 ironWaterShadeNormal(vec2 base, float t, float shoal, float cutoff, float r
     // alone: a Langmuir streak damps capillaries, it does not flatten a 90 m
     // swell. Applying it to the whole spectrum would make the slicks read as
     // holes in the sea rather than as smooth water.
-    float amp = wb.x * (i < ${DISPLACING_COUNT} ? shoal : min(shoal, 1.35) * rippleGain) * visible;
+    float ampFull = wb.x * (i < ${DISPLACING_COUNT} ? shoal : min(shoal, 1.35) * rippleGain);
+    // sigma^2 of a single sinusoid's slope is (A k)^2 / 2, and the share of it
+    // this pixel could not resolve is carried by the amplitude that was faded.
+    vec2 cut = ampFull * (1.0 - visible) * wa.z * wa.xy;
+    residual += 0.5 * cut * cut;
+    if (visible <= 0.002) continue;
+    float amp = ampFull * visible;
     float qa = wb.y * min(shoal, 1.15) * visible;
     float f = wa.z * dot(wa.xy, base) - wa.w * t + wb.z;
     float s = sin(f);
@@ -236,6 +299,7 @@ vec3 ironWaterShadeNormal(vec2 base, float t, float shoal, float cutoff, float r
     nx += amp * wa.z * wa.x * c;
     nz += amp * wa.z * wa.y * c;
   }
+  outResidualMss = residual;
   vec3 ring = ironWaterRings(base, t);
   nx += ring.y;
   nz += ring.z;
@@ -637,18 +701,49 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
       float viewDist = length(toEye);
       vec3 V = toEye / viewDist;
 
-      // Pixel footprint on the surface. cos(incidence) in the denominator is what
-      // makes the far water — seen at a few degrees — filter hundreds of times
-      // harder than the water under the camera.
-      float cosI = max(abs(dot(V, vec3(0.0, 1.0, 0.0))), 0.02);
-      // ONE filter, and it is the pixel's — NOT the tessellation's. The mesh used
-      // to be folded in here (a ring 2 km out is 140 m across) and it is still the
-      // limit on the surface's SILHOUETTE, but the shading normal below is now
-      // evaluated analytically per fragment, so it is bounded by the pixel alone.
-      // Keeping the mesh term meant the water lost its chop the moment the
-      // tessellation did — at 60 m, four hundred metres before the pixel could no
-      // longer carry it — and that is most of why the distance went flat.
-      float footprint = clamp(viewDist * uWaterPixelAngle / cosI, 0.02, 600.0);
+      // THE PIXEL FOOTPRINT, AS THE TWO VECTORS IT ACTUALLY IS.
+      //
+      // A pixel on the sea at 300 m from a 6 m eye is not a disc, it is a
+      // SLIVER: eight centimetres across and four metres long, because the
+      // surface is seen at under two degrees. One scalar cutoff has to take the
+      // long axis or the bands running across the sightline alias — so it throws
+      // away every wavelength under four metres in EVERY direction, including
+      // the direction in which the pixel still resolves eight centimetres. That
+      // is a factor of fifty of real, resolvable wave detail discarded per
+      // pixel, on exactly the pixels this shot is composed around, and what it
+      // leaves behind is the swell alone: a smooth satin sheet with a smeared
+      // white river down the middle of it. Two vectors instead of one scalar is
+      // the whole of "the water goes flat at distance".
+      //
+      // ANALYTIC, NOT dFdx(vWorldPos.xz), and that distinction cost a build.
+      // The derivative is exact and free and it is also PER-TRIANGLE CONSTANT —
+      // a varying is interpolated linearly, so its screen derivative steps at
+      // every triangle edge. The ocean grid's triangles are a few pixels across
+      // in the mid-field, so a footprint built from derivatives quantises the
+      // resolved wave set to the MESH, and the mid-field came back wearing a
+      // fine cross-hatched weave: the tessellation, printed onto the sea by the
+      // one term that was supposed to be independent of it. Intersecting the
+      // pixel's own cone with the mean water plane is smooth by construction.
+      //
+      // Perturbing the view ray by one pixel and re-intersecting y = surfaceY:
+      // with s = viewDist and d the unit view direction, dP = s*(dd - d*dd.y/d.y).
+      // The screen-right axis is horizontal (no camera roll on any registered
+      // shot), so it drops the second term entirely and the horizontal footprint
+      // is just the arc length — while the screen-up axis keeps the 1/d.y, which
+      // IS the grazing stretch.
+      vec3 dView = -V;
+      float dvy = -max(abs(dView.y), 0.0035);
+      vec3 rightV = normalize(cross(dView, vec3(0.0, 1.0, 0.0)) + vec3(1e-5, 0.0, 0.0));
+      vec3 upV = cross(rightV, dView);
+      float fpScale = uWaterPixelAngle * viewDist;
+      vec2 fpX = fpScale * (rightV.xz - dView.xz * (rightV.y / dvy));
+      vec2 fpY = fpScale * (upV.xz - dView.xz * (upV.y / dvy));
+      float fpLenX = length(fpX);
+      float fpLenY = length(fpY);
+      if (fpLenY > 600.0) { fpY *= 600.0 / fpLenY; fpLenY = 600.0; }
+      if (fpLenX > 600.0) { fpX *= 600.0 / fpLenX; fpLenX = 600.0; }
+      // The scalar the noise fields still want: the pixel's long axis.
+      float footprint = clamp(max(fpLenX, fpLenY), 0.02, 600.0);
 
       float shoal = ironWaterShoal(vStillDepth);
 
@@ -680,7 +775,9 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
       float slick = mix(0.30, 1.0, smoothstep(0.34, 0.63, streakNoise));
 
       float jacobian;
-      vec3 N = ironWaterShadeNormal(vBaseXZ, uWaterTime, shoal, footprint, slick, jacobian);
+      vec2 residualMss;
+      vec3 N = ironWaterShadeNormal(vBaseXZ, uWaterTime, shoal, fpX, fpY, slick, jacobian,
+                                    residualMss);
       // A displaced surface seen at grazing angles produces normals that face
       // away from the eye; letting them through gives black speckle on the far
       // water. Bend, do not clamp — and do it without a branch, because a branch
@@ -693,21 +790,33 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
       // capillary roughness that never resolves at any distance: LOOK_SPEC §8.5
       // puts real water at 0.02-0.06.
       //
-      // 4.0 x the footprint, matching the 2.5-7 band limit in
-      // ironWaterShadeNormal: everything the normal faded out has to arrive here
-      // or the energy is simply lost and the far water goes dull as well as flat.
-      float unresolved = ironWaterVariance(footprint * 8.0);
+      // NOT a LUT lookup any more. residualMss is the exact mean-square slope
+      // ironWaterShadeNormal just finished fading out, wave by wave, at this
+      // pixel's own anisotropic band limit. The precomputed ladder could only
+      // answer "how much slope lives below wavelength L" — an isotropic
+      // question — so with an anisotropic filter it double-counts every band the
+      // pixel still resolves in its short axis, and hands the far water a
+      // roughness it has no right to. Handing the fade and the residual to the
+      // same loop makes the pair exactly complementary by construction.
+      vec2 unresolved = residualMss;
       // The slick damps the SLOPE, and mean-square slope is what this LUT holds,
       // so the roughness a slick hands the pixel scales as the square of the
       // amplitude gain. Without this the far water inside a streak keeps the
       // roughness of water it no longer is, and the streaks vanish at exactly
       // the distance where they do the most compositional work.
-      float unresolvedSlick = unresolved * mix(slick * slick, 1.0, 0.25);
+      vec2 unresolvedSlick = unresolved * mix(slick * slick, 1.0, 0.25);
       // The SURFACE's own roughness: the capillary floor plus every wave band
       // the pixel could not resolve. This is a property of the water and of the
       // viewing distance, and it is the only roughness any energy integral in
       // this shader is allowed to see.
-      float alphaSurface = clamp(0.0016 + 2.0 * unresolvedSlick, 0.0016, 0.28);
+      float alphaSurface = clamp(0.0016 + 2.0 * (unresolvedSlick.x + unresolvedSlick.y),
+                                 0.0016, 0.28);
+      // The same statement kept per-axis, in the tangent frame the sun lobe is
+      // built in below. Isotropic it reduces to the line above (two equal
+      // components, so 4*v per axis is 2*(v+v) in total), so nothing changes on
+      // water the pixel sees square-on; everything changes at 300 m, where the
+      // two components differ by an order of magnitude.
+      vec2 alphaAniso = clamp(vec2(0.0016) + 4.0 * unresolvedSlick, vec2(0.0016), vec2(0.36));
 
       // GEOMETRIC SPECULAR ANTIALIASING (Kaplanyan's screen-space normal
       // variance, in Tokuyoshi's additive-alpha form). This is the term that
@@ -1030,14 +1139,41 @@ export function waterFragmentShader(cfg: WaterShaderConfig): string {
       float NdotL = clamp(dot(N, L), 0.0, 1.0);
       float NdotH = clamp(dot(N, H), 0.0, 1.0);
       float VdotH = clamp(dot(V, H), 0.0, 1.0);
-      // Sun angular radius 0.265 deg = 4.65e-3 rad.
-      // alphaPIXEL, and this is the one place the screen-space term belongs:
-      // the sun is a delta light, its NDF integrates to one at any width, and
-      // widening it is exactly the antialiasing it was introduced for.
-      float alphaSun = clamp(alphaPixel + 4.65e-3, 0.0016, 0.5);
+      // Sun angular radius 0.265 deg = 4.65e-3 rad, plus the screen-space
+      // widening: the sun is a delta light, its NDF integrates to one at any
+      // width, and widening it is exactly the antialiasing that term was
+      // introduced for. (It is the ONE place the screen-space alpha belongs —
+      // see the note above on why the environment integral must never see it.)
+      //
+      // ANISOTROPIC GGX, and it is the difference between a glitter path and a
+      // white spill. The unresolved slope this pixel has to hand the NDF is not
+      // the same in both directions — at 300 m down a 2 deg sightline the bands
+      // running across the view are still resolved and the bands running along
+      // it are not — so a round lobe is wrong by an order of magnitude in each
+      // direction at once: too wide across the view (smearing every highlight
+      // sideways into its neighbours until the path is one continuous ribbon)
+      // and too narrow along it. Splitting it puts the sun's reflection back
+      // into the shape it has in every photograph ever taken of one: a
+      // population of short streaks pointing at the sun, dense near the horizon
+      // and resolving into separate sparkles as they come toward the eye.
+      //
+      // Burley's form, in a tangent frame built off the shading normal so it
+      // stays orthonormal on a steep crest. The residual variance was
+      // accumulated in world X and Z and the frame's axes are those two
+      // Gram-Schmidted against N, so no rotation is needed to consume it.
+      vec3 tanT = normalize(vec3(1.0, 0.0, 0.0) - N * N.x + vec3(0.0, 0.0, 1e-5));
+      vec3 tanB = cross(N, tanT);
+      vec2 alphaSunA = clamp(alphaAniso + min(2.0 * normalVar, 0.18) + 4.65e-3,
+                             vec2(0.0016), vec2(0.5));
+      float hT = dot(H, tanT) / alphaSunA.x;
+      float hB = dot(H, tanB) / alphaSunA.y;
+      float dA = hT * hT + hB * hB + NdotH * NdotH;
+      float D = 1.0 / (IRON_PI * alphaSunA.x * alphaSunA.y * max(dA * dA, 1e-12));
+      // The masking term stays isotropic at the lobe's equivalent width — the
+      // geometric mean of the two alphas, which is the one scalar that leaves
+      // the projected microfacet area unchanged.
+      float alphaSun = clamp(sqrt(alphaSunA.x * alphaSunA.y), 0.0016, 0.5);
       float a2 = alphaSun * alphaSun;
-      float d0 = NdotH * NdotH * (a2 - 1.0) + 1.0;
-      float D = a2 / (IRON_PI * d0 * d0);
       // Height-correlated Smith. The uncorrelated form loses noticeable energy at
       // exactly the grazing angles the glitter path lives at.
       float gv = NdotL * sqrt(NdotV * NdotV * (1.0 - a2) + a2);

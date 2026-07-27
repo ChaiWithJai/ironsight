@@ -196,18 +196,48 @@ export function capsuleZ(radius: number, length: number, radialSegments = 10): T
  */
 export function picatinny(length: number, width: number, teeth: number): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
-  // The rail base: a truncated wedge, wider at the bottom, so the 45° clamping
-  // faces catch a specular line the way a real rail does.
+  /*
+   * THE PLINTH IS THE ONLY CONTINUOUS PART, AND THAT IS THE WHOLE POINT.
+   *
+   * The rail used to be one full-height truncated wedge with separate lands
+   * sitting on it, which put a single unbroken 5 mm-wide 45° clamping facet down
+   * the entire length. On a viewmodel that facet is seen at grazing incidence,
+   * where Schlick takes a dielectric's reflectance to ~1 whatever its roughness,
+   * so it mirrored the golden-hour sky as one continuous saturated band the
+   * length of the weapon — measured on the round-4 ADS frame as the BRIGHTEST
+   * thing in the near field, brighter than the sunlit paving 8 m away, and
+   * reading as a strip of polished brass trim glued down the receiver.
+   *
+   * That is not a shading bug; it is a modelling one. A real Picatinny rail's
+   * recoil slots are cut THROUGH the clamping faces, not just through the top,
+   * so the 45° facet exists only on the lands and is interrupted every 10.2 mm.
+   * Cutting it the way the real part is cut breaks one continuous specular band
+   * into 51 short ones — which is a rail, reads as a rail, and cannot ever
+   * out-shine the scene because no single facet is more than a few pixels long.
+   */
   parts.push(
     place(
-      extrude(polyShape([-width * 0.5, 0, width * 0.5, 0, width * 0.38, 0.0042, -width * 0.38, 0.0042]), length, 0.0004),
+      extrude(polyShape([-width * 0.5, 0, width * 0.5, 0, width * 0.5, 0.0015, -width * 0.5, 0.0015]), length, 0.0004),
       [0, 0, 0],
     ),
   );
   const pitch = length / teeth;
+  const land = pitch * 0.66;
   for (let i = 0; i < teeth; i++) {
     const z = -length * 0.5 + pitch * (i + 0.5);
-    parts.push(place(bevelBox(width * 0.76, 0.0026, pitch * 0.62, 0.0004), [0, 0.0055, z]));
+    // The clamping section: full trapezoid, one land long.
+    parts.push(
+      place(
+        extrude(
+          polyShape([-width * 0.5, 0.0015, width * 0.5, 0.0015, width * 0.38, 0.0044, -width * 0.38, 0.0044]),
+          land,
+          0.0004,
+        ),
+        [0, 0, z],
+      ),
+    );
+    // The top land itself, narrower again, so the profile steps twice.
+    parts.push(place(bevelBox(width * 0.76, 0.0026, land, 0.0004), [0, 0.0057, z]));
   }
   return mergeParts(parts);
 }
@@ -237,7 +267,8 @@ export function slattedShell(
 }
 
 /**
- * A shallow spherical combiner window, facing +Z (the eye).
+ * A shallow spherical combiner window, facing +Z (the eye). Kept for the square
+ * apertures a future weapon may want; the round housings use `domeDisc` below.
  *
  * A flat pane is why the optic read as an opaque plate: one constant normal
  * means one constant Fresnel term, so there is no rim brightening, no eye-box
@@ -260,6 +291,59 @@ export function domePane(width: number, height: number, sagitta: number, segment
     const y = position.getY(i) / hh;
     position.setZ(i, sagitta * (1 - Math.min(1, x * x + y * y)));
   }
+  g.computeVertexNormals();
+  return normalise(g);
+}
+
+/**
+ * A shallow spherical combiner that is a DISC rather than a square, facing +Z.
+ *
+ * `domePane` above is a square, and inside a round housing a square can only be
+ * wrong in one of two ways: inscribe it and the aperture keeps a crescent of
+ * unglazed air at every clock position between the corners; circumscribe it and
+ * the corners bury themselves in opaque housing, where a depth-write-off
+ * transparent surface still composites and lays a glassy sheen across the inside
+ * of the tube. Both were visible in the round-4 `weapon_ads` frame as a
+ * rectangular tint boundary drawn across a circular sight picture — the single
+ * most obviously wrong thing about the optic, because a lens that is not the
+ * shape of its own bezel is not a lens.
+ *
+ * A disc has neither failure. It is generated as a triangle fan of `rings`
+ * concentric rows so the sagitta is a smooth spherical cap and the UVs land in
+ * 0..1 with the centre at (0.5, 0.5) — which is what `opticLensChunk` reads as a
+ * true radius for the eye-box gradient.
+ */
+export function domeDisc(radius: number, sagitta: number, rings = 6, segments = 32): THREE.BufferGeometry {
+  const position: number[] = [];
+  const uv: number[] = [];
+  const index: number[] = [];
+  const push = (r: number, a: number): void => {
+    const x = Math.cos(a) * r;
+    const y = Math.sin(a) * r;
+    const t = r / radius;
+    position.push(x, y, sagitta * (1 - t * t));
+    uv.push(0.5 + (x / radius) * 0.5, 0.5 + (y / radius) * 0.5);
+  };
+  push(0, 0);
+  for (let ring = 1; ring <= rings; ring++) {
+    const r = (radius * ring) / rings;
+    for (let s = 0; s < segments; s++) push(r, (Math.PI * 2 * s) / segments);
+  }
+  const idx = (ring: number, s: number): number => 1 + (ring - 1) * segments + (((s % segments) + segments) % segments);
+  for (let s = 0; s < segments; s++) index.push(0, idx(1, s), idx(1, s + 1));
+  for (let ring = 1; ring < rings; ring++) {
+    for (let s = 0; s < segments; s++) {
+      const a = idx(ring, s);
+      const b = idx(ring, s + 1);
+      const c = idx(ring + 1, s);
+      const d = idx(ring + 1, s + 1);
+      index.push(a, c, d, a, d, b);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(position, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(index);
   g.computeVertexNormals();
   return normalise(g);
 }
