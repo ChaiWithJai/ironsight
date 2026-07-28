@@ -47,5 +47,13 @@ EOF
   exit 1
 }
 
-export PATH="$(pick):$PATH"
+# NOT `export PATH="$(pick):$PATH"`. `export` is a builtin, so its own exit
+# status (always 0) masks a failure inside the command substitution — `set -e`
+# never sees pick()'s `exit 1`, and the script sails on with an empty prefix on
+# PATH and runs Vite under whatever node it finds. That turns the clear message
+# above into a baffling "crypto.hash is not a function" three lines into the
+# build. A plain assignment propagates the status; the `|| exit` is belt and
+# braces for shells where it does not.
+node_dir="$(pick)" || exit 1
+export PATH="$node_dir:$PATH"
 exec "$@"

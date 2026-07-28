@@ -11,6 +11,10 @@ network requests at runtime** — the terrain, the buildings, the grass, the sky
 HUD's font atlas and every sound are all built on your machine in the first ~30–60 s. The shipped
 bundle is three JavaScript files and an HTML page.
 
+(The deployed site also serves `og.jpg`, the social-preview screenshot, and an SVG favicon. Neither
+is loaded by the game — the "zero art assets" property is about what the renderer consumes, and it
+holds exactly.)
+
 MIT licensed. Contributions welcome — but read [Current state](#current-state--read-this-before-judging-it) first.
 
 ---
