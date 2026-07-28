@@ -212,6 +212,29 @@ parse — the same bug class as §8.
 
 ## 7. What to do next, in priority order
 
+### A0. LANDED SINCE THIS DOC WAS WRITTEN — verify before repeating
+
+All measured in LIVE PLAY (both automated instruments are blind to destruction — see §6):
+- Slope traversal FIXED: player stall 94.5% -> 2.5%, 0.0% in every band 5-30 deg.
+- ADS fixed (right-click was bound to the middle mouse button).
+- Bots fight: 2-6 kills per 60 s 9v9, Engage ~9% of bot-ticks.
+- HUD responds to real gameplay (hitmarkers, kill banner, killfeed) via the FxBus.
+- Bullets and frags damage cover; `G` throws a frag (capacity 3, refilled at crates).
+- **Map cover now visibly shatters**: 241/244 destructibles hide their geometry and spawn 18
+  shards per collapse. Proved with before/after frames from the same camera.
+- Every cylinder in the level was rendering INSIDE-OUT (silos, tanks, drums) — winding fixed.
+  Note `tube()` looks identical and is CORRECT; its ring has the opposite handedness. Do not
+  "fix" it.
+
+Known remaining, all measured:
+- **Masonry/concrete cover cannot practically be breached** — 10-12 frags, still intact. Tuning
+  in `CLASSES` in `src/level/colliders.ts`. Wood/stucco/sandbag are fine.
+- 3 crane footings at BRAVO are collider-only (geometry stays standing). Boot log names them.
+- `classifyFor` tags flat step treads destructible, so fragging the ALPHA terrace deletes a
+  flight of steps. Pre-existing, now visible.
+- Melee `V` and weapon-swap `X`/`1`-`9` still do nothing.
+- `skills/` is still NOT WRITTEN. See §7B.
+
 ### A. MAKE IT PLAY CORRECTLY. This outranks everything visual.
 
 A workflow was mid-flight on these at handoff (`tools/workflows/ironsight-playability-*.js`).
@@ -229,6 +252,11 @@ snap-to-ground is fighting the climb.
 **A2 — Bots are blind (severity: high, separate bug).** 0 of 18 ever acquired a target, 0 path
 requests, 0 shots. Spawning, attachment, navmesh and tick registration are all verified fine, so
 the break is in perception/targeting. Even unwedged, bots would wander rather than fight.
+
+**A4 — Shot baselines go stale and it WILL mislead you.** `destruction_wall` and `level_charlie`
+drifted after the cylinder-winding fix, and an agent explained the mismatch away as "run-to-run
+nondeterminism". Shots are bit-stable (verified: three captures, 0.00% difference). If a baseline
+differs, something really changed — find out what. Recapture after any change that alters geometry.
 
 **A3 — Play the game after every one of these.** `npm run dev`. The four bugs that mattered most in
 this project were all found in ten minutes of human play, and none by twelve rounds of critics.
