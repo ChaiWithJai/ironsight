@@ -68,7 +68,7 @@ checked" underneath.
 | System | Built? | Reachable in play? |
 |---|---|---|
 | Bullet impacts, decals, surface-correct debris | yes | **yes** |
-| Destructible cover (collider removed, cover lost, dust) | yes | **yes** — shooting cover damages it and eventually collapses it; a frag breaches it outright |
+| Destructible cover (geometry vanishes, shards, dust) | yes | **yes** — a frag breaches wood, stucco and sandbag cover; 18 shards spawn per collapse. **Masonry and concrete are currently too tough to breach in play** (10+ frags and still intact) — see below |
 | Explosions (fireball, pressure ring, debris, smoke column) | yes | **yes** — `G` throws a frag that arcs, bounces, detonates and lights the world |
 | HUD combat feedback (hitmarkers, killfeed, damage chips, kill banner) | yes | **yes** — driven by real `damage.applied` / `killfeed` events, not by the demo timeline |
 | Ammo resupply | yes | **yes** — a crate on each capture point; `F` or a short dwell |
