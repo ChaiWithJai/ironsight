@@ -75,14 +75,17 @@ checked" underneath.
 | Bot combat | yes | **yes** — bots path, engage and kill each other; 2–6 kills per 60 s 9v9 soak |
 | Melee | no | **no** — `V` reaches the input layer and nothing consumes it |
 
-Two rough edges that are real but cosmetic, both outside the wiring:
+Both of destruction's long-standing rough edges are now closed, measured live (not in either
+instrument — see below):
 
-- A collapsed piece of LEVEL cover spawns **no debris chunks** (`chunksSpawned: 0`) — `shardsOf()`
-  only understands the shards `fractureBox` produces, and `src/level/colliders.ts` emits meshes
-  without them. The collider goes, the dust fires, the rubble does not.
-- The **intact mesh of a breached LEVEL wall stays standing**. `StaticColliderDef.destructible`
-  names a def but not the batch instance, so `SceneGraph.hideBatchInstance` is never called. The
-  sightline opens and the collider is gone; the geometry is still drawn.
+- A collapsed piece of LEVEL cover **spawns real debris**. `DestructibleDef.chunks` now resolves to
+  a `ShardedMeshAsset`, so `shardsOf()` finds the shard set `src/level/colliders.ts` bakes instead of
+  an empty list. Measured: 18 chunks per collapse at tier HIGH, 90 across five collapses.
+- The **intact mesh of a breached LEVEL wall now goes**. `StaticColliderDef.visuals` carries the
+  batch instances the cover was drawn as, `PhysicsService.addStatic` forwards them to
+  `DestructionService.attachBatchInstance`, and the collapse calls `SceneGraph.hideBatchInstance`.
+  Measured at boot: 241 of 244 destructibles have geometry attached; the 3 that do not are crane
+  footings and are named in a boot warning.
 
 #### How the table was checked
 
@@ -92,6 +95,11 @@ Two rough edges that are real but cosmetic, both outside the wiring:
 automated instruments every wall in the map is an inert static collider**, and neither can see
 destruction at all. Live play never resets, so a human is unaffected. Any future claim about
 destruction has to be measured in a live page, or after PHYS re-registers on reset.
+
+`globalThis.__DESTR__` is the readout for that: `summary()` reports how many destructibles have
+geometry attached and how many are collider-only, `nearby(point, radius)` pairs each one's `intact`
+flag with whether it is still `drawing`, and `intact: false, drawing: true` is precisely the defect
+above. Same lane-private-probe pattern as `__THROWABLES__` and `__SOAK__`.
 
 ### The map — HARBOUR REACH
 

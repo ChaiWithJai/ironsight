@@ -55,7 +55,7 @@ import {
 import { MACRO_TERRAIN } from '@/engine/macro';
 import { createRng } from '@/engine/rng';
 import { LevelBuild } from '@/level/build';
-import { MAT_KEYS, createLevelMaterials } from '@/level/materials';
+import { MAT_KEYS, createLevelMaterials, type MatKey } from '@/level/materials';
 import { NAV_BOUNDS, POINTS, SPAWNS, ALPHA_SQUARE, CRANES, FUEL_DEPOT, QUAY } from '@/level/layout';
 import { buildSquare, buildStreets, buildTown, dressStreets, generatePlots } from '@/level/district';
 import {
@@ -69,7 +69,7 @@ import { AmmoCrateSystem, describeCrates, installAmmoProbe, type AmmoCrate } fro
 import { auditFloaters } from '@/level/audit';
 import { CoverIndex, bakeCoverSlots } from '@/level/cover-bake';
 import { bakeNavmesh, type NavBakeStats } from '@/level/navmesh-bake';
-import { defineChunkAssets, finaliseColliders } from '@/level/colliders';
+import { defineChunkAssets, finaliseColliders, insideTest } from '@/level/colliders';
 import { CAMERA_POSES, CAMERA_POSE_NAMES } from '@/level/cameras';
 
 /**
@@ -78,8 +78,20 @@ import { CAMERA_POSES, CAMERA_POSE_NAMES } from '@/level/cameras';
  */
 const LEVEL_SEED = 0x48524348;
 
+/** Identity, for the batch instances. Their geometry is already world-space. */
+const IDENTITY = new THREE.Matrix4();
+
 interface BuiltLevel {
   readonly root: THREE.Object3D;
+  /**
+   * One per material that draws destructible cover. Held so `resetLevel` can
+   * put the instances back: `SceneGraph` exposes `hideBatchInstance` and no
+   * inverse, deliberately — the lane that built the batch is the only one that
+   * should decide a hidden wall is standing again.
+   */
+  readonly batches: readonly THREE.BatchedMesh[];
+  /** Destructibles that actually got geometry. Should equal `stats.destructibles`. */
+  readonly attachedDestructibles: number;
   /** Props with nothing under them. A worldcraft defect; must stay at zero. */
   readonly floaters: number;
   /** Resupply points. One per objective; see `src/level/ammo.ts`. */
@@ -304,7 +316,19 @@ function buildLevel(ctx: BootContext): BuiltLevel {
     crateAt('CHARLIE', POINTS.charlie.x + 5.5, POINTS.charlie.z + 2.5, charlieFloorY, 1.9),
   ];
 
-  // ---- 3. geometry --------------------------------------------------------
+  // ---- 3. colliders, and which of them break ------------------------------
+  //
+  // THIS RUNS BEFORE THE MESHING, and the order is load-bearing. A destructible
+  // has to be drawn as something destruction can hide, and everything in this
+  // level is otherwise appended into one merged stream per material where no
+  // individual wall exists any more. So the tagging pass — which is a
+  // whole-level budget decision and can only be taken once every collider is
+  // known — has to finish first, and the meshing then LIFTS each tagged piece
+  // out of its stream into a BatchedMesh instance of its own.
+  ctx.report('building level: colliders');
+  const pass = finaliseColliders(b.colliders, fork('colliders'));
+
+  // ---- 4. geometry --------------------------------------------------------
   ctx.report('building level: meshes');
   const materials = createLevelMaterials(ctx.services.materials);
   const root = new THREE.Group();
@@ -312,8 +336,121 @@ function buildLevel(ctx: BootContext): BuiltLevel {
   const bounds = new THREE.Box3();
   let draws = 0;
   const triangles = b.stats.triangles;
+
+  /**
+   * THE DESTRUCTIBLE BATCHES — the fix for "the wall is gone and the wall is
+   * still there".
+   *
+   * `LevelBuild` recorded, for every collider, the index range its emitter
+   * appended. For the tagged ones that range is cut out of the merged stream
+   * and re-uploaded as one `BatchedMesh` instance, whose id then travels to
+   * DESTRUCTION on `StaticColliderDef.visuals` and comes back as a
+   * `SceneGraph.hideBatchInstance` call the moment the wall comes down.
+   *
+   * The slices keep their WORLD-space vertices and the instances are identity,
+   * so the four material variants this geometry is drawn with — forward, depth
+   * prepass, shadow and velocity — do not have to agree about a batching matrix
+   * for the batch to land in the right place.
+   */
+  const omitByMat = new Map<MatKey, Set<number>>();
+  const sliceByMat = new Map<MatKey, { collider: number; geometry: THREE.BufferGeometry }[]>();
+  const tris: number[] = [];
+  for (const index of pass.chosen) {
+    const piece = b.colliderPieces[index];
+    if (!piece) continue;
+    // An exact claim is taken whole; a loose window is intersected with the
+    // collider's own volume so nothing outside the solid can be hidden by it.
+    const inside = piece.exact ? null : insideTest(pass.colliders[index], 0.08);
+    for (const r of piece.ranges) {
+      const builder = b.m(r.key);
+      tris.length = 0;
+      builder.collectTriangles(r.start, r.count, inside, tris);
+      if (tris.length === 0) continue;
+      let omit = omitByMat.get(r.key);
+      if (!omit) omitByMat.set(r.key, (omit = new Set()));
+      // A triangle already claimed by an earlier destructible is left alone:
+      // two overlapping colliders must not both own the same draw, or breaching
+      // one of them punches a hole in the other.
+      const mine: number[] = [];
+      for (const t of tris) {
+        if (omit.has(t)) continue;
+        omit.add(t);
+        mine.push(t);
+      }
+      const slice = builder.geometryFromTriangles(mine);
+      if (!slice) continue;
+      let slices = sliceByMat.get(r.key);
+      if (!slices) sliceByMat.set(r.key, (slices = []));
+      slices.push({ collider: index, geometry: slice });
+    }
+  }
+
+  const batchMeshes: THREE.BatchedMesh[] = [];
+  const visualsByCollider = new Map<number, { object: THREE.Object3D; instanceId: number }[]>();
+  let liftedTriangles = 0;
+  for (const set of omitByMat.values()) liftedTriangles += set.size;
   for (const key of MAT_KEYS) {
-    const geometry = b.m(key).finish();
+    const slices = sliceByMat.get(key);
+    if (!slices || slices.length === 0) continue;
+    let vertices = 0;
+    let indices = 0;
+    for (const s of slices) {
+      vertices += s.geometry.getAttribute('position').count;
+      indices += s.geometry.getIndex()?.count ?? 0;
+    }
+    const batch = new THREE.BatchedMesh(slices.length, vertices, indices, materials[key]);
+    batch.name = `level.destructible.${key}`;
+    batch.castShadow = true;
+    batch.receiveShadow = true;
+    batch.frustumCulled = false;
+    batch.layers.set(RenderLayer.WorldOpaque as number);
+    for (const s of slices) {
+      const geometryId = batch.addGeometry(s.geometry);
+      const instanceId = batch.addInstance(geometryId);
+      batch.setMatrixAt(instanceId, IDENTITY);
+      let list = visualsByCollider.get(s.collider);
+      if (!list) visualsByCollider.set(s.collider, (list = []));
+      list.push({ object: batch, instanceId });
+      // The slice was copied into the batch's own buffers on `addGeometry`.
+      s.geometry.dispose();
+    }
+    batch.computeBoundingBox();
+    batch.computeBoundingSphere();
+    if (batch.boundingBox) bounds.union(batch.boundingBox);
+    root.add(batch);
+    batchMeshes.push(batch);
+    draws++;
+  }
+  for (const [index, visuals] of visualsByCollider) {
+    pass.colliders[index] = { ...pass.colliders[index], visuals };
+  }
+  /**
+   * A destructible with no piece is COLLIDER-ONLY: it will lose its collider and
+   * leave its geometry standing. Named by the emitter that produced it, because
+   * "78 unattached" is a shrug and "[fort] 40, [town] 21" is a fix — the emitter
+   * needs a `beginPiece()` / `endPiece()` bracket around its body.
+   */
+  console.info(
+    `[boot] level · destructible geometry · ${visualsByCollider.size}/${pass.chosen.length} attached · ` +
+      `${batchMeshes.length} batch draw(s), ${liftedTriangles} triangles lifted out of the merged streams`,
+  );
+  const unattachedByTag = new Map<string, number>();
+  for (const index of pass.chosen) {
+    if (visualsByCollider.has(index)) continue;
+    const tag = b.colliderTags[index] ?? '?';
+    unattachedByTag.set(tag, (unattachedByTag.get(tag) ?? 0) + 1);
+  }
+  if (unattachedByTag.size > 0) {
+    const worst = [...unattachedByTag.entries()].sort((a, c) => c[1] - a[1]);
+    console.warn(
+      `[boot] level · ${pass.chosen.length - visualsByCollider.size} of ${pass.chosen.length} ` +
+        `destructibles are COLLIDER-ONLY (geometry will stay standing): ` +
+        worst.map(([t, n]) => `${t}×${n}`).join(' '),
+    );
+  }
+
+  for (const key of MAT_KEYS) {
+    const geometry = b.m(key).finish(omitByMat.get(key));
     if (!geometry) continue;
     const mesh = new THREE.Mesh(geometry, materials[key]);
     mesh.name = `level.${key}`;
@@ -339,10 +476,7 @@ function buildLevel(ctx: BootContext): BuiltLevel {
     occluder: false,
   });
 
-  // ---- 4. bakes -----------------------------------------------------------
-  ctx.report('building level: colliders');
-  const pass = finaliseColliders(b.colliders, fork('colliders'));
-
+  // ---- 5. bakes -----------------------------------------------------------
   ctx.report('building level: cover');
   const coverSlots = bakeCoverSlots(b.coverBoxes, fork('cover'), {
     density: 0.45,
@@ -366,6 +500,8 @@ function buildLevel(ctx: BootContext): BuiltLevel {
 
   return {
     root,
+    batches: batchMeshes,
+    attachedDestructibles: visualsByCollider.size,
     floaters,
     ammoCrates,
     colliders: pass.colliders,
@@ -488,7 +624,8 @@ export function createLevelService(ctx: BootContext): LevelService {
     const s = level.stats;
     ctx.report(
       `level: ${s.triangles} tris / ${s.draws} draws, ${s.plots} plots, ` +
-      `${s.colliders} colliders (${s.destructibles} destructible, ${s.occluders} occluders), ` +
+      `${s.colliders} colliders (${s.destructibles} destructible, ` +
+      `${level.attachedDestructibles} with geometry attached, ${s.occluders} occluders), ` +
       `${s.coverSlots} cover slots, nav ${s.nav.triangles} polys in ${s.nav.regions} regions, ` +
       `${level.floaters} floating props`,
     );
@@ -519,8 +656,8 @@ export function createLevelService(ctx: BootContext): LevelService {
  * `create`, on the main thread, because it has to be finished before PHYS builds
  * rapier colliders from it in the same boot phase.
  */
-export function registerLevelBakes(assets: AssetRegistry, _quality: Readonly<QualitySettings>): void {
-  defineChunkAssets(assets);
+export function registerLevelBakes(assets: AssetRegistry, quality: Readonly<QualitySettings>): void {
+  defineChunkAssets(assets, quality);
 }
 
 /**
@@ -544,4 +681,11 @@ export function resetLevel(_seed: number): void {
   built.root.traverse((o) => {
     o.visible = true;
   });
+  // …and the batch instances, which are not scene-graph nodes and which
+  // `traverse` therefore cannot reach. A wall breached in one shot would
+  // otherwise stay breached in the next, which is exactly the cross-capture
+  // dependency the reset chain exists to prevent.
+  for (const batch of built.batches) {
+    for (let i = 0; i < batch.instanceCount; i++) batch.setVisibleAt(i, true);
+  }
 }

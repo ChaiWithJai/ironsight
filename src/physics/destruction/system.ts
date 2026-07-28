@@ -43,6 +43,7 @@ import {
   type DestructionResult,
   type DestructionService,
   type EntityId,
+  type MeshAsset,
   type QualitySettings,
   type Services,
   type SurfaceId,
@@ -62,8 +63,17 @@ interface Destructible {
   body: BodyHandle;
   health: number;
   intact: boolean;
-  /** The intact mesh, hidden on collapse. Null when another lane owns it. */
+  /** The intact mesh, hidden on collapse. Null when the solid is a batch instance. */
   visual: THREE.Object3D | null;
+  /**
+   * The intact geometry as INSTANCES OF BATCHED DRAWS, hidden on collapse
+   * through `SceneGraph.hideBatchInstance`. Several, because one piece of cover
+   * is routinely several materials and therefore several batches.
+   *
+   * A record with an empty list and a null `visual` is COLLIDER-ONLY: it will
+   * leave its geometry standing. See `DestructionService.attachVisual`.
+   */
+  readonly batches: { object: THREE.Object3D; instanceId: number }[];
   /** World transform of the solid, captured at registration. */
   readonly matrix: THREE.Matrix4;
 }
@@ -96,6 +106,7 @@ export class DestructionSystem implements DestructionService {
   private readonly tmpPos = new THREE.Vector3();
   private readonly tmpQuat = new THREE.Quaternion();
   private readonly tmpScale = new THREE.Vector3();
+  private readonly tmpFit = new THREE.Vector3();
   private readonly statsValue = { chunksLive: 0, chunksSettled: 0, budgetUsed01: 0 };
   private readonly physics: PhysicsSystem;
 
@@ -127,6 +138,7 @@ export class DestructionSystem implements DestructionService {
       health: def.health,
       intact: true,
       visual: null,
+      batches: [],
       matrix,
     };
     this.byEntity.set(entity as number, record);
@@ -134,19 +146,28 @@ export class DestructionSystem implements DestructionService {
   }
 
   /**
-   * Lane-internal: hand destruction the mesh that represents the INTACT solid so
-   * it can take it out of the frame on collapse.
-   *
-   * The contract has no seam for this yet — `StaticColliderDef.destructible`
-   * names a def but not the batch instance it was drawn as, so a LEVEL-owned
-   * wall currently collapses with its collider and its debris but leaves its
-   * geometry standing. Closing that needs a `hideBatchInstance` handle on the
-   * registration, which is an addition to LEVEL's side of the contract, not
-   * PHYS's. Called out in the lane report.
+   * Hand destruction the mesh that represents the INTACT solid so it can take it
+   * out of the frame on collapse. `DestructionService.attachVisual`.
    */
   attachVisual(entity: EntityId, object: THREE.Object3D): void {
     const record = this.byEntity.get(entity as number);
     if (record) record.visual = object;
+  }
+
+  /**
+   * The batched form. `DestructionService.attachBatchInstance`.
+   *
+   * Accumulates rather than replaces: LEVEL's cover is drawn as one batch per
+   * MATERIAL, so a sandbag emplacement in hessian, bleached canvas and stained
+   * rubble is three instances of three different batches and all three have to
+   * disappear on the same tick or the wall half-vanishes.
+   */
+  attachBatchInstance(entity: EntityId, object: THREE.Object3D, instanceId: number): void {
+    if (!Number.isInteger(instanceId) || instanceId < 0) return;
+    const record = this.byEntity.get(entity as number);
+    if (!record) return;
+    for (const b of record.batches) if (b.object === object && b.instanceId === instanceId) return;
+    record.batches.push({ object, instanceId });
   }
 
   applyDamage(info: DamageInfo): DestructionResult {
@@ -211,14 +232,20 @@ export class DestructionSystem implements DestructionService {
     if (record.body) this.physics.destroyBody(record.body);
 
     // 2. The intact geometry leaves the frame — hidden, never rebuilt.
+    //    Two forms: an Object3D of its own, or N instances of batched draws.
+    //    A record with NEITHER is collider-only and leaves its mesh standing.
     if (record.visual) record.visual.visible = false;
+    for (const b of record.batches) {
+      this.services.scene.hideBatchInstance(b.object, b.instanceId);
+    }
 
     // 3. Shards, inside the tier's budget.
     let spawned = 0;
     const asset = this.assets.tryGet(record.def.chunks);
     const shards = asset ? shardsOf(asset) : [];
     const impact = new THREE.Vector3(point.x, point.y, point.z);
-    if (shards.length > 0) {
+    if (asset && shards.length > 0) {
+      const fit = this.shardFit(record.def, asset);
       spawned = this.pool.spawn(
         {
           shards,
@@ -229,6 +256,8 @@ export class DestructionSystem implements DestructionService {
           energyJ,
           lifetimeSeconds: record.def.debrisLifetime,
           settleAfter: record.def.settleAfter,
+          centreScale: fit.centreScale,
+          shapeScale: fit.shapeScale,
         },
         this.rng,
         this.services.clock.simTime,
@@ -256,6 +285,29 @@ export class DestructionSystem implements DestructionService {
       extent: this.tmpPos.clone(),
     });
     return result;
+  }
+
+  /**
+   * How a SHARED shard set is re-proportioned into the solid that actually
+   * broke. See `DestructibleDef.extent`.
+   *
+   * The shape scale is the cube root of the volume ratio and is CLAMPED: a
+   * 0.02 m³ prop and a 12 m³ wall share one set, and letting the ratio run
+   * unbounded turns the small one into grit and the large one into boulders.
+   */
+  private shardFit(
+    def: DestructibleDef,
+    asset: MeshAsset,
+  ): { centreScale: THREE.Vector3; shapeScale: number } {
+    const scale = this.tmpFit.set(1, 1, 1);
+    if (!def.extent) return { centreScale: scale, shapeScale: 1 };
+    const b = asset.bounds;
+    const hx = Math.max(1e-3, (b.max.x - b.min.x) * 0.5);
+    const hy = Math.max(1e-3, (b.max.y - b.min.y) * 0.5);
+    const hz = Math.max(1e-3, (b.max.z - b.min.z) * 0.5);
+    scale.set(def.extent.x / hx, def.extent.y / hy, def.extent.z / hz);
+    const ratio = Math.max(1e-6, scale.x * scale.y * scale.z);
+    return { centreScale: scale, shapeScale: Math.min(2.4, Math.max(0.4, Math.cbrt(ratio))) };
   }
 
   chip(point: Vec3, normal: Vec3, energyJ: number, surface: SurfaceId): void {
@@ -346,6 +398,10 @@ export class DestructionSystem implements DestructionService {
       record.health = record.def.health;
       record.intact = true;
       if (record.visual) record.visual.visible = true;
+      // Batch instances are NOT restored here: `SceneGraph` exposes hide only,
+      // and the lane that built the batch is the one that can re-show it. LEVEL
+      // does exactly that in `resetLevel`, which the same reset chain calls.
+      record.batches.length = 0;
     }
     // Registrations themselves are cleared: the scenario that made them is torn
     // down too, and a stale entity id would resolve to a destroyed body.
@@ -359,6 +415,194 @@ export class DestructionSystem implements DestructionService {
   get stats(): Readonly<{ chunksLive: number; chunksSettled: number; budgetUsed01: number }> {
     return this.statsValue;
   }
+
+  /* ----------------------------------------------------------- diagnostics */
+
+  /**
+   * The registration table, summarised. `colliderOnly` is THE number this whole
+   * seam exists to drive to zero: it counts destructibles that will lose their
+   * collider and leave their geometry standing.
+   */
+  registrationSummary(): {
+    registered: number;
+    withVisual: number;
+    withBatch: number;
+    colliderOnly: number;
+    batchInstances: number;
+    intact: number;
+    withShards: number;
+  } {
+    let withVisual = 0;
+    let withBatch = 0;
+    let colliderOnly = 0;
+    let batchInstances = 0;
+    let intact = 0;
+    let withShards = 0;
+    for (const r of this.order) {
+      if (r.visual) withVisual++;
+      if (r.batches.length > 0) {
+        withBatch++;
+        batchInstances += r.batches.length;
+      }
+      if (!r.visual && r.batches.length === 0) colliderOnly++;
+      if (r.intact) intact++;
+      const asset = this.assets.tryGet(r.def.chunks);
+      if (asset && shardsOf(asset).length > 0) withShards++;
+    }
+    return {
+      registered: this.order.length,
+      withVisual,
+      withBatch,
+      colliderOnly,
+      batchInstances,
+      intact,
+      withShards,
+    };
+  }
+
+  /**
+   * The nearest INTACT destructible to `from`, with everything a driver needs to
+   * aim at it and then check whether it actually left the frame.
+   */
+  nearestIntact(from: Vec3, maxDistance: number): {
+    entity: number;
+    id: string;
+    position: [number, number, number];
+    extent: [number, number, number];
+    distance: number;
+    health: number;
+    batches: number;
+    hasVisual: boolean;
+    shards: number;
+  } | null {
+    let best: Destructible | null = null;
+    let bestD = maxDistance * maxDistance;
+    const p = new THREE.Vector3();
+    for (const r of this.order) {
+      if (!r.intact) continue;
+      p.setFromMatrixPosition(r.matrix);
+      const d = p.distanceToSquared(from as THREE.Vector3);
+      if (d < bestD) {
+        bestD = d;
+        best = r;
+      }
+    }
+    if (!best) return null;
+    p.setFromMatrixPosition(best.matrix);
+    const e = best.def.extent;
+    const asset = this.assets.tryGet(best.def.chunks);
+    return {
+      entity: best.entity as number,
+      id: best.def.id,
+      position: [p.x, p.y, p.z],
+      extent: e ? [e.x, e.y, e.z] : [0, 0, 0],
+      distance: Math.sqrt(bestD),
+      health: best.health,
+      batches: best.batches.length,
+      hasVisual: best.visual !== null,
+      shards: asset ? shardsOf(asset).length : 0,
+    };
+  }
+
+  /**
+   * Every destructible within `radius` of `from`, intact or not, with its
+   * geometry state. The pairing of `intact` with `drawing` is the whole point:
+   * `intact: false, drawing: true` is the defect this change exists to kill —
+   * the collider gone, the sightline open, the wall still standing.
+   */
+  nearbyRegistrations(from: Vec3, radius: number): {
+    entity: number;
+    id: string;
+    position: [number, number, number];
+    distance: number;
+    batches: number;
+    intact: boolean;
+    drawing: true | false | 'unattached';
+  }[] {
+    const out: ReturnType<DestructionSystem['nearbyRegistrations']> = [];
+    const p = new THREE.Vector3();
+    const r2 = radius * radius;
+    for (const record of this.order) {
+      p.setFromMatrixPosition(record.matrix);
+      const d2 = p.distanceToSquared(from as THREE.Vector3);
+      if (d2 > r2) continue;
+      out.push({
+        entity: record.entity as number,
+        id: record.def.id,
+        position: [p.x, p.y, p.z],
+        distance: Math.sqrt(d2),
+        batches: record.batches.length,
+        intact: record.intact,
+        drawing: this.visibleFor(record.entity as number),
+      });
+    }
+    out.sort((a, b) => a.distance - b.distance);
+    return out;
+  }
+
+  /**
+   * Is `entity` still drawing anything?
+   *
+   * `'unattached'` is deliberately NOT folded into `false`: a collider-only
+   * destructible draws geometry nobody can hide, and reporting that as "not
+   * visible" is exactly the confusion this whole change exists to remove.
+   */
+  visibleFor(entity: number): true | false | 'unattached' {
+    const r = this.byEntity.get(entity);
+    if (!r) return false;
+    if (!r.visual && r.batches.length === 0) return 'unattached';
+    if (r.visual && r.visual.visible) return true;
+    for (const b of r.batches) {
+      const batched = b.object as THREE.BatchedMesh;
+      if (typeof batched.getVisibleAt === 'function' && batched.getVisibleAt(b.instanceId)) return true;
+    }
+    return false;
+  }
+}
+
+/**
+ * LANE-PRIVATE DIAGNOSTIC PROBE. Not gameplay, not the contract, not read by
+ * anything in `src/`. Same shape and same rationale as WEAPONS' `__THROWABLES__`
+ * and CORE's `__SOAK__`.
+ *
+ * It exists because BOTH of this repo's instruments are structurally blind to
+ * destruction: `EngineDriver.resetChain` calls `DestructionService.reset()`,
+ * which clears the registration table, and only `PhysicsService.addStatic`
+ * refills it at world build — so inside every `tools/shoot.sh` capture and every
+ * `tools/soak.sh` run all ~244 level destructibles are inert static colliders
+ * and nothing can be broken at all. Live play never resets. Any claim about
+ * destruction therefore has to be read out of a live page, and this is the
+ * readout: how many destructibles have geometry attached, how many are
+ * collider-only, and whether a specific wall is still being drawn after it fell.
+ */
+export interface DestructionProbe {
+  readonly available: true;
+  summary(): ReturnType<DestructionSystem['registrationSummary']>;
+  nearest(from: [number, number, number], maxDistance: number): ReturnType<DestructionSystem['nearestIntact']>;
+  nearby(from: [number, number, number], radius: number): ReturnType<DestructionSystem['nearbyRegistrations']>;
+  visible(entity: number): true | false | 'unattached';
+  intact(entity: number): boolean;
+  chunkStats(): { chunksLive: number; chunksSettled: number; budgetUsed01: number };
+}
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __DESTR__: DestructionProbe | undefined;
+}
+
+function installDestructionProbe(system: DestructionSystem): void {
+  const scratch = new THREE.Vector3();
+  globalThis.__DESTR__ = {
+    available: true,
+    summary: () => system.registrationSummary(),
+    nearest: (from, maxDistance) =>
+      system.nearestIntact(scratch.set(from[0], from[1], from[2]), maxDistance),
+    nearby: (from, radius) =>
+      system.nearbyRegistrations(scratch.set(from[0], from[1], from[2]), radius),
+    visible: (entity) => system.visibleFor(entity),
+    intact: (entity) => system.isIntact(entity as unknown as EntityId),
+    chunkStats: () => ({ ...system.stats }),
+  };
 }
 
 export function createDestructionService(ctx: BootContext): DestructionService {
@@ -375,10 +619,17 @@ export function createDestructionService(ctx: BootContext): DestructionService {
     phase: TickPhase.Destruction,
     tick: (tick) => system.tick(tick),
   });
+  installDestructionProbe(system);
   ctx.afterBoot((services) => {
     // LEVEL's own destructibles. It hands out defs; the colliders they belong to
     // came through `PhysicsService.addStatic` with `destructible` set.
     void services.level.collectDestructibles();
+    const s = system.registrationSummary();
+    console.info(
+      `[boot] destruction · ${s.registered} registered · ${s.withBatch} batched ` +
+        `(${s.batchInstances} instances) · ${s.withVisual} meshed · ` +
+        `${s.colliderOnly} COLLIDER-ONLY · ${s.withShards} with shards`,
+    );
   });
   return system;
 }

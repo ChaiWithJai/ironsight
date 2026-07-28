@@ -35,32 +35,23 @@
  */
 import * as THREE from 'three';
 import {
-  type ColliderShape,
+  type DestructionShard,
   type MeshAsset,
   type Rng,
+  type ShardedMeshAsset,
   type SurfaceId,
   type Vec3,
 } from '@/engine/types';
 
-export interface FractureShard {
-  readonly geometry: THREE.BufferGeometry;
-  readonly collider: ColliderShape;
-  /** Centroid in the source solid's local frame. The body spawns here. */
-  readonly centre: Vec3;
-  readonly volumeM3: number;
-}
-
 /**
- * A `MeshAsset` that also carries its pre-fractured shards.
- *
- * `DestructibleDef.chunks` is typed `AssetKey<MeshAsset>` and `AssetKey<T>` is
- * contravariant in `T`, so a key of a subtype cannot be stored in that field.
- * The bake therefore DECLARES `AssetKey<MeshAsset>` and returns this — every
- * value here is a valid `MeshAsset`, and `shardsOf()` below is the narrowing.
+ * Both of these now live on the contract (`DestructionShard` /
+ * `ShardedMeshAsset` in section 16) because LEVEL bakes shard sets too and
+ * could not name the type from inside its own lane — which is the whole reason
+ * its cover collapsed with `chunksSpawned: 0`. Kept as lane-local aliases so
+ * every reader of this file still sees the fracture vocabulary.
  */
-export interface FracturedMesh extends MeshAsset {
-  readonly shards: readonly FractureShard[];
-}
+export type FractureShard = DestructionShard;
+export type FracturedMesh = ShardedMeshAsset;
 
 export function shardsOf(asset: MeshAsset): readonly FractureShard[] {
   const maybe = asset as Partial<FracturedMesh>;

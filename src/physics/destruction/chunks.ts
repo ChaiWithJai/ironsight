@@ -26,11 +26,13 @@ import * as THREE from 'three';
 import {
   CollisionGroup,
   Sim,
+  type ColliderShape,
   type EntityId,
   type Mat4,
   type QualitySettings,
   type Rng,
   type SurfaceId,
+  type Vec3,
 } from '@/engine/types';
 import * as RAPIER from '@dimforge/rapier3d-compat';
 import type { BodyRecord, BodyTable } from '@/physics/bodies';
@@ -59,6 +61,49 @@ export interface ChunkSpawnParams {
   readonly energyJ: number;
   readonly lifetimeSeconds: number;
   readonly settleAfter: number;
+  /**
+   * PER-AXIS re-proportioning of shard CENTRES, so a shard set baked at one
+   * size covers the footprint of the solid that actually broke. 1,1,1 when the
+   * set was baked at this solid's own size.
+   */
+  readonly centreScale?: Vec3;
+  /**
+   * UNIFORM re-scale of shard SHAPES. Deliberately not per-axis: a 5 × 2.4 ×
+   * 0.45 m wall scaled anisotropically off a unit fracture sheds 11:5:1 wafers,
+   * which reads as torn paper rather than as masonry. Uniform keeps the shard
+   * proportions the fracture produced and lets the centres do the spreading.
+   */
+  readonly shapeScale?: number;
+}
+
+/**
+ * A uniformly scaled copy of a shard's collider. Convex hulls are the only kind
+ * a fracture produces, but the switch is exhaustive so a future shard kind
+ * cannot silently spawn at the wrong size.
+ */
+function scaleCollider(shape: ColliderShape, s: number): ColliderShape {
+  switch (shape.kind) {
+    case 'convex': {
+      const points = new Float32Array(shape.points.length);
+      for (let i = 0; i < points.length; i++) points[i] = shape.points[i] * s;
+      return { kind: 'convex', points, offset: shape.offset };
+    }
+    case 'box':
+      return {
+        kind: 'box',
+        half: new THREE.Vector3(shape.half.x * s, shape.half.y * s, shape.half.z * s),
+        offset: shape.offset,
+        rotation: shape.rotation,
+      };
+    case 'sphere':
+      return { kind: 'sphere', radius: shape.radius * s, offset: shape.offset };
+    case 'capsule':
+      return { kind: 'capsule', halfHeight: shape.halfHeight * s, radius: shape.radius * s, offset: shape.offset };
+    case 'cylinder':
+      return { kind: 'cylinder', halfHeight: shape.halfHeight * s, radius: shape.radius * s, offset: shape.offset };
+    default:
+      return shape;
+  }
 }
 
 export class ChunkPool {
@@ -109,20 +154,26 @@ export class ChunkPool {
 
     const centre = new THREE.Vector3();
     const impulse = new THREE.Vector3();
+    const cs = params.centreScale;
+    const shape = params.shapeScale ?? 1;
+    const shaped = Math.abs(shape - 1) > 1e-3;
     let spawned = 0;
 
     for (const shard of params.shards) {
       if (this.liveCount >= budget) break;
-      centre.copy(shard.centre).applyQuaternion(rotation).add(position);
+      centre.set(shard.centre.x, shard.centre.y, shard.centre.z);
+      if (cs) centre.set(centre.x * cs.x, centre.y * cs.y, centre.z * cs.z);
+      centre.applyQuaternion(rotation).add(position);
 
-      const mass = Math.max(0.4, shard.volumeM3 * physics.densityKgM3);
+      const collider = shaped ? scaleCollider(shard.collider, shape) : shard.collider;
+      const mass = Math.max(0.4, shard.volumeM3 * shape * shape * shape * physics.densityKgM3);
       const record = this.table.create(
         {
           mode: 'dynamic',
           entity: params.entity,
           position: centre,
           rotation,
-          shapes: [shard.collider],
+          shapes: [collider],
           surface: params.surface,
           group: CollisionGroup.Debris,
           collidesWith: defaultCollidesWith(CollisionGroup.Debris),
@@ -168,7 +219,9 @@ export class ChunkPool {
         true,
       );
 
-      const mesh = this.visuals.addBodyMesh(record, shard.geometry.clone(), params.surface);
+      const geometry = shard.geometry.clone();
+      if (shaped) geometry.scale(shape, shape, shape);
+      const mesh = this.visuals.addBodyMesh(record, geometry, params.surface);
       const chunk: LiveChunk = { record, mesh, surface: params.surface, asleepSince: -1, settled: false };
       record.onRemoved = () => {
         // The body may go before the chunk does — a lifetime expiry. Keep the

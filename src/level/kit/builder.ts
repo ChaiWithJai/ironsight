@@ -603,20 +603,132 @@ export class MeshBuilder {
   }
 
   /**
+   * How many index entries have been appended so far.
+   *
+   * THE HANDLE ON "WHICH TRIANGLES ARE THIS PIECE OF COVER". Everything in the
+   * level is appended into one stream per material, which is what makes 1 200
+   * pieces cost 17 draws — and it is also why a wall that gets blown up has no
+   * mesh of its own to hide. `LevelBuild` brackets an emitter with this counter,
+   * so a destructible ends up owning an exact half-open index range and can be
+   * lifted out of the stream into a `BatchedMesh` instance that destruction CAN
+   * hide. See `LevelBuild.beginPiece`.
+   */
+  get indexLength(): number {
+    return this.index.length;
+  }
+
+  /**
+   * Triangle indices in the half-open index range `[start, start + count)`.
+   *
+   * With `inside`, only triangles whose THREE vertices all pass it are kept.
+   * That is the filter that makes automatic attribution safe: an emitter's
+   * output is bracketed loosely — "everything since the last collider" — and
+   * then intersected with the collider's own volume, so nothing outside the
+   * solid can ever be hidden by it. The two bags that fell off the top of a
+   * sandbag wall and are lying a metre in front of it stay in the merged mesh,
+   * which is correct: they are not the wall.
+   */
+  collectTriangles(
+    start: number,
+    count: number,
+    inside: ((x: number, y: number, z: number) => boolean) | null,
+    out: number[],
+  ): void {
+    if (count <= 0 || start < 0 || start + count > this.index.length) return;
+    const first = Math.ceil(start / 3);
+    const last = Math.floor((start + count) / 3);
+    for (let t = first; t < last; t++) {
+      if (inside) {
+        let ok = true;
+        for (let k = 0; k < 3 && ok; k++) {
+          const v = this.index[t * 3 + k];
+          ok = inside(this.position[v * 3], this.position[v * 3 + 1], this.position[v * 3 + 2]);
+        }
+        if (!ok) continue;
+      }
+      out.push(t);
+    }
+  }
+
+  /**
+   * Copy a set of triangles out as a standalone geometry, re-indexed and welded
+   * to only the vertices they use. Positions stay in WORLD space, exactly as
+   * they were appended — so the batch instance that carries it needs no
+   * transform, and it renders identically under the forward material, the
+   * depth-prepass override, the shadow override and the velocity override
+   * without any of them having to agree about a batching matrix.
+   */
+  geometryFromTriangles(triangles: readonly number[]): THREE.BufferGeometry | null {
+    if (triangles.length === 0) return null;
+    const remap = new Map<number, number>();
+    const position: number[] = [];
+    const normal: number[] = [];
+    const uv: number[] = [];
+    const index = new Uint32Array(triangles.length * 3);
+    let w = 0;
+    for (const t of triangles) {
+      for (let k = 0; k < 3; k++) {
+        const src = this.index[t * 3 + k];
+        let dst = remap.get(src);
+        if (dst === undefined) {
+          dst = position.length / 3;
+          remap.set(src, dst);
+          position.push(this.position[src * 3], this.position[src * 3 + 1], this.position[src * 3 + 2]);
+          normal.push(this.normal[src * 3], this.normal[src * 3 + 1], this.normal[src * 3 + 2]);
+          uv.push(this.uv[src * 2], this.uv[src * 2 + 1]);
+        }
+        index[w++] = dst;
+      }
+    }
+    if (position.length === 0) return null;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(position), 3));
+    g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(normal), 3));
+    g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uv), 2));
+    g.setIndex(new THREE.BufferAttribute(index, 1));
+    g.computeBoundingBox();
+    g.computeBoundingSphere();
+    return g;
+  }
+
+  /**
    * Build the geometry. Called once at the end of the level build; the JS arrays
    * are dropped afterwards so the ~30 MB of transient number arrays does not sit
    * in the heap for the rest of the session.
+   *
+   * `omitTriangles` drops the triangles that have been lifted into a
+   * `BatchedMesh` — the destructibles. Their VERTICES are left in place:
+   * re-packing the stream would cost a full re-index of half a million
+   * triangles to save a few thousand unreferenced vertices, and an unreferenced
+   * vertex is never fetched.
    */
-  finish(): THREE.BufferGeometry | null {
+  finish(omitTriangles?: ReadonlySet<number>): THREE.BufferGeometry | null {
     if (this.index.length === 0) return null;
+    let index = this.index;
+    if (omitTriangles && omitTriangles.size > 0) {
+      const kept: number[] = [];
+      const triangles = this.index.length / 3;
+      for (let t = 0; t < triangles; t++) {
+        if (omitTriangles.has(t)) continue;
+        kept.push(this.index[t * 3], this.index[t * 3 + 1], this.index[t * 3 + 2]);
+      }
+      index = kept;
+    }
+    if (index.length === 0) {
+      this.position.length = 0;
+      this.normal.length = 0;
+      this.uv.length = 0;
+      this.index.length = 0;
+      return null;
+    }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(this.position), 3));
     g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(this.normal), 3));
     g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(this.uv), 2));
     const idx =
       this.position.length / 3 > 65535
-        ? new THREE.BufferAttribute(new Uint32Array(this.index), 1)
-        : new THREE.BufferAttribute(new Uint16Array(this.index), 1);
+        ? new THREE.BufferAttribute(new Uint32Array(index), 1)
+        : new THREE.BufferAttribute(new Uint16Array(index), 1);
     g.setIndex(idx);
     g.computeBoundingBox();
     g.computeBoundingSphere();

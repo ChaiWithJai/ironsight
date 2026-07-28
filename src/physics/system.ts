@@ -383,7 +383,24 @@ export class PhysicsSystem implements PhysicsService {
     );
     this.statics.push(record.handle);
     if (def.destructible) {
-      destructionSystem()?.register(owner, def.destructible, record.handle);
+      const destruction = destructionSystem();
+      destruction?.register(owner, def.destructible, record.handle);
+      /**
+       * THE GEOMETRY, not just the collider. This is the only place in the repo
+       * that holds both the entity a destructible was minted with and the
+       * drawing the lane that authored it handed over, so it is the only place
+       * the two can be joined. Skip it and the collider goes, the sightline
+       * opens, and the wall is still standing.
+       */
+      if (destruction) {
+        for (const v of def.visuals ?? []) {
+          if (v.instanceId !== undefined && v.instanceId >= 0) {
+            destruction.attachBatchInstance(owner, v.object, v.instanceId);
+          } else {
+            destruction.attachVisual(owner, v.object);
+          }
+        }
+      }
     }
     return record.handle;
   }

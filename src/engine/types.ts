@@ -2535,6 +2535,23 @@ export type ColliderShape =
   | { kind: 'trimesh'; vertices: Float32Array; indices: Uint32Array }
   | { kind: 'heightfield'; rows: number; cols: number; heights: Float32Array; scale: Vec3 };
 
+/**
+ * WHICH DRAWN GEOMETRY IS THIS SOLID, so destruction can take it out of frame.
+ *
+ * A destructible is authored as a COLLIDER, and a collider is invisible. The
+ * thing the player sees is drawn by whichever lane owns the geometry, and that
+ * lane is the only one that can say which object — and, if it batched it, which
+ * instance of that object — the collider stands behind.
+ *
+ * `instanceId >= 0` ⇒ one instance of a batched draw, hidden through
+ * `SceneGraph.hideBatchInstance`. Omitted or negative ⇒ the whole `object` is
+ * the solid and is hidden outright.
+ */
+export interface DestructibleVisual {
+  readonly object: THREE.Object3D;
+  readonly instanceId?: number;
+}
+
 export interface StaticColliderDef {
   readonly matrix: Mat4;
   readonly shape: ColliderShape;
@@ -2542,6 +2559,21 @@ export interface StaticColliderDef {
   readonly group: CollisionGroup;
   /** Present ⇒ this collider is destructible and DESTRUCTION registers it. */
   readonly destructible?: DestructibleDef;
+  /**
+   * The drawn geometry of the intact solid, forwarded to
+   * `DestructionService.attachVisual` / `attachBatchInstance` by
+   * `PhysicsService.addStatic` — which is the only place that knows the entity
+   * a destructible collider was minted with.
+   *
+   * A list, not one entry, because one piece of cover is routinely several
+   * draws: a sandbag emplacement is forty bags across three materials and
+   * therefore three batch instances, all of which have to go at once.
+   *
+   * ABSENT ⇒ COLLIDER-ONLY. The collider is removed and the sightline opens
+   * while the geometry stays standing. That is a bug, not a feature; see
+   * `DestructionService.attachVisual`.
+   */
+  readonly visuals?: readonly DestructibleVisual[];
   readonly occluder?: boolean;
 }
 
@@ -2702,8 +2734,28 @@ export interface DestructibleDef {
   /**
    * Pre-fractured Voronoi shards, generated at BAKE time. Runtime fracture is a
    * frame-hitch generator and is banned.
+   *
+   * The asset MUST resolve to a `ShardedMeshAsset` — a plain `MeshAsset` carries
+   * no `shards` and the collapse spawns NO rubble at all (`chunksSpawned: 0`)
+   * while still removing the collider, which reads to a player as broken
+   * destruction rather than as subtle destruction.
    */
   readonly chunks: AssetKey<MeshAsset>;
+  /**
+   * Half-extents of the INTACT solid, when it differs from the size the shard
+   * set was baked at.
+   *
+   * A shard set is shared by hundreds of instances — that sharing is the only
+   * reason destruction fits in the asset budget — so one set has to serve a
+   * 5 m garden wall and a 1 m sandbag stack. The shards are baked inside the
+   * asset's own `bounds`, and this is the box they are re-proportioned into:
+   * shard CENTRES scale per axis so the rubble covers the real footprint, shard
+   * SHAPES scale uniformly so a wall does not shed wafers.
+   *
+   * Omitted ⇒ the shard set was baked at this solid's exact size (PHYS's own
+   * templates in `destruction/defs.ts`) and nothing is rescaled.
+   */
+  readonly extent?: Vec3;
   /** Damage below this is cosmetic: a decal and a spall burst, no state change. */
   readonly chipThreshold: number;
   /** Masonry shrugs off bullets and dies to rockets. */
@@ -2727,9 +2779,77 @@ export interface DestructionResult {
   readonly position: Vec3;
 }
 
+/**
+ * ONE PRE-FRACTURED PIECE of a destructible solid, produced at BAKE time.
+ *
+ * Cross-lane because the two halves live in different lanes: LEVEL and PHYS
+ * each bake shard sets for the material classes they author, and PHYS's chunk
+ * pool is the only thing that ever turns one into a rigid body.
+ *
+ * `centre` is in the SOURCE SOLID'S LOCAL FRAME and is where the body spawns;
+ * `geometry` and `collider` are both centred on it, so the body's origin is its
+ * centre of mass and it tumbles about the right axis. `volumeM3` is what gives
+ * the shard its MASS, and is why a keystone falls like a keystone and a corner
+ * chip skitters.
+ */
+export interface DestructionShard {
+  readonly geometry: THREE.BufferGeometry;
+  readonly collider: ColliderShape;
+  readonly centre: Vec3;
+  readonly volumeM3: number;
+}
+
+/**
+ * The asset `DestructibleDef.chunks` must resolve to: a `MeshAsset` that also
+ * carries its shard set.
+ *
+ * `AssetKey<T>` is contravariant in `T`, so a key of a subtype cannot be stored
+ * in an `AssetKey<MeshAsset>` field. A fracture bake therefore DECLARES
+ * `AssetKey<MeshAsset>` and RETURNS this; PHYS narrows on the way out. Every
+ * value here is a valid `MeshAsset`, so nothing that only wants the mesh breaks.
+ */
+export interface ShardedMeshAsset extends MeshAsset {
+  readonly shards: readonly DestructionShard[];
+}
+
 /** Implemented by PHYS (`src/physics/destruction/system.ts`). */
 export interface DestructionService {
   register(entity: EntityId, def: DestructibleDef, body: BodyHandle): void;
+  /**
+   * HAND DESTRUCTION THE INTACT GEOMETRY so it can take it out of the frame when
+   * the solid comes down. `object.visible = false` on collapse, never rebuilt.
+   *
+   * THE INVARIANT, AND THE BUG IT EXISTS TO PREVENT
+   * ----------------------------------------------
+   * `register()` gives destruction a collider and a health pool and NOTHING
+   * ELSE. A destructible with neither `attachVisual` nor `attachBatchInstance`
+   * is COLLIDER-ONLY: on collapse its body is destroyed, its cover is lost, its
+   * dust fires and its debris spawns — and its mesh is still standing, solid,
+   * in the middle of the sightline that just opened. The player walks through a
+   * wall that looks intact and reads the whole feature as broken.
+   *
+   * That was the shipped behaviour for all ~244 pieces of LEVEL cover, for
+   * exactly this reason: the method existed on PHYS's class but not on this
+   * interface, so the lane that owned the geometry could not reach it.
+   *
+   * OPTIONAL ONLY because `src/bootstrap/nulls.ts` is frozen and cannot grow an
+   * implementation. Every real destructible should call one of the two.
+   */
+  attachVisual?(entity: EntityId, object: THREE.Object3D): void;
+  /**
+   * The batched equivalent, for geometry that is ONE INSTANCE of a shared draw
+   * rather than an `Object3D` of its own — which is what any lane that cares
+   * about draw-call count emits. Hidden through
+   * `SceneGraph.hideBatchInstance(object, instanceId)`, so the batch loses the
+   * instance without a geometry rebuild.
+   *
+   * Call once PER BATCH the destructible contributes to: a piece of cover made
+   * of several materials is several instances and all of them have to go
+   * together. Calls accumulate; they do not replace each other.
+   *
+   * The same collider-only invariant as `attachVisual` applies.
+   */
+  attachBatchInstance?(entity: EntityId, object: THREE.Object3D, instanceId: number): void;
   applyDamage(info: DamageInfo): DestructionResult;
   /** Sub-lethal ballistic chip: geometry survives, decal + spall burst emitted. */
   chip(point: Vec3, normal: Vec3, energyJ: number, surface: SurfaceId): void;
