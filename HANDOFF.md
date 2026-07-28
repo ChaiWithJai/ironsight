@@ -140,9 +140,10 @@ Everything under `src/`, `docs/`, `tools/` including the vendored orchestration 
 
 ### On disk but NOT in git
 - **`reference/` (77 MB, 187 images)** — gitignored deliberately: third-party imagery, never
-  committed, never shipped. **Rebuild with `python3 tools/fetch-reference.py`.** Without it the
-  critic loop has nothing to calibrate against and scores become incomparable with the ones in
-  this document.
+  committed, never shipped, and **not redistributed** — the fetch script that assembled it was
+  removed before the repo went public. Without this corpus the critic loop has nothing to calibrate
+  against and scores become incomparable with the ones in this document. Reassembling it is a manual
+  step; `docs/REFERENCE_INDEX.md` records what was in it.
 - **`tools/shots/*.png`, `tools/compare/*.png`** — regenerate with `./tools/shoot.sh`.
 
 ### Lost on session change (accept it)
@@ -156,7 +157,6 @@ into `tools/workflows/`, so the *method* survives even though the transcripts do
 
 ```bash
 npm install                          # once
-python3 tools/fetch-reference.py     # once — rebuild the calibration corpus
 npm run verify                       # typecheck + boundary CI + build. THE gate.
 npm run dev                          # PLAY IT. See README.md for controls.
 ./tools/shoot.sh --list              # 48 registered shots

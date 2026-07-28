@@ -203,8 +203,12 @@ type scale. Those specs contain measurements; they contain no third-party pixels
 **The imagery itself is not in this repo and never was.** `reference/` and `tools/compare/` are
 gitignored, local-only, and verified absent from the entire git history. No pixel, mesh, texture,
 audio sample or level layout from any other game enters this build.
-[`tools/fetch-reference.py`](tools/fetch-reference.py) rebuilds that local corpus if you want to run
-the critic loop yourself.
+
+The corpus was assembled locally and is not redistributed, so `tools/compare.sh` has nothing to
+calibrate against on a fresh clone. Point it at any two images you like — it is a general blind A/B
+harness and does not care where the reference panel comes from. If you want to reproduce the scores
+in `docs/AAA_RUBRIC.md` specifically, you will need to assemble your own corpus; the specs record
+the measurements those scores were taken against.
 
 ---
 
