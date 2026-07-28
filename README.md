@@ -1,12 +1,17 @@
 # IRONSIGHT
 
-A browser-native first-person shooter built on Three.js, aiming at the visual and tactile bar of a
-modern AAA military shooter. One map, Conquest, bots, destructible cover.
+A browser-native first-person shooter built on Three.js — one map, Conquest, bots, destructible
+cover — aiming at the visual and tactile bar of a modern AAA military shooter.
 
-**Everything is generated procedurally in code at load time.** No textures, no meshes, no audio
-files, no fonts — the repo contains zero binary art assets and the game makes zero network requests
-at runtime. That is why the first load spends ~30–60 s on a bake progress bar: it is building every
-material, mesh, sound and font atlas on your machine.
+![IRONSIGHT — HARBOUR REACH](docs/media/hero.jpg)
+
+**Everything in that frame is generated procedurally in code at load time.** No textures, no meshes,
+no audio files, no fonts. The repo contains **zero binary art assets** and the game makes **zero
+network requests at runtime** — the terrain, the buildings, the grass, the sky, the weapon model, the
+HUD's font atlas and every sound are all built on your machine in the first ~30–60 s. The shipped
+bundle is three JavaScript files and an HTML page.
+
+MIT licensed. Contributions welcome — but read [Current state](#current-state--read-this-before-judging-it) first.
 
 ---
 
@@ -20,8 +25,9 @@ npm run dev
 Open the URL Vite prints (default <http://localhost:5173>), wait for the bake, then **click the
 canvas to lock the pointer**. `Esc` releases it.
 
-> First load bakes for ~30–60 s. Subsequent loads hit the cache and are much faster.
 > Requires a WebGL2 browser. Chrome/Edge give the best results; Safari works but is slower.
+> Nothing to configure for Node — the scripts route through `tools/with-node.sh`, which finds a
+> Node ≥ 20.19 itself. Override with `IRONSIGHT_NODE_BIN`.
 
 ### Controls
 
@@ -37,9 +43,8 @@ canvas to lock the pointer**. `Esc` releases it.
 | **Prone** | `Z` |
 | **Reload** | `R` |
 | **Lean left / right** | `Q` / `E` |
-| **Throw grenade** | `G` (hold to cook, release to throw) |
+| **Throw grenade** | `G` (hold to cook, release to throw) — 3 frags |
 | **Use / interact** | `F` — resupply at an ammo crate on any capture point |
-| **Swap weapon** | `X`, or `1`–`9` — **currently does nothing**; the loadout stays on the rifle |
 | **Fire mode** | `B` |
 | **Spot** | `T` |
 | **Scoreboard** | `Tab` (hold) |
@@ -47,59 +52,8 @@ canvas to lock the pointer**. `Esc` releases it.
 
 Gamepad is supported on the standard W3C mapping.
 
-#### Bound but NOT yet implemented
-
-These keys are in the binding table and reach the input layer, but nothing consumes them yet.
-Pressing them does nothing:
-
-| | |
-|---|---|
-| **Melee** `V` | Not wired to the damage model. |
-
-### What is NOT yet a playable mechanic
-
-Some systems are fully built and visible in the captured shots, but **cannot currently be triggered
-by a player**. Being explicit so the screenshots do not oversell the game.
-
-The table below was re-measured by driving the shipped build in a browser with real keyboard and
-mouse events and reading the counters back — not by reading the code. See "How the table was
-checked" underneath.
-
-| System | Built? | Reachable in play? |
-|---|---|---|
-| Bullet impacts, decals, surface-correct debris | yes | **yes** |
-| Destructible cover (geometry vanishes, shards, dust) | yes | **yes** — a frag breaches wood, stucco and sandbag cover; 18 shards spawn per collapse. **Masonry and concrete are currently too tough to breach in play** (10+ frags and still intact) — see below |
-| Explosions (fireball, pressure ring, debris, smoke column) | yes | **yes** — `G` throws a frag that arcs, bounces, detonates and lights the world |
-| HUD combat feedback (hitmarkers, killfeed, damage chips, kill banner) | yes | **yes** — driven by real `damage.applied` / `killfeed` events, not by the demo timeline |
-| Ammo resupply | yes | **yes** — a crate on each capture point; `F` or a short dwell |
-| Bot combat | yes | **yes** — bots path, engage and kill each other; 2–6 kills per 60 s 9v9 soak |
-| Melee | no | **no** — `V` reaches the input layer and nothing consumes it |
-
-Both of destruction's long-standing rough edges are now closed, measured live (not in either
-instrument — see below):
-
-- A collapsed piece of LEVEL cover **spawns real debris**. `DestructibleDef.chunks` now resolves to
-  a `ShardedMeshAsset`, so `shardsOf()` finds the shard set `src/level/colliders.ts` bakes instead of
-  an empty list. Measured: 18 chunks per collapse at tier HIGH, 90 across five collapses.
-- The **intact mesh of a breached LEVEL wall now goes**. `StaticColliderDef.visuals` carries the
-  batch instances the cover was drawn as, `PhysicsService.addStatic` forwards them to
-  `DestructionService.attachBatchInstance`, and the collapse calls `SceneGraph.hideBatchInstance`.
-  Measured at boot: 241 of 244 destructibles have geometry attached; the 3 that do not are crane
-  footings and are named in a boot warning.
-
-#### How the table was checked
-
-`DestructionService.reset()` clears its registration table (`byEntity.clear()`) and only
-`PhysicsService.addStatic` ever repopulates it, at world build. That reset runs at the top of every
-`tools/shoot.sh` capture **and** every `tools/soak.sh` run — so **inside both of this repo's
-automated instruments every wall in the map is an inert static collider**, and neither can see
-destruction at all. Live play never resets, so a human is unaffected. Any future claim about
-destruction has to be measured in a live page, or after PHYS re-registers on reset.
-
-`globalThis.__DESTR__` is the readout for that: `summary()` reports how many destructibles have
-geometry attached and how many are collider-only, `nearby(point, radius)` pairs each one's `intact`
-flag with whether it is still `drawing`, and `intact: false, drawing: true` is precisely the defect
-above. Same lane-private-probe pattern as `__THROWABLES__` and `__SOAK__`.
+**Bound but inert:** `V` (melee) and `X` / `1`–`9` (weapon swap) reach the input layer, but nothing
+consumes them yet. The loadout stays on the rifle.
 
 ### The map — HARBOUR REACH
 
@@ -109,22 +63,94 @@ A Mediterranean coastal town at golden hour. Three capture points:
 - **BRAVO** — the harbour cranes and quay
 - **CHARLIE** — the old fort on the headland
 
+### What is and isn't a playable mechanic
+
+Some systems are fully built and visible in captured shots but **cannot be triggered by a player**.
+Being explicit so the screenshots don't oversell the game. This table was re-measured by driving the
+shipped build in a browser with real keyboard and mouse events and reading the counters back — not
+by reading the code.
+
+| System | Built? | Reachable in play? |
+|---|---|---|
+| Bullet impacts, decals, surface-correct debris | yes | **yes** |
+| Destructible cover (geometry vanishes, shards, dust) | yes | **yes** — a frag breaches wood, stucco and sandbag cover; 18 shards per collapse. Masonry and concrete are currently too tough to breach in play (10+ frags, still intact) |
+| Explosions (fireball, pressure ring, debris, smoke column) | yes | **yes** — `G` throws a frag that arcs, bounces, detonates and lights the world |
+| HUD combat feedback (hitmarkers, killfeed, damage chips, kill banner) | yes | **yes** — driven by real `damage.applied` / `killfeed` events, not a demo timeline |
+| Ammo resupply | yes | **yes** — a crate on each capture point; `F` or a short dwell |
+| Bot combat | yes | **yes** — bots path, engage and kill each other; 2–6 kills per 60 s in a 9v9 soak |
+| Melee | no | **no** — `V` reaches the input layer and nothing consumes it |
+
+#### The trap that makes this table hard to check
+
+`DestructionService.reset()` clears its registration table, and only `PhysicsService.addStatic` ever
+repopulates it, at world build. That reset runs at the top of every `tools/shoot.sh` capture **and**
+every `tools/soak.sh` run — so **inside both of this repo's automated instruments, every wall in the
+map is an inert static collider**, and neither can see destruction at all. Live play never resets, so
+a human is unaffected.
+
+This burned us for most of the project: twelve rounds of critique scored destruction frames no player
+could have caused. **Any claim about destruction has to be measured in a live page.**
+`globalThis.__DESTR__` is the readout — `summary()` reports how many destructibles have geometry
+attached, `nearby(point, radius)` pairs each one's `intact` flag with whether it is still `drawing`.
+Same lane-private-probe pattern as `__THROWABLES__` and `__SOAK__`.
+
 ---
 
 ## Current state — read this before judging it
 
-This project is **mid-development and does not yet meet its own quality bar.** Being specific rather
-than vague about that:
+This project is **mid-development and does not yet meet its own quality bar.** Specifically:
 
-- The engine, map, weapons, physics, bots, Conquest and HUD all work. 48 deterministic camera shots
-  capture cleanly.
-- Against a rubric scored by blind A/B comparison with real gameplay frames, it sits well short of
-  the AAA target. `docs/AAA_RUBRIC.md` has the honest numbers and, importantly, an explanation of
-  why the absolute scores drift between rounds and should be read as deltas.
+- The engine, map, weapons, physics, bots, Conquest and HUD all work. 65 deterministic camera shots
+  capture cleanly, and `npm run verify` is green.
+- Against a rubric scored by **blind A/B comparison with real gameplay frames**, it sits well short
+  of the AAA target — roughly **6.0 against an 8.5 bar**. [`docs/AAA_RUBRIC.md`](docs/AAA_RUBRIC.md)
+  has the honest numbers and, importantly, explains why the absolute scores drift between rounds and
+  should be read as deltas rather than levels.
 - Known rough edges: over-strong near-field atmospheric scattering (a blue veil on several views),
   compressed contrast, sparse vegetation, and water that is weaker than the rest of the frame.
 
-`HANDOFF.md` is the full state-of-the-project document, including what to work on next.
+[`HANDOFF.md`](HANDOFF.md) is the full state-of-the-project document, including what to work on next
+and the traps that will bite you.
+
+---
+
+## How it was built
+
+IRONSIGHT was written almost entirely by orchestrated LLM subagents working in parallel lanes, with a
+separate population of adversarial critic agents scoring the output against real gameplay footage.
+The measured cost of that:
+
+| | |
+|---|---|
+| **Subagents** | 203 |
+| **Tokens generated** | ~16.9 M output (~6.2 B processed, ~95 % of it cache reads) |
+| **API-equivalent compute** | ~$6.3 k at Opus 5 list rates |
+| **Wall clock** | 55 hours |
+| **Output** | 101,526 lines of TypeScript across 256 files, 4,881 lines of spec |
+
+Three pieces of infrastructure did the actual work of keeping that many agents honest, and they are
+the parts of this repo most likely to be useful to you even if you don't care about the game:
+
+**A deterministic screenshot harness** ([`src/engine/harness.ts`](src/engine/harness.ts),
+[`tools/capture.mjs`](tools/capture.mjs)). It suspends the render loop, reseeds the RNG, renders an
+exact number of fixed-timestep frames and grabs the canvas. The frame budget is counted in **frames,
+not wall-clock**, so a shot is reproducible frame-for-frame on any machine — which is what makes
+"did this change make it look worse?" an answerable question.
+
+**A boundary CI** ([`tools/check-boundaries.mjs`](tools/check-boundaries.mjs)). Parallel agents
+writing into one renderer will quietly destroy it. This enforces cross-lane import bans, a
+`Math.random()` ban (determinism), material-factory routing, wall-clock and network bans, and a set
+of GLSL ES 3.00 bug classes that cost us real days — reserved words, implicit `int`→`float`, and
+backticks inside template-literal shader source.
+
+**A blind A/B critic loop** ([`tools/compare.sh`](tools/compare.sh)). Builds a two-panel sheet
+labelled only **A** and **B**, sides randomised, answer key written to a directory critics are
+forbidden to read. The blind is the entire point: it is very easy to rate your own work generously,
+and we have the score deltas to prove it.
+
+The single most valuable lesson is written up in `HANDOFF.md`: **the shot harness photographs
+systems, not mechanics.** Twelve critic rounds scored an `ai_firefight` frame without ever noticing
+that the bots did not move.
 
 ---
 
@@ -139,10 +165,6 @@ npm run boundaries  # architectural rules only
 
 ### Looking at the game without playing it
 
-The game registers ~48 deterministic camera shots. The harness suspends the render loop, reseeds
-the RNG, renders an exact number of fixed-timestep frames and grabs the canvas — so a shot is
-reproducible frame-for-frame on any machine.
-
 ```bash
 ./tools/shoot.sh --list           # list every registered shot
 ./tools/shoot.sh level_bravo      # capture one → tools/shots/level_bravo.png  (~1.5 s)
@@ -152,24 +174,37 @@ reproducible frame-for-frame on any machine.
 A green shoot doubles as a smoke test: it exits non-zero on a build failure, an uncaught page error
 or any console error.
 
-### Comparing against reference
+### Soak testing
 
 ```bash
-python3 tools/fetch-reference.py  # rebuild the local calibration corpus (gitignored)
-./tools/compare.sh --ours tools/shots/level_bravo.png \
-                   --ref  reference/gameplay/bf6_gp_020.jpg \
-                   --out  tools/compare/sheet.png
+./tools/soak.sh                   # headless fixed-timestep simulation
 ```
 
-Builds a two-panel sheet labelled only **A** and **B**, sides randomised, answer key written to
-`tools/compare/.keys/`. The blind is the point — it is very easy to rate your own work generously.
+Reports distance travelled, frozen ticks and stuck ticks per bot. This is how the character
+controller went from wedging on terrain 94.5 % of ticks to 2.5 %.
 
-### Notes
+### Architecture in one paragraph
 
-- **Node**: nothing to configure. Vite scripts route through `tools/with-node.sh`, which finds a
-  node ≥ 20.19 itself. Override with `IRONSIGHT_NODE_BIN`.
-- **Reference imagery** under `reference/` is third-party, gitignored, never committed and never
-  shipped. No pixel, mesh, texture or layout from it enters the build.
+`src/engine/types.ts` is a ~3,500-line **contract layer** that every subsystem compiles against. Each
+lane exposes exactly three named exports — `create*`, `register*Bakes`, `reset*` — and the
+composition root that wires them is frozen. That is what made it safe to point a dozen agents at the
+same renderer at once: the contract is negotiated up front, in a file that typechecks, so integration
+failures surface as compile errors rather than as a black screen. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/OWNERSHIP.md`](docs/OWNERSHIP.md).
+
+---
+
+## Reference imagery
+
+`docs/LOOK_SPEC.md` and `docs/HUD_SPEC.md` were derived by measuring published gameplay footage of
+existing military shooters and writing down the numbers — exposure, fog density, HUD element sizes,
+type scale. Those specs contain measurements; they contain no third-party pixels.
+
+**The imagery itself is not in this repo and never was.** `reference/` and `tools/compare/` are
+gitignored, local-only, and verified absent from the entire git history. No pixel, mesh, texture,
+audio sample or level layout from any other game enters this build.
+[`tools/fetch-reference.py`](tools/fetch-reference.py) rebuilds that local corpus if you want to run
+the critic loop yourself.
 
 ---
 
@@ -177,10 +212,19 @@ Builds a two-panel sheet labelled only **A** and **B**, sides randomised, answer
 
 | | |
 |---|---|
-| `HANDOFF.md` | **Start here.** Full project state, runbooks, traps, what to do next. |
-| `docs/BRIEF.md` | The design contract every contributor works to. |
-| `docs/ARCHITECTURE.md` | Module tree, render graph, frame lifecycle, bake pipeline. |
-| `docs/OWNERSHIP.md` | Which files belong to which subsystem. The anti-collision map. |
-| `docs/LOOK_SPEC.md` | Art-direction target as implementable numbers, measured from real frames. |
-| `docs/HUD_SPEC.md` | The HUD, element by element. |
-| `docs/AAA_RUBRIC.md` | How frames are scored, and why the scores drift. |
+| [`HANDOFF.md`](HANDOFF.md) | **Start here.** Full project state, runbooks, traps, what to do next. |
+| [`docs/BRIEF.md`](docs/BRIEF.md) | The design contract every contributor works to. |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module tree, render graph, frame lifecycle, bake pipeline. |
+| [`docs/OWNERSHIP.md`](docs/OWNERSHIP.md) | Which files belong to which subsystem. The anti-collision map. |
+| [`docs/LOOK_SPEC.md`](docs/LOOK_SPEC.md) | Art-direction target as implementable numbers. |
+| [`docs/HUD_SPEC.md`](docs/HUD_SPEC.md) | The HUD, element by element. |
+| [`docs/AAA_RUBRIC.md`](docs/AAA_RUBRIC.md) | How frames are scored, and why the scores drift. |
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Michael Gill.
+
+IRONSIGHT is an original work and is not affiliated with, endorsed by, or derived from any
+commercial game. Every asset in the build is generated by the code in this repository.
