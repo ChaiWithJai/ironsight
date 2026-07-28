@@ -38,3 +38,4 @@ tmp-*/
 
 # Soak reports — regenerate with ./tools/soak.sh
 tools/soak/
+tools/shots-post-*/
