@@ -7,7 +7,13 @@ import {
   worldAuthorshipChecks,
   type WorldProfile,
 } from '@/engine/world-profile';
-import { publishWorld, type PublishedWorld } from '@/engine/world-publication';
+import {
+  listMyWorlds,
+  publishWorld,
+  withdrawWorld,
+  type OwnedWorld,
+  type PublishedWorld,
+} from '@/engine/world-publication';
 
 interface PublicationState {
   state: 'portable' | 'saving' | 'saved' | 'fallback';
@@ -87,6 +93,12 @@ mount.innerHTML = `
       </div>
     </section>
   </div>
+  <section class="portfolio" id="portfolio" aria-labelledby="portfolio-title" hidden>
+    <p class="kicker">Your durable worlds</p>
+    <h2 id="portfolio-title">Portfolio</h2>
+    <p class="portfolio-note">Only worlds published from this browser session appear here. Withdrawing retires the durable record; a shared URL still boots the same civilization.</p>
+    <ul class="portfolio-list" id="portfolio-list"></ul>
+  </section>
 `;
 
 const form = document.querySelector<HTMLFormElement>('#world-form')!;
@@ -202,6 +214,7 @@ publish.addEventListener('click', async () => {
   try {
     const world: PublishedWorld = await publishWorld(values());
     publication = { state: 'saved', id: world.id, playUrl: world.playUrl };
+    void refreshPortfolio();
   } catch (error) {
     publication = {
       state: 'fallback',
@@ -211,4 +224,50 @@ publish.addEventListener('click', async () => {
   render();
 });
 document.querySelector('#reset-world')!.addEventListener('click', () => load(DEFAULT_WORLD_PROFILE));
+
+const portfolioSection = document.querySelector<HTMLElement>('#portfolio')!;
+const portfolioList = document.querySelector<HTMLUListElement>('#portfolio-list')!;
+
+function portfolioItem(world: OwnedWorld): string {
+  const withdrawn = world.status === 'withdrawn';
+  const lineage = world.supersedesId ? ' · revision' : '';
+  const enter = withdrawn
+    ? '<span class="withdrawn-tag">withdrawn</span>'
+    : `<a href="../?teach=1&world=${encodeURIComponent(world.id)}">Enter →</a>`;
+  const control = withdrawn
+    ? ''
+    : `<button type="button" class="withdraw" data-world="${escapeMarkup(world.id)}">Withdraw</button>`;
+  return (
+    `<li class="${withdrawn ? 'is-withdrawn' : ''}">` +
+    `<span class="sigil">${escapeMarkup(world.sigil)}</span>` +
+    `<span class="meta"><strong>${escapeMarkup(world.civilization)}</strong>` +
+    `<small>${escapeMarkup(world.era)}${lineage}</small></span>` +
+    `<span class="controls">${enter}${control}</span>` +
+    `</li>`
+  );
+}
+
+async function refreshPortfolio(): Promise<void> {
+  const worlds = await listMyWorlds();
+  if (worlds.length === 0) {
+    portfolioSection.hidden = true;
+    portfolioList.innerHTML = '';
+    return;
+  }
+  portfolioSection.hidden = false;
+  portfolioList.innerHTML = worlds.map(portfolioItem).join('');
+}
+
+portfolioList.addEventListener('click', async (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button.withdraw');
+  if (!button) return;
+  const id = button.dataset.world;
+  if (!id) return;
+  button.disabled = true;
+  button.textContent = 'Withdrawing…';
+  await withdrawWorld(id);
+  await refreshPortfolio();
+});
+
 load(readWorldProfile(location.search));
+void refreshPortfolio();
