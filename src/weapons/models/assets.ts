@@ -33,7 +33,14 @@ import { buildHand, buildWeaponModel, type WeaponModel } from '@/weapons/models/
 import { bevelBox, mergeParts, place, tube } from '@/weapons/models/prim';
 
 /** Every weapon this lane ships. The `WeaponDef` table is built from it. */
-export const WEAPON_IDS: readonly WeaponId[] = ['ar_service', 'smg_compact', 'dmr_marksman', 'lmg_support'];
+export const WEAPON_IDS: readonly WeaponId[] = [
+  'ar_service',
+  'smg_compact',
+  'dmr_marksman',
+  'lmg_support',
+  'shotgun',
+  'sidearm',
+];
 
 interface WeaponKeys {
   readonly model: AssetKey<WeaponModel>;

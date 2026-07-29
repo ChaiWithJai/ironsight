@@ -97,9 +97,16 @@ interface WeaponShape {
   readonly muzzleDevice: 'hider' | 'brake' | 'suppressor';
   /** Where the support hand grips, along the handguard. */
   readonly supportGrip: number;
+  /**
+   * Optional and defaults to `true`. A sidearm is fired one-handed off a grip
+   * alone — there is no buttstock to brace against a shoulder — so `false`
+   * skips the buffer tube, cheek riser, butt pad, strut and sling loop rather
+   * than drawing a stub of shoulder stock behind a pistol's slide.
+   */
+  readonly hasStock?: boolean;
 }
 
-const SHAPES: Readonly<Record<'ar' | 'smg' | 'dmr' | 'lmg', WeaponShape>> = {
+const SHAPES: Readonly<Record<'ar' | 'smg' | 'dmr' | 'lmg' | 'shotgun' | 'pistol', WeaponShape>> = {
   /** A 14.5" carbine: the reference silhouette for the whole game. */
   ar: {
     receiverLength: 0.300,
@@ -184,12 +191,84 @@ const SHAPES: Readonly<Record<'ar' | 'smg' | 'dmr' | 'lmg', WeaponShape>> = {
     muzzleDevice: 'hider',
     supportGrip: -0.300,
   },
+  /**
+   * A 12-gauge pump-action: a fat tube-scaled receiver, a short forend the
+   * support hand pumps rather than merely holds, no detachable box magazine
+   * and a low-mounted mini reflex rather than the AR's holo.
+   *
+   * THE "MAGAZINE" NODE IS A SIMPLIFICATION, NOTED HONESTLY. A real pump gun
+   * feeds from a tube under the barrel that never leaves the gun; there is no
+   * engine concept of a shell-by-shell tube reload, only the one generic
+   * magazine-drop clip every class shares (`viewmodel/rig.ts` animates
+   * `pivots.magazine` by `magazineDrop` for every weapon alike). Rather than
+   * add a second reload-animation type for one class, the shotgun's `mag*`
+   * parts model the loading-gate/shell-carrier housing on the underside of
+   * the receiver — small and mostly hidden — and it plays the same drop clip.
+   * It reads as "something is being reloaded down there," which is honest
+   * given the shared rig, rather than a magazine that does not exist.
+   */
+  shotgun: {
+    receiverLength: 0.270,
+    receiverHeight: 0.086,
+    receiverWidth: 0.052,
+    barrelLength: 0.360,
+    barrelRadius: 0.0114,
+    handguardLength: 0.220,
+    handguardRadius: 0.031,
+    // Fewer, deeper ribs than a rifle's slats: a pump forend is corncob-ribbed
+    // for grip, not slatted for cooling.
+    handguardSlats: 6,
+    magLength: 0.095,
+    magCurve: 0.0,
+    magWidth: 0.050,
+    stockLength: 0.230,
+    optic: 'reflex',
+    // Mounted low and close to the bore — a shotgun's reflex sits on a
+    // saddle-clamp receiver rail, not up on an AR-height picatinny stack.
+    opticHeight: 0.058,
+    bipod: false,
+    carryHandle: false,
+    muzzleDevice: 'hider',
+    supportGrip: -0.155,
+  },
+  /**
+   * A compact 9 mm service pistol: no stock, no optic rail height to speak
+   * of, a slide where the other classes have a charging handle, and a grip
+   * mag that never has to look like anything else.
+   */
+  pistol: {
+    receiverLength: 0.128,
+    receiverHeight: 0.052,
+    receiverWidth: 0.032,
+    barrelLength: 0.082,
+    barrelRadius: 0.0068,
+    // No true handguard on a pistol; this is the dust-cover/frame length the
+    // support hand actually wraps.
+    handguardLength: 0.060,
+    handguardRadius: 0.017,
+    handguardSlats: 3,
+    magLength: 0.115,
+    magCurve: 0.02,
+    magWidth: 0.026,
+    stockLength: 0,
+    optic: 'reflex',
+    // A slide-mounted micro red dot sits barely above the bore — the whole
+    // reason it reads as "pistol optic" rather than "tiny rifle optic".
+    opticHeight: 0.032,
+    bipod: false,
+    carryHandle: false,
+    muzzleDevice: 'hider',
+    supportGrip: -0.035,
+    hasStock: false,
+  },
 };
 
 export function shapeOf(id: WeaponId): WeaponShape {
   if (id === 'dmr_marksman') return SHAPES.dmr;
   if (id === 'lmg_support') return SHAPES.lmg;
   if (id === 'smg_compact') return SHAPES.smg;
+  if (id === 'shotgun') return SHAPES.shotgun;
+  if (id === 'sidearm') return SHAPES.pistol;
   return SHAPES.ar;
 }
 
@@ -716,32 +795,49 @@ export function buildWeaponModel(id: WeaponId, rng: Rng): WeaponModel {
     add('trigger', 'steel', 'trigger', trigger);
 
     // Stock: a skeletonised in-line tube stock with a cheek riser and butt pad.
-    const stockZ = rearZ + s.stockLength * 0.5;
-    add('bufferTube', 'receiver', 'body', place(tube(0.0155, s.stockLength * 0.96, 16), [0, receiverTop - 0.024, stockZ - 0.004]));
-    add(
-      'cheek',
-      'polymer',
-      'body',
-      place(
-        extrude(roundedRect(0.026, 0.030, 0.006), s.stockLength * 0.62, 0.0009, 4),
-        [0, receiverTop - 0.006, stockZ - s.stockLength * 0.10],
-      ),
-    );
-    add(
-      'buttPad',
-      'polymer',
-      'body',
-      place(extrude(roundedRect(0.040, 0.062, 0.010), 0.020, 0.0012, 5), [0, receiverTop - 0.032, rearZ + s.stockLength - 0.008], [0.10, 0, 0]),
-    );
-    add(
-      'stockStrut',
-      'polymer',
-      'body',
-      place(bevelBox(0.030, 0.010, s.stockLength * 0.55, 0.0008), [0, receiverTop - 0.050, stockZ + s.stockLength * 0.10], [0.16, 0, 0]),
-    );
-    add('slingLoop', 'steel', 'body', place(normaliseTorus(0.0075, 0.0016), [halfW + 0.004, receiverTop - 0.030, rearZ + 0.014], [0, Math.PI * 0.5, 0]));
+    // Skipped entirely for `hasStock: false` — a sidearm is braced by nothing
+    // but the shooting hand, and a stub of buffer tube behind a pistol's slide
+    // is the kind of "it's just the rifle rig with smaller numbers" tell the
+    // brief's defect list calls out.
+    if (s.hasStock !== false) {
+      const stockZ = rearZ + s.stockLength * 0.5;
+      add('bufferTube', 'receiver', 'body', place(tube(0.0155, s.stockLength * 0.96, 16), [0, receiverTop - 0.024, stockZ - 0.004]));
+      add(
+        'cheek',
+        'polymer',
+        'body',
+        place(
+          extrude(roundedRect(0.026, 0.030, 0.006), s.stockLength * 0.62, 0.0009, 4),
+          [0, receiverTop - 0.006, stockZ - s.stockLength * 0.10],
+        ),
+      );
+      add(
+        'buttPad',
+        'polymer',
+        'body',
+        place(extrude(roundedRect(0.040, 0.062, 0.010), 0.020, 0.0012, 5), [0, receiverTop - 0.032, rearZ + s.stockLength - 0.008], [0.10, 0, 0]),
+      );
+      add(
+        'stockStrut',
+        'polymer',
+        'body',
+        place(bevelBox(0.030, 0.010, s.stockLength * 0.55, 0.0008), [0, receiverTop - 0.050, stockZ + s.stockLength * 0.10], [0.16, 0, 0]),
+      );
+      add('slingLoop', 'steel', 'body', place(normaliseTorus(0.0075, 0.0016), [halfW + 0.004, receiverTop - 0.030, rearZ + 0.014], [0, Math.PI * 0.5, 0]));
+    } else {
+      // The pistol's answer to a butt pad: a flared backstrap closing the rear
+      // of the grip, which is what a real service pistol's frame does instead.
+      add(
+        'backstrap',
+        'polymer',
+        'body',
+        place(extrude(roundedRect(0.024, 0.034, 0.008), 0.014, 0.0009, 4), [0, receiverBottom - 0.062, gripZ + 0.017]),
+      );
+    }
 
-    // Charging handle: reciprocates on its own node.
+    // Charging handle / slide serrations: reciprocates on its own node either
+    // way — a pistol's slide travels the same axis a rifle bolt carrier does,
+    // so the shared animation clip is correct, not a simplification.
     const ch = bevelBox(0.052, 0.0075, 0.014, 0.0006);
     place(ch, [0, receiverTop - 0.010, rearZ - 0.012]);
     add('charging', 'receiver', 'charging', ch);
