@@ -89,6 +89,15 @@ export interface SoakOptions {
 interface SoakApi {
   readonly available: true;
   run(options?: SoakOptions): Promise<SoakReport>;
+  /**
+   * THE LONG SOAK. A 10–30 minute run that answers a different question from
+   * `run`: not "does anything move" but "does anything LEAK". It steps the same
+   * fixed-timestep simulation, renders on a cadence so the renderer's own
+   * allocations are exercised, and samples the JS heap, GPU-resource residency,
+   * live entity count and per-frame CPU time on a wall-INDEPENDENT sim clock.
+   * `tools/soak.sh --profile` drives it; see `runProfile`.
+   */
+  profile(options?: ProfileOptions): Promise<ProfileReport>;
 }
 
 declare global {
@@ -184,6 +193,87 @@ export interface SoakReport {
   errors: string[];
 }
 
+/* --------------------------------------------------------- profile shape */
+
+export interface ProfileOptions {
+  /** Simulated MINUTES to run. Clamped 1..30; the headline is a 30-min soak. */
+  minutes?: number;
+  seed?: number;
+  /**
+   * How the local player is driven for the whole run. 'sweep' is the default
+   * here (not 'uphill'): a leak soak wants continuous, varied locomotion across
+   * the map so movement, nav, VFX and audio all keep churning, not a probe of
+   * one hill. See `SoakOptions.walk` for the mode semantics.
+   */
+  walk?: 'uphill' | 'sweep' | 'forward' | 'none';
+  sprint?: boolean;
+  /**
+   * Render one frame per N simulated ticks. A leak soak must render SOME frames
+   * — GPU-resource and renderer-side leaks are invisible to `stepSimOnly` — but
+   * rendering every tick would make a 30-min soak an hour of wall time under the
+   * software rasteriser, so the default is a cadence, not every frame.
+   */
+  renderEvery?: number;
+  /** Heap / resource sample cadence, in SIMULATED seconds. Default 5. */
+  sampleEverySec?: number;
+  /**
+   * Forced-GC retained-heap cadence, in simulated seconds. Default 30. Only
+   * fires when `globalThis.gc` exists; otherwise the trough tracker carries the
+   * leak signal on its own.
+   */
+  gcEverySec?: number;
+  /** Ticks between host yields. Also the raw-heap / GC-drop sample stride. */
+  batchTicks?: number;
+}
+
+/** One heap/resource/frame-time sample, taken every `sampleEverySec`. */
+export interface ProfileSample {
+  /** Simulated minutes since the run began. */
+  tMin: number;
+  tick: number;
+  /** `performance.memory.usedJSHeapSize`, MiB. −1 when the API is unavailable. */
+  heapUsedMB: number;
+  heapTotalMB: number;
+  /** three.js resident GPU resources — the GPU-leak counterpart of the heap. */
+  geometries: number;
+  textures: number;
+  programs: number;
+  /** Live engine entities. Should plateau at the match population, not climb. */
+  entities: number;
+  botsAlive: number;
+  /** Rendered frames in THIS window and their CPU-time distribution (ms). */
+  frames: number;
+  frameP50: number;
+  frameP95: number;
+  frameMax: number;
+  /** Raw-heap drops seen this window (natural or forced GCs) and MiB reclaimed. */
+  gcDrops: number;
+  reclaimedMB: number;
+}
+
+/** A post-collection retained-heap reading — the clean leak-trend series. */
+export interface RetainedSample {
+  tMin: number;
+  tick: number;
+  retainedMB: number;
+}
+
+export interface ProfileReport {
+  ok: boolean;
+  config: Record<string, unknown>;
+  engine: Record<string, unknown>;
+  /** Which signal carried the leak verdict: 'retained' (forced GC) or 'trough'. */
+  leakSignal: 'retained' | 'trough' | 'none';
+  memory: Record<string, unknown>;
+  frameTime: Record<string, unknown>;
+  gc: Record<string, unknown>;
+  resources: Record<string, unknown>;
+  samples: ProfileSample[];
+  retained: RetainedSample[];
+  verdicts: Array<{ id: string; level: 'ok' | 'warn' | 'fail'; message: string }>;
+  errors: string[];
+}
+
 /* =================================================================== install */
 
 let installed: IronEngine | null = null;
@@ -194,6 +284,7 @@ export function installSoak(engine: IronEngine): void {
   globalThis.__SOAK__ = {
     available: true,
     run: (options?: SoakOptions) => runSoak(engine, options ?? {}),
+    profile: (options?: ProfileOptions) => runProfile(engine, options ?? {}),
   };
 }
 
@@ -983,6 +1074,612 @@ async function runSoak(engine: IronEngine, options: SoakOptions): Promise<SoakRe
     // and a shot cannot disagree about what state the page is in afterwards.
     driver.setLoopSuspended(false);
   }
+}
+
+/* ============================================================ profile: leak */
+
+const MiB = 1024 * 1024;
+/** A raw-heap fall larger than this between batches is treated as a collection. */
+const GC_DROP_MIB = 1.0;
+/** Warm-up skipped before leak regression: pools fill and caches warm early. */
+const PROFILE_WARMUP_MIN = 1.0;
+
+interface PerfMemory {
+  usedJSHeapSize: number;
+  totalJSHeapSize: number;
+  jsHeapSizeLimit: number;
+}
+
+/**
+ * `performance.memory` is a non-standard Chrome-only field and absent from the
+ * DOM lib types, so it is read through a narrow cast. `tools/soak.mjs` launches
+ * with `--enable-precise-memory-info`, without which the numbers are quantised
+ * to 100 KB buckets and coarse enough to hide a slow leak.
+ */
+function readHeap(): PerfMemory | null {
+  const pm = (performance as unknown as { memory?: PerfMemory }).memory;
+  return pm && typeof pm.usedJSHeapSize === 'number' ? pm : null;
+}
+
+/**
+ * Force a full collection when the collector was exposed; report whether it ran.
+ *
+ * `globalThis.gc` exists only when Chromium is launched with
+ * `--js-flags=--expose-gc`, which `tools/soak.mjs` does in --profile mode. It is
+ * read through a cast rather than the ambient `gc` global so this stays
+ * dependency-free of `@types/node`'s `GCFunction` shape. When it is absent we
+ * fall back to tracking the troughs of the raw-heap sawtooth: a POST-GC retained
+ * sample is the clean leak signal (only survivors count), but the rising floor
+ * of the sawtooth says the same thing without a forced collection.
+ */
+function forceGc(): boolean {
+  const g = (globalThis as { gc?: () => void }).gc;
+  if (typeof g !== 'function') return false;
+  g();
+  return true;
+}
+
+/**
+ * Streaming frame-time distribution. A 30-minute soak renders tens of thousands
+ * of frames; storing each to sort for a percentile would itself be a leak, so
+ * this bins into fixed 0.25 ms buckets (0..100 ms) and answers percentiles off
+ * the cumulative histogram. Bounded memory, deterministic, no host clock read —
+ * the frame CPU time is `EngineProfiler.frame.cpuMs`, measured by the ONE file
+ * besides clock.ts allowed to call `performance.now()`.
+ */
+class FrameTimeStats {
+  private readonly binMs = 0.25;
+  private readonly bins = new Int32Array(400);
+  count = 0;
+  sum = 0;
+  min = Infinity;
+  max = 0;
+  private overflow = 0;
+
+  add(ms: number): void {
+    this.count++;
+    this.sum += ms;
+    if (ms < this.min) this.min = ms;
+    if (ms > this.max) this.max = ms;
+    const i = Math.floor(ms / this.binMs);
+    if (i >= this.bins.length) this.overflow++;
+    else this.bins[i]++;
+  }
+
+  percentile(p: number): number {
+    if (this.count === 0) return 0;
+    const target = p * this.count;
+    let cum = 0;
+    for (let i = 0; i < this.bins.length; i++) {
+      cum += this.bins[i];
+      if (cum >= target) return round((i + 0.5) * this.binMs, 3);
+    }
+    return round(this.max, 3);
+  }
+
+  mean(): number {
+    return this.count > 0 ? this.sum / this.count : 0;
+  }
+
+  /** Frames at or above `ms` — the "hitch" tail that a still frame cannot show. */
+  countOver(ms: number): number {
+    const from = Math.min(this.bins.length, Math.ceil(ms / this.binMs));
+    let n = this.overflow;
+    for (let i = from; i < this.bins.length; i++) n += this.bins[i];
+    return n;
+  }
+}
+
+/**
+ * Ordinary-least-squares slope of y against x. Used for the leak trend: y is
+ * retained (or trough) MiB, x is simulated minutes, so `slope` is MiB gained per
+ * minute and `r2` says how straight the climb is — a leak is a line, a warm-up
+ * hump is not.
+ */
+function linreg(points: Array<{ x: number; y: number }>): { slope: number; intercept: number; r2: number } {
+  const n = points.length;
+  if (n < 2) return { slope: 0, intercept: n === 1 ? points[0].y : 0, r2: 0 };
+  let sx = 0;
+  let sy = 0;
+  for (const p of points) {
+    sx += p.x;
+    sy += p.y;
+  }
+  const mx = sx / n;
+  const my = sy / n;
+  let sxx = 0;
+  let sxy = 0;
+  let syy = 0;
+  for (const p of points) {
+    const dx = p.x - mx;
+    const dy = p.y - my;
+    sxx += dx * dx;
+    sxy += dx * dy;
+    syy += dy * dy;
+  }
+  if (sxx === 0) return { slope: 0, intercept: my, r2: 0 };
+  const slope = sxy / sxx;
+  const r2 = syy === 0 ? 1 : (sxy * sxy) / (sxx * syy);
+  return { slope, intercept: my - slope * mx, r2 };
+}
+
+/**
+ * THE LEAK SOAK. Steps the fixed-timestep simulation for `minutes` of sim time,
+ * rendering on a cadence, and watches four things that a screenshot cannot:
+ *
+ *   1. JS heap over time, sampled raw AND (when `--expose-gc` is on) post-GC.
+ *      A leak is a rising floor: the sawtooth troughs, or the post-GC retained
+ *      series, climbing on a straight line across the run.
+ *   2. GPU resources — three.js resident geometry/texture/program counts. These
+ *      never touch the JS heap, so a mesh or render-target leak is invisible to
+ *      (1) and needs its own eyes.
+ *   3. Live entity count. Ragdolls, projectiles, decals and VFX that spawn and
+ *      never free show up here before they show up as megabytes.
+ *   4. Per-frame CPU time distribution, windowed, so frame-time DRIFT (the
+ *      symptom that the map is filling with un-culled corpses) is separable from
+ *      a constant cost.
+ *
+ * Determinism holds exactly as in `runSoak`: same boot, same seed, same tick
+ * count, no wall-clock read in this file. `tools/soak.mjs` owns the stopwatch;
+ * everything here is keyed to `tick * dt`.
+ */
+async function runProfile(engine: IronEngine, options: ProfileOptions): Promise<ProfileReport> {
+  const minutes = clampNum(options.minutes ?? 15, 1, 30);
+  const seconds = minutes * 60;
+  const dt = Sim.TICK_DT;
+  const totalTicks = Math.max(1, Math.round(seconds * Sim.TICK_HZ));
+  const renderEvery = Math.max(1, Math.floor(options.renderEvery ?? 4));
+  const seed = options.seed ?? 0x1205;
+  const walk = options.walk ?? 'sweep';
+  const sprint = options.sprint ?? false;
+  const sampleEverySec = clampNum(options.sampleEverySec ?? 5, 1, 60);
+  const gcEverySec = clampNum(options.gcEverySec ?? 30, 5, 300);
+  const batchTicks = Math.max(1, Math.floor(options.batchTicks ?? 60));
+  const sampleEveryTicks = Math.max(1, Math.round(sampleEverySec * Sim.TICK_HZ));
+  const gcEveryTicks = Math.max(1, Math.round(gcEverySec * Sim.TICK_HZ));
+
+  const errors: string[] = [];
+  const s = engine.services;
+  const driver = engine.driver;
+
+  const heap0 = readHeap();
+  const heapAvailable = heap0 !== null;
+  if (!heapAvailable) {
+    errors.push('performance.memory unavailable — heap columns report −1; launch Chromium with --enable-precise-memory-info.');
+  }
+
+  driver.setLoopSuspended(true);
+  const tickAtStart = engine.clock.tick;
+  const frameAtStart = engine.clock.frame;
+  let sampler: (() => void) | null = null;
+
+  /* -- resident-resource reader, defensive about three's info shape --------- */
+  const info = engine.renderer.info as unknown as {
+    memory?: { geometries?: number; textures?: number };
+    programs?: { length?: number } | null;
+  };
+  const resources = (): { geometries: number; textures: number; programs: number } => ({
+    geometries: info.memory?.geometries ?? 0,
+    textures: info.memory?.textures ?? 0,
+    programs: info.programs?.length ?? 0,
+  });
+
+  const samples: ProfileSample[] = [];
+  const retained: RetainedSample[] = [];
+  const overall = new FrameTimeStats();
+  let windowStats = new FrameTimeStats();
+
+  // Raw-heap sawtooth bookkeeping, updated once per batch.
+  let lastRawHeapMB = heap0 ? heap0.usedJSHeapSize / MiB : -1;
+  let windowGcDrops = 0;
+  let windowReclaimedMB = 0;
+  let totalGcDrops = 0;
+  let totalReclaimedMB = 0;
+  let peakHeapMB = lastRawHeapMB;
+  let forcedGcs = 0;
+  let gcExposed = false;
+
+  const budgetCpuMs = s.quality.settings.budgets?.cpuMs ?? 16.6;
+  // Hitch bar: anything past 1.5× the CPU budget is a stall a player would feel.
+  const hitchMs = budgetCpuMs * 1.5;
+
+  const r0 = resources();
+  const start = {
+    heapUsedMB: heap0 ? round(heap0.usedJSHeapSize / MiB, 2) : -1,
+    heapLimitMB: heap0 ? round(heap0.jsHeapSizeLimit / MiB, 1) : -1,
+    ...r0,
+    entities: engine.entities.count,
+  };
+
+  try {
+    driver.context.seed(seed);
+    engine.loop.setCounting(true);
+
+    /* -- drive the local player exactly as runSoak does ------------------- */
+    const player = s.player;
+    const localStart = new THREE.Vector3().copy(player.state.position);
+    if (walk === 'uphill') {
+      const yaw = uphillYaw(s.terrain, localStart.x, localStart.z);
+      if (yaw !== null) player.teleport(player.state.entity, localStart, yaw, 0);
+    }
+    const scripted: Partial<PlayerIntent> = {
+      moveX: 0,
+      moveZ: walk === 'none' ? 0 : 1,
+      lookYaw: 0,
+      lookPitch: 0,
+      buttons: sprint && walk !== 'none' ? Btn.Sprint : 0,
+      weaponSlot: -1,
+      aimAt: null,
+    };
+    const sweepPerTick = (2 * Math.PI) / (20 * Sim.TICK_HZ);
+    s.input.setScripted(scripted);
+
+    // Re-steer the walk from a Cleanup-phase system, same seam runSoak uses, so
+    // the player keeps climbing/among the buildings for the whole soak instead
+    // of walking into one wall and reporting a flat, unrepresentative heap.
+    if (walk === 'sweep' || walk === 'uphill') {
+      const steer: TickSystem = {
+        name: 'core.profileSteer',
+        phase: TickPhase.Cleanup,
+        order: 998,
+        tick: (): void => {
+          const ps = player.state;
+          if (walk === 'sweep') {
+            scripted.lookYaw = sweepPerTick;
+          } else {
+            const want = uphillYaw(s.terrain, ps.position.x, ps.position.z);
+            scripted.lookYaw = want === null ? 0 : clampNum(shortestAngle(want - ps.yaw), -TURN_RATE, TURN_RATE);
+          }
+        },
+      };
+      sampler = engine.addTick(steer);
+    }
+
+    /* -- run in batches, sampling on sim-time boundaries ------------------ */
+    let ticksRun = 0;
+    let framesRendered = 0;
+    let nextSampleTick = sampleEveryTicks;
+    let nextGcTick = gcEveryTicks;
+
+    const takeSample = (): void => {
+      const heap = readHeap();
+      const res = resources();
+      const usedMB = heap ? round(heap.usedJSHeapSize / MiB, 2) : -1;
+      const totMB = heap ? round(heap.totalJSHeapSize / MiB, 2) : -1;
+      samples.push({
+        tMin: round((ticksRun * dt) / 60, 4),
+        tick: engine.clock.tick,
+        heapUsedMB: usedMB,
+        heapTotalMB: totMB,
+        geometries: res.geometries,
+        textures: res.textures,
+        programs: res.programs,
+        entities: engine.entities.count,
+        botsAlive: s.ai.count,
+        frames: windowStats.count,
+        frameP50: windowStats.percentile(0.5),
+        frameP95: windowStats.percentile(0.95),
+        frameMax: round(windowStats.max === 0 ? 0 : windowStats.max, 3),
+        gcDrops: windowGcDrops,
+        reclaimedMB: round(windowReclaimedMB, 2),
+      });
+      windowStats = new FrameTimeStats();
+      windowGcDrops = 0;
+      windowReclaimedMB = 0;
+    };
+
+    for (let i = 0; i < totalTicks; i++) {
+      if (i % renderEvery === 0) {
+        engine.stepFrame(dt);
+        framesRendered++;
+        const cpuMs = engine.profiler.frame.cpuMs;
+        if (cpuMs > 0) {
+          overall.add(cpuMs);
+          windowStats.add(cpuMs);
+        }
+      } else {
+        engine.stepSimOnly(dt);
+      }
+      ticksRun++;
+
+      // Raw-heap sawtooth: read once per batch and record any collection dip.
+      if (i % batchTicks === batchTicks - 1) {
+        const heap = readHeap();
+        if (heap) {
+          const nowMB = heap.usedJSHeapSize / MiB;
+          if (nowMB > peakHeapMB) peakHeapMB = nowMB;
+          if (lastRawHeapMB >= 0 && lastRawHeapMB - nowMB > GC_DROP_MIB) {
+            const reclaimed = lastRawHeapMB - nowMB;
+            windowGcDrops++;
+            windowReclaimedMB += reclaimed;
+            totalGcDrops++;
+            totalReclaimedMB += reclaimed;
+          }
+          lastRawHeapMB = nowMB;
+        }
+        await yieldToHost();
+      }
+
+      // Post-GC retained sample: collect, then read what survived.
+      if (ticksRun >= nextGcTick) {
+        nextGcTick += gcEveryTicks;
+        if (forceGc()) {
+          gcExposed = true;
+          forcedGcs++;
+          const heap = readHeap();
+          if (heap) {
+            const retMB = heap.usedJSHeapSize / MiB;
+            retained.push({ tMin: round((ticksRun * dt) / 60, 4), tick: engine.clock.tick, retainedMB: round(retMB, 2) });
+            lastRawHeapMB = retMB; // avoid counting the forced dip as a natural GC
+          }
+        }
+      }
+
+      if (ticksRun >= nextSampleTick) {
+        nextSampleTick += sampleEveryTicks;
+        takeSample();
+      }
+    }
+    if (windowStats.count > 0 || samples.length === 0) takeSample();
+
+    /* -- 6. compose ------------------------------------------------------- */
+    const heapEnd = readHeap();
+    const rEnd = resources();
+    const end = {
+      heapUsedMB: heapEnd ? round(heapEnd.usedJSHeapSize / MiB, 2) : -1,
+      ...rEnd,
+      entities: engine.entities.count,
+    };
+
+    // Leak trend: prefer the post-GC retained series; else the raw-heap troughs
+    // (the minimum sample in each rolling window), which approximate what a
+    // collection would have left behind without one being forced.
+    let leakSignal: ProfileReport['leakSignal'] = 'none';
+    let trendPoints: Array<{ x: number; y: number }> = [];
+    if (retained.length >= 3) {
+      leakSignal = 'retained';
+      trendPoints = retained.filter((p) => p.tMin >= PROFILE_WARMUP_MIN).map((p) => ({ x: p.tMin, y: p.retainedMB }));
+    } else if (heapAvailable && samples.length >= 3) {
+      leakSignal = 'trough';
+      trendPoints = troughSeries(samples).filter((p) => p.x >= PROFILE_WARMUP_MIN);
+    }
+    // If warm-up left too few points (a short run), fall back to using them all.
+    if (trendPoints.length < 3) {
+      if (leakSignal === 'retained') trendPoints = retained.map((p) => ({ x: p.tMin, y: p.retainedMB }));
+      else if (leakSignal === 'trough') trendPoints = troughSeries(samples);
+    }
+    const fit = linreg(trendPoints);
+    const spanMin = trendPoints.length >= 2 ? trendPoints[trendPoints.length - 1].x - trendPoints[0].x : 0;
+    const growthMB = round(fit.slope * spanMin, 2);
+
+    // Frame-time drift: first vs last fifth of the run, by rendered frame time.
+    const withFrames = samples.filter((x) => x.frames > 0);
+    const cut = Math.max(1, Math.floor(withFrames.length / 5));
+    const firstP95 = median(withFrames.slice(0, cut).map((x) => x.frameP95));
+    const lastP95 = median(withFrames.slice(-cut).map((x) => x.frameP95));
+
+    const report: ProfileReport = {
+      ok: true,
+      config: {
+        minutes,
+        seconds,
+        ticksRequested: totalTicks,
+        ticksRun,
+        dt,
+        tickHz: Sim.TICK_HZ,
+        renderEvery,
+        framesRendered,
+        seed,
+        walk,
+        sprint,
+        sampleEverySec,
+        gcEverySec,
+        batchTicks,
+      },
+      engine: {
+        tickAtStart,
+        tickAtEnd: engine.clock.tick,
+        frameAtStart,
+        frameAtEnd: engine.clock.frame,
+        deterministic: engine.clock.deterministic,
+        qualityTier: s.quality.settings.tier,
+        maxBots: s.quality.settings.ai.maxBots,
+        nullServices: engine.registry.nullKeys(),
+        heapPreciseApi: heapAvailable,
+        gcExposed,
+        budgetCpuMs,
+      },
+      leakSignal,
+      memory: {
+        heapAvailable,
+        startMB: start.heapUsedMB,
+        endMB: end.heapUsedMB,
+        peakMB: round(peakHeapMB, 2),
+        limitMB: start.heapLimitMB,
+        deltaMB: heapAvailable ? round(end.heapUsedMB - start.heapUsedMB, 2) : -1,
+        // The number the whole tool exists to produce.
+        growthMBPerMin: round(fit.slope, 3),
+        trendR2: round(fit.r2, 3),
+        trendSpanMin: round(spanMin, 2),
+        projectedGrowthMB: growthMB,
+        trendPointCount: trendPoints.length,
+      },
+      frameTime: {
+        framesTimed: overall.count,
+        meanMs: round(overall.mean(), 3),
+        p50Ms: overall.percentile(0.5),
+        p95Ms: overall.percentile(0.95),
+        p99Ms: overall.percentile(0.99),
+        maxMs: round(overall.max === 0 ? 0 : overall.max, 3),
+        hitchMs: round(hitchMs, 2),
+        hitches: overall.countOver(hitchMs),
+        firstFifthP95Ms: round(firstP95, 3),
+        lastFifthP95Ms: round(lastP95, 3),
+        p95DriftMs: round(lastP95 - firstP95, 3),
+      },
+      gc: {
+        exposed: gcExposed,
+        forcedCollections: forcedGcs,
+        naturalDrops: totalGcDrops,
+        totalReclaimedMB: round(totalReclaimedMB, 2),
+        retainedSamples: retained.length,
+      },
+      resources: {
+        geometriesStart: start.geometries,
+        geometriesEnd: end.geometries,
+        texturesStart: start.textures,
+        texturesEnd: end.textures,
+        programsStart: start.programs,
+        programsEnd: end.programs,
+        entitiesStart: start.entities,
+        entitiesEnd: end.entities,
+        entitiesPeak: Math.max(...samples.map((x) => x.entities), start.entities, end.entities),
+      },
+      samples,
+      retained,
+      verdicts: [],
+      errors,
+    };
+
+    report.verdicts = deriveProfileVerdicts(report);
+    return report;
+  } catch (error) {
+    return {
+      ok: false,
+      config: { minutes, renderEvery, seed, walk },
+      engine: {},
+      leakSignal: 'none',
+      memory: {},
+      frameTime: {},
+      gc: {},
+      resources: {},
+      samples,
+      retained,
+      verdicts: [{ id: 'profile.threw', level: 'fail', message: String(error) }],
+      errors: [...errors, error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error)],
+    };
+  } finally {
+    sampler?.();
+    engine.loop.setCounting(false);
+    s.input.setScripted(null);
+    driver.setLoopSuspended(false);
+  }
+}
+
+/**
+ * Rolling-window minima of the raw heap: the bottom of each stretch of the
+ * sawtooth, which is where the live set actually sits once transient garbage is
+ * collected. A rising floor here is a leak even with no forced GC available.
+ */
+function troughSeries(samples: ProfileSample[]): Array<{ x: number; y: number }> {
+  const usable = samples.filter((sm) => sm.heapUsedMB >= 0);
+  if (usable.length === 0) return [];
+  const win = Math.max(1, Math.floor(usable.length / 12));
+  const out: Array<{ x: number; y: number }> = [];
+  for (let i = 0; i < usable.length; i += win) {
+    let lo = Infinity;
+    let at = usable[i].tMin;
+    for (let j = i; j < Math.min(i + win, usable.length); j++) {
+      if (usable[j].heapUsedMB < lo) {
+        lo = usable[j].heapUsedMB;
+        at = usable[j].tMin;
+      }
+    }
+    out.push({ x: at, y: lo });
+  }
+  return out;
+}
+
+/**
+ * Leak/frame-time verdicts, derived only from the measurements. Thresholds are
+ * anchored to the budgets in issue #2: "post-ready JS heap ≤ 512 MiB and no
+ * sustained growth in a 30-minute soak." Growth is normalised per minute so a
+ * short shakedown run and a full 30-minute soak trip the same wire.
+ */
+function deriveProfileVerdicts(r: ProfileReport): ProfileReport['verdicts'] {
+  const out: ProfileReport['verdicts'] = [];
+  const add = (id: string, level: 'ok' | 'warn' | 'fail', message: string): void => {
+    out.push({ id, level, message });
+  };
+
+  const mem = r.memory as Record<string, number & boolean>;
+  const heapAvailable = Boolean(mem.heapAvailable);
+
+  if (!heapAvailable) {
+    add('profile.noHeapApi', 'warn', 'performance.memory was unavailable; heap-leak verdict skipped. GPU-resource and entity leak checks still ran.');
+  } else {
+    const slope = Number(mem.growthMBPerMin ?? 0);
+    const r2 = Number(mem.trendR2 ?? 0);
+    const span = Number(mem.trendSpanMin ?? 0);
+    const projected = Number(mem.projectedGrowthMB ?? 0);
+    const signalNote =
+      r.leakSignal === 'retained' ? 'post-GC retained heap' : r.leakSignal === 'trough' ? 'raw-heap troughs (no --expose-gc)' : 'insufficient samples';
+    // A leak is a straight, positive climb. Require BOTH a real slope and a
+    // straight line (r² > 0.6), or a lurching sawtooth trips a false alarm.
+    if (r.leakSignal === 'none') {
+      add('profile.leakUndecided', 'warn', `not enough heap samples over ${span} min to fit a trend.`);
+    } else if (slope > 4 && r2 > 0.6) {
+      add(
+        'profile.leak',
+        'fail',
+        `heap floor rises ${slope} MiB/min (${signalNote}, r²=${r2}) — ${projected} MiB across ${span} min. ` +
+          'That is a sustained leak, not warm-up: extrapolated over 30 min it breaches the 512 MiB budget.',
+      );
+    } else if (slope > 1 && r2 > 0.6) {
+      add('profile.leakSuspect', 'warn', `heap floor rises ${slope} MiB/min (${signalNote}, r²=${r2}), ${projected} MiB over ${span} min — watch it, but under the fail bar.`);
+    } else {
+      add('profile.stable', 'ok', `heap floor flat within noise: ${slope} MiB/min (${signalNote}, r²=${r2}) over ${span} min.`);
+    }
+
+    const peak = Number(mem.peakMB ?? 0);
+    if (peak > 512) add('profile.heapPeak', 'fail', `peak heap ${peak} MiB exceeds the 512 MiB post-ready budget.`);
+    else if (peak > 384) add('profile.heapPeakHigh', 'warn', `peak heap ${peak} MiB is within 75% of the 512 MiB budget.`);
+    else add('profile.heapPeakOk', 'ok', `peak heap ${peak} MiB, under the 512 MiB budget.`);
+  }
+
+  const res = r.resources as Record<string, number>;
+  // GPU resources and entities should PLATEAU. A steady end-vs-start climb with
+  // a matching per-sample rise is a resource leak the JS heap may never show.
+  const growers: Array<[string, number, number]> = [
+    ['geometries', res.geometriesStart, res.geometriesEnd],
+    ['textures', res.texturesStart, res.texturesEnd],
+    ['entities', res.entitiesStart, res.entitiesEnd],
+  ];
+  for (const [name, a, b] of growers) {
+    const trend = resourceTrend(r.samples, name as 'geometries' | 'textures' | 'entities');
+    if (b > a * 1.5 && b - a > 8 && trend > 0.2) {
+      add(`profile.${name}Leak`, 'fail', `${name} climbed ${a}→${b} (+${round(trend, 2)}/min sustained) — a GPU/entity leak, invisible to the JS heap.`);
+    } else if (b > a + 4 && trend > 0.05) {
+      add(`profile.${name}Grow`, 'warn', `${name} rose ${a}→${b} (+${round(trend, 2)}/min); may plateau, may not.`);
+    } else {
+      add(`profile.${name}Ok`, 'ok', `${name} stable ${a}→${b}.`);
+    }
+  }
+  if (res.programsEnd > res.programsStart) {
+    add('profile.programsGrew', 'warn', `shader programs rose ${res.programsStart}→${res.programsEnd} after boot — prewarm should have compiled every permutation up front.`);
+  }
+
+  const ft = r.frameTime as Record<string, number>;
+  const drift = Number(ft.p95DriftMs ?? 0);
+  const budget = Number((r.engine as Record<string, number>).budgetCpuMs ?? 16.6);
+  if (Number(ft.framesTimed ?? 0) === 0) {
+    add('profile.noFrames', 'warn', 'no frames were rendered — frame-time distribution is empty. Raise --render-every off 0.');
+  } else {
+    add('profile.frameTime', Number(ft.p95Ms) > budget ? 'warn' : 'ok', `frame CPU p50 ${ft.p50Ms} / p95 ${ft.p95Ms} / p99 ${ft.p99Ms} / max ${ft.maxMs} ms over ${ft.framesTimed} frames; ${ft.hitches} past ${ft.hitchMs} ms.`);
+    if (drift > 2 && drift > 0.25 * Number(ft.firstFifthP95Ms || 1)) {
+      add('profile.frameDrift', 'fail', `frame-time p95 DRIFTED ${ft.firstFifthP95Ms}→${ft.lastFifthP95Ms} ms (+${drift}) across the run — cost is accumulating, the classic symptom of an un-culled leak.`);
+    } else {
+      add('profile.frameSteady', 'ok', `frame-time p95 held ${ft.firstFifthP95Ms}→${ft.lastFifthP95Ms} ms across the run.`);
+    }
+  }
+
+  return out;
+}
+
+/** Per-minute OLS slope of a resident-resource column across the sample rows. */
+function resourceTrend(samples: ProfileSample[], key: 'geometries' | 'textures' | 'entities'): number {
+  const pts = samples.filter((sm) => sm.tMin >= PROFILE_WARMUP_MIN).map((sm) => ({ x: sm.tMin, y: sm[key] }));
+  return linreg(pts.length >= 2 ? pts : samples.map((sm) => ({ x: sm.tMin, y: sm[key] }))).slope;
 }
 
 /* ================================================================= verdicts */

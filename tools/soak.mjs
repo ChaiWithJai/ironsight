@@ -61,14 +61,25 @@ if (flag('--help') || flag('-h')) {
     [
       'tools/soak.sh — headless behavioural soak of the IRONSIGHT simulation',
       '',
+      'BEHAVIOURAL MODE (default) — "does anything move":',
       '  --seconds N        simulated seconds to run          (default 60)',
       '  --render-every N   render 1 frame per N ticks, 0=none(default 30)',
       '  --walk MODE        uphill | sweep | forward | none   (default uphill)',
       '  --sprint           hold sprint as well as forward',
       '  --seed N           reset seed                        (default 4613)',
       '  --timeline-hz N    objective timeline resolution     (default 1)',
-      '  --out PATH         JSON report path        (default tools/soak/soak.json)',
-      '  --compare PATH     print a delta against an earlier report',
+      '',
+      'PROFILE MODE (--profile) — "does anything LEAK", a 10–30 min soak:',
+      '  --profile          run the memory/GC/frame-time leak soak instead',
+      '  --minutes N        simulated minutes to run, 1..30    (default 15)',
+      '  --render-every N   render 1 frame per N ticks         (default 4)',
+      '  --sample-every N   heap/resource sample cadence, sec  (default 5)',
+      '  --gc-every N       forced-GC retained-heap cadence,s  (default 30)',
+      '  --walk MODE        player drive for the whole run     (default sweep)',
+      '',
+      'COMMON:',
+      '  --out PATH         JSON report path  (default tools/soak/{soak,profile}.json)',
+      '  --compare PATH     print a delta against an earlier report of the same mode',
       '  --json             print the full report to stdout as well',
       '  --no-build         reuse the existing dist/',
       '  --software-gl      force SwiftShader (or IRONSIGHT_SOFTWARE_GL=1)',
@@ -79,19 +90,30 @@ if (flag('--help') || flag('-h')) {
   process.exit(0);
 }
 
+const PROFILE = flag('--profile');
 const SECONDS = Number(opt('--seconds', 60));
-const RENDER_EVERY = Number(opt('--render-every', 30));
-const WALK = String(opt('--walk', 'uphill'));
+// Profile mode renders far more (leaks hide in renderer allocations), so its
+// render cadence default is tighter than the behavioural soak's.
+const RENDER_EVERY = Number(opt('--render-every', PROFILE ? 4 : 30));
+const WALK = String(opt('--walk', PROFILE ? 'sweep' : 'uphill'));
 const SPRINT = flag('--sprint');
 const SEED = Number(opt('--seed', 0x1205));
 const TIMELINE_HZ = Number(opt('--timeline-hz', 1));
-const OUT = resolve(ROOT, opt('--out', 'tools/soak/soak.json'));
+const MINUTES = Number(opt('--minutes', 15));
+const SAMPLE_EVERY = Number(opt('--sample-every', 5));
+const GC_EVERY = Number(opt('--gc-every', 30));
+const OUT = resolve(ROOT, opt('--out', PROFILE ? 'tools/soak/profile.json' : 'tools/soak/soak.json'));
 const COMPARE = opt('--compare', null);
 const PRINT_JSON = flag('--json');
 const NO_BUILD = flag('--no-build');
 // A soak is CPU-bound simulation, not rasterisation, and it runs 3600 ticks
 // rather than 32 frames — so the page needs a far longer leash than a shot.
-const RUN_TIMEOUT = Number(opt('--timeout', Math.max(300_000, SECONDS * 8000)));
+// Profile mode renders a large fraction of its ticks over 10–30 sim minutes, so
+// its wall budget is sized off minutes (~4 wall-minutes per sim-minute ceiling),
+// not seconds.
+const RUN_TIMEOUT = Number(
+  opt('--timeout', PROFILE ? Math.max(900_000, MINUTES * 240_000) : Math.max(300_000, SECONDS * 8000)),
+);
 
 if (!['uphill', 'sweep', 'forward', 'none'].includes(WALK)) {
   console.error(`[soak] --walk must be uphill|sweep|forward|none, got "${WALK}"`);
@@ -175,7 +197,12 @@ const browser = await chromium.launch({
     '--enable-webgl',
     '--ignore-gpu-blocklist',
     '--disable-frame-rate-limit',
-    '--js-flags=--max-old-space-size=8192',
+    // Profile mode needs a forceable collector (`globalThis.gc`) for clean
+    // post-GC retained-heap samples, and un-quantised `performance.memory` — the
+    // default 100 KB buckets are coarse enough to hide a slow leak.
+    ...(PROFILE
+      ? ['--js-flags=--max-old-space-size=8192 --expose-gc', '--enable-precise-memory-info']
+      : ['--js-flags=--max-old-space-size=8192']),
     '--disable-dev-shm-usage',
     '--force-color-profile=srgb',
     '--force-device-scale-factor=1',
@@ -226,39 +253,66 @@ const bootSecs = ((Date.now() - wall0) / 1000).toFixed(1);
 log(`harness ready in ${bootSecs}s`);
 for (const line of bootLines) console.log('  ', line);
 
-const hasSoak = await page.evaluate(() => Boolean(globalThis.__SOAK__?.available));
-if (!hasSoak) {
+const soakShape = await page.evaluate(() => ({
+  available: Boolean(globalThis.__SOAK__?.available),
+  hasProfile: typeof globalThis.__SOAK__?.profile === 'function',
+}));
+if (!soakShape.available) {
   console.error('[soak] FAIL: window.__SOAK__ missing — src/main.ts did not call installSoak().');
+  await browser.close();
+  server.close();
+  process.exit(1);
+}
+if (PROFILE && !soakShape.hasProfile) {
+  console.error('[soak] FAIL: __SOAK__.profile missing — this build predates the leak-soak mode. Rebuild without --no-build.');
   await browser.close();
   server.close();
   process.exit(1);
 }
 
 /* ---------------------------------------------------------------------- run */
-log(
-  `running ${SECONDS}s (${Math.round(SECONDS * 60)} ticks) · walk=${WALK}${SPRINT ? '+sprint' : ''} · ` +
-    `renderEvery=${RENDER_EVERY} · seed=${SEED}`,
-);
+if (PROFILE) {
+  log(
+    `PROFILE: ${MINUTES} min (${Math.round(MINUTES * 60 * 60)} ticks) · walk=${WALK}${SPRINT ? '+sprint' : ''} · ` +
+      `renderEvery=${RENDER_EVERY} · sampleEvery=${SAMPLE_EVERY}s · gcEvery=${GC_EVERY}s · seed=${SEED}`,
+  );
+} else {
+  log(
+    `running ${SECONDS}s (${Math.round(SECONDS * 60)} ticks) · walk=${WALK}${SPRINT ? '+sprint' : ''} · ` +
+      `renderEvery=${RENDER_EVERY} · seed=${SEED}`,
+  );
+}
 const t0 = Date.now();
 let report;
 try {
   report = await page.evaluate(
-    async ([options, timeout]) => {
-      const done = globalThis.__SOAK__.run(options);
+    async ([mode, options, timeout]) => {
+      const done = mode === 'profile' ? globalThis.__SOAK__.profile(options) : globalThis.__SOAK__.run(options);
       const guard = new Promise((_, rej) =>
         setTimeout(() => rej(new Error('soak timed out in-page')), timeout - 10_000),
       );
       return await Promise.race([done, guard]);
     },
     [
-      {
-        seconds: SECONDS,
-        renderEvery: RENDER_EVERY,
-        walk: WALK,
-        sprint: SPRINT,
-        seed: SEED,
-        timelineHz: TIMELINE_HZ,
-      },
+      PROFILE ? 'profile' : 'run',
+      PROFILE
+        ? {
+            minutes: MINUTES,
+            renderEvery: RENDER_EVERY,
+            walk: WALK,
+            sprint: SPRINT,
+            seed: SEED,
+            sampleEverySec: SAMPLE_EVERY,
+            gcEverySec: GC_EVERY,
+          }
+        : {
+            seconds: SECONDS,
+            renderEvery: RENDER_EVERY,
+            walk: WALK,
+            sprint: SPRINT,
+            seed: SEED,
+            timelineHz: TIMELINE_HZ,
+          },
       RUN_TIMEOUT,
     ],
     { timeout: RUN_TIMEOUT },
@@ -289,18 +343,25 @@ await mkdir(dirname(OUT), { recursive: true });
 await writeFile(OUT, `${JSON.stringify(report, null, 2)}\n`);
 
 /* ------------------------------------------------------------ human summary */
-printSummary(report);
+if (PROFILE) printProfileSummary(report);
+else printSummary(report);
 
 if (COMPARE) {
   try {
     const before = JSON.parse(await readFile(resolve(ROOT, COMPARE), 'utf8'));
-    printCompare(before, report);
+    if (PROFILE) printProfileCompare(before, report);
+    else printCompare(before, report);
   } catch (e) {
     log(`--compare: could not read ${COMPARE}: ${e?.message ?? e}`);
   }
 }
 
-log(`wrote ${relative(ROOT, OUT)} (${wallSecs}s wall for ${SECONDS}s simulated)`);
+log(
+  PROFILE
+    ? `wrote ${relative(ROOT, OUT)} (${wallSecs}s wall for ${MINUTES} min simulated)`
+    : `wrote ${relative(ROOT, OUT)} (${wallSecs}s wall for ${SECONDS}s simulated)`,
+);
+if (PRINT_JSON) console.log(JSON.stringify(report, null, 2));
 
 if (pageErrors.length || consoleErrors.length) {
   fail(`${pageErrors.length} uncaught error(s), ${consoleErrors.length} console error(s)`);
@@ -484,4 +545,109 @@ function pct(v) {
 }
 function round2(v) {
   return Math.round(v * 100) / 100;
+}
+
+/* ---------------------------------------------------------- profile printing */
+
+function printProfileSummary(r) {
+  const line = (s = '') => console.log(s);
+  const cfg = r.config ?? {};
+  const eng = r.engine ?? {};
+  const mem = r.memory ?? {};
+  const ft = r.frameTime ?? {};
+  const gc = r.gc ?? {};
+  const res = r.resources ?? {};
+
+  line();
+  line('════════════════════════════ SOAK · PROFILE ════════════════════════════');
+  line(
+    `  ${cfg.minutes} min simulated · ${eng.tickAtEnd - eng.tickAtStart} ticks · ` +
+      `${cfg.framesRendered} frame(s) rendered · seed ${cfg.seed} · tier ${eng.qualityTier}`,
+  );
+  line(
+    `  precise-heap API ${eng.heapPreciseApi ? 'yes' : 'NO'} · forceable GC ${eng.gcExposed ? 'yes' : 'no'} · ` +
+      `leak signal: ${r.leakSignal}`,
+  );
+
+  line();
+  line('  MEMORY (JS heap, MiB)');
+  line(
+    `    start ${mem.startMB}  end ${mem.endMB}  peak ${mem.peakMB}  limit ${mem.limitMB}  ` +
+      `delta ${fmtSigned(mem.deltaMB)}`,
+  );
+  line(
+    `    LEAK TREND  ${fmtSigned(mem.growthMBPerMin)} MiB/min  (r²=${mem.trendR2}, ` +
+      `${mem.trendPointCount} pts over ${mem.trendSpanMin} min)  →  ${fmtSigned(mem.projectedGrowthMB)} MiB across the fit`,
+  );
+
+  line();
+  line('  FRAME TIME (CPU ms, rendered frames)');
+  line(
+    `    p50 ${ft.p50Ms}  p95 ${ft.p95Ms}  p99 ${ft.p99Ms}  max ${ft.maxMs}  mean ${ft.meanMs}  ` +
+      `(${ft.framesTimed} frames)`,
+  );
+  line(`    hitches > ${ft.hitchMs} ms: ${ft.hitches}   p95 drift ${fmtSigned(ft.p95DriftMs)} ms (${ft.firstFifthP95Ms} → ${ft.lastFifthP95Ms})`);
+
+  line();
+  line('  GC + RESOURCES');
+  line(
+    `    forced collections ${gc.forcedCollections}  natural drops ${gc.naturalDrops}  ` +
+      `reclaimed ${gc.totalReclaimedMB} MiB`,
+  );
+  line(
+    `    geometries ${res.geometriesStart}→${res.geometriesEnd}  textures ${res.texturesStart}→${res.texturesEnd}  ` +
+      `programs ${res.programsStart}→${res.programsEnd}  entities ${res.entitiesStart}→${res.entitiesEnd} (peak ${res.entitiesPeak})`,
+  );
+
+  const rows = r.samples ?? [];
+  if (rows.length) {
+    line();
+    line('  TIMELINE (per sample window)');
+    line('      t(min)   heapMB   geo   tex   ent  bots   fP50   fP95   fMax  gcDrops');
+    const step = Math.max(1, Math.floor(rows.length / 14));
+    for (let i = 0; i < rows.length; i += step) {
+      const x = rows[i];
+      line(
+        `      ${String(x.tMin).padStart(6)} ${String(x.heapUsedMB).padStart(8)} ` +
+          `${String(x.geometries).padStart(5)} ${String(x.textures).padStart(5)} ` +
+          `${String(x.entities).padStart(5)} ${String(x.botsAlive).padStart(5)} ` +
+          `${String(x.frameP50).padStart(6)} ${String(x.frameP95).padStart(6)} ${String(x.frameMax).padStart(6)} ` +
+          `${String(x.gcDrops).padStart(8)}`,
+      );
+    }
+  }
+
+  line();
+  line('  VERDICTS');
+  for (const v of r.verdicts ?? []) line(`    [${bar(v.level)}] ${v.id}: ${v.message}`);
+  for (const e of r.errors ?? []) line(`    [note] ${e}`);
+  line('═════════════════════════════════════════════════════════════════════════');
+  line();
+}
+
+function printProfileCompare(before, after) {
+  const rows = [
+    ['heap start (MiB)', before.memory?.startMB, after.memory?.startMB],
+    ['heap end (MiB)', before.memory?.endMB, after.memory?.endMB],
+    ['heap peak (MiB)', before.memory?.peakMB, after.memory?.peakMB],
+    ['leak (MiB/min)', before.memory?.growthMBPerMin, after.memory?.growthMBPerMin],
+    ['frame p95 (ms)', before.frameTime?.p95Ms, after.frameTime?.p95Ms],
+    ['frame p99 (ms)', before.frameTime?.p99Ms, after.frameTime?.p99Ms],
+    ['frame p95 drift', before.frameTime?.p95DriftMs, after.frameTime?.p95DriftMs],
+    ['hitches', before.frameTime?.hitches, after.frameTime?.hitches],
+    ['geometries end', before.resources?.geometriesEnd, after.resources?.geometriesEnd],
+    ['textures end', before.resources?.texturesEnd, after.resources?.texturesEnd],
+    ['entities end', before.resources?.entitiesEnd, after.resources?.entitiesEnd],
+  ];
+  console.log('  BEFORE → AFTER');
+  for (const [label, b, a] of rows) {
+    const delta = typeof b === 'number' && typeof a === 'number' ? ` (${a - b >= 0 ? '+' : ''}${round2(a - b)})` : '';
+    console.log(`    ${label.padEnd(20)} ${String(b ?? '—').padStart(10)} → ${String(a ?? '—').padStart(10)}${delta}`);
+  }
+  console.log();
+}
+
+function fmtSigned(v) {
+  if (typeof v !== 'number') return String(v ?? '—');
+  return `${v >= 0 ? '+' : ''}${v}`;
 }
