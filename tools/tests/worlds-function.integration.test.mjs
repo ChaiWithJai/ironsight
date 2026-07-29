@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 
-// Netlify's build environment injects the production serverless driver. Clear
-// it before loading the SDK so this suite always uses its isolated local server.
-delete process.env.NETLIFY_DB_DRIVER;
+// Netlify's build environment injects the production serverless driver. Force
+// the server driver before loading the SDK so this suite stays on its isolated
+// Postgres-compatible test server instead of the provisioned deployment DB.
+process.env.NETLIFY_DB_DRIVER = 'server';
 const { NetlifyDB } = await import('@netlify/database-dev');
 const { getDatabase } = await import('@netlify/database');
 const { createWorldRepository } = await import('../../netlify/functions/lib/world-store.mts');
