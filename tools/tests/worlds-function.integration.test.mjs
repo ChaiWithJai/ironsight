@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
-import { getDatabase } from '@netlify/database';
 import { NetlifyDB } from '@netlify/database-dev';
-import { createWorldRepository } from '../../netlify/functions/lib/world-store.mts';
-import { createWorldsHandler } from '../../netlify/functions/worlds.mts';
+
+// Netlify's build environment injects the production serverless driver. Clear
+// it before loading the SDK so this suite always uses its isolated local server.
+delete process.env.NETLIFY_DB_DRIVER;
+const { getDatabase } = await import('@netlify/database');
+const { createWorldRepository } = await import('../../netlify/functions/lib/world-store.mts');
+const { createWorldsHandler } = await import('../../netlify/functions/worlds.mts');
 
 let localDatabase;
 let handler;
@@ -22,9 +26,6 @@ const profile = {
 };
 
 before(async () => {
-  // Netlify's build environment injects the production serverless driver.
-  // This test must remain isolated on its in-memory Postgres-compatible server.
-  delete process.env.NETLIFY_DB_DRIVER;
   localDatabase = new NetlifyDB({ logger: () => {} });
   const connectionString = await localDatabase.start();
   await localDatabase.applyMigrations('./netlify/database/migrations');
