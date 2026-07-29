@@ -103,3 +103,11 @@ back. Therefore:
 
 Before each production release, verify that the prior deploy is still available
 and that the migration has a documented forward correction.
+
+## Backup, restore, and RPO/RTO
+
+Database backup/restore mechanics, RPO/RTO targets, application-rollback
+compatibility, and migration forward-correction — with a rehearsed, runnable
+drill (`ops/backup-restore-rehearsal.sh`) — live in
+[`BACKUP_RESTORE_RUNBOOK.md`](./BACKUP_RESTORE_RUNBOOK.md). Restore and rollback
+are rehearsed against **local/staging only**, never production.
