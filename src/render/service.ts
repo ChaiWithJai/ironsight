@@ -80,7 +80,6 @@ export class IronRenderService implements RenderService {
     const w = Math.max(1, Math.round(capW * scale));
     const h = Math.max(1, Math.round(capH * scale));
 
-    this.renderer.setPixelRatio(1);
     this.renderer.setSize(capW, capH, false);
     this.graph.setSize(w, h, capW, capH);
     this.camera.setAspect(cssWidth, cssHeight);
