@@ -73,6 +73,8 @@ export interface TeachingProbe {
   readonly completed: string[];
   readonly ready: boolean;
   readonly worldProfile: WorldProfile;
+  /** The generating seed the game actually baked — proves the lesson's world is this world. */
+  readonly worldSeed: number;
   readonly authoredWorld: boolean;
 }
 
@@ -168,7 +170,10 @@ export function installTeachingMode(container: HTMLElement, services: Services):
   header.append(heading, toggle);
 
   const intro = element('div', 'field-intro');
-  intro.textContent = `${worldProfile.era}. You are inside the proof now; these missions listen to the shipped game.`;
+  intro.textContent =
+    `${worldProfile.era}. This terrain was baked from seed #${worldProfile.seed} — ` +
+    `the same seed that shaped the world in the academy. You are inside the proof now; ` +
+    `these missions listen to the shipped game.`;
   const list = element('ol');
   const rows = new Map<string, HTMLLIElement>();
   for (const mission of MISSIONS) {
@@ -226,6 +231,7 @@ export function installTeachingMode(container: HTMLElement, services: Services):
       evidence,
       completed: [...completed],
       worldProfile,
+      worldSeed: worldProfile.seed,
       authoredWorld: isAuthoredWorld(worldProfile),
     };
   }

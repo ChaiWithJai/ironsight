@@ -31,6 +31,7 @@ import { tierName } from '@/engine/quality';
 import { SHOT_MODULE_COUNT } from '@/shots/index';
 import { installTeachingMode } from '@/teach/game';
 import { hydratePublishedWorld } from '@/engine/world-publication';
+import { BOOT_SEED } from '@/engine/engine';
 
 const container = document.getElementById('app');
 if (!container) throw new Error('index.html is missing #app');
@@ -72,7 +73,11 @@ function progress(fraction: number, text: string): void {
 
 async function boot(): Promise<void> {
   progress(0.01, 'resolving chronicle');
-  await hydratePublishedWorld();
+  // The resolved world profile carries the generating seed (URL `?seed=` or a
+  // durable `?world=` record). This is the academy → game deep-link: the seed a
+  // learner shaped a world with in Chapter II arrives here and becomes the seed
+  // the real terrain bakes from. See src/engine/world-profile.ts.
+  const world = await hydratePublishedWorld();
   progress(0.02, 'creating context');
   const { renderer, canvas, colorBufferFloat } = createRenderer(container as HTMLElement);
   if (!colorBufferFloat) {
@@ -95,6 +100,16 @@ async function boot(): Promise<void> {
       ` · bake profile ${engine.quality.settings.bake.name}` +
       ` · ${engine.quality.settings.bake.workerCount} worker(s)`,
   );
+
+  // Reseed the root RNG BEFORE any bake forks from it (the asset registry forks
+  // `rng.fork('bake')` inside bootAssets, and terrain forks `terrain.erosion`
+  // from that). An authored world therefore bakes a genuinely different
+  // heightfield. Guarded so the default world — no `?seed=`, seed === BOOT_SEED
+  // — never calls reseed and every existing shot stays byte-identical.
+  if ((world.seed >>> 0) !== (BOOT_SEED >>> 0)) {
+    engine.rng.reseed(world.seed);
+    console.info(`[boot] world seed · reseeded to ${world.seed >>> 0} (authored world)`);
+  }
 
   progress(0.08, 'asset registry');
   await engine.bootAssets();

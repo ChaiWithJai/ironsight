@@ -58,6 +58,10 @@ mount.innerHTML = `
           <span>Era <small>time</small></span>
           <input name="era" maxlength="48" required />
         </label>
+        <label class="seed-field">
+          <span>World seed <small>the land itself</small></span>
+          <input name="seed" type="number" min="0" step="1" inputmode="numeric" />
+        </label>
         <fieldset>
           <legend>Named places</legend>
           <label><span>Alpha</span><input name="alpha" maxlength="32" required /></label>
@@ -78,6 +82,7 @@ mount.innerHTML = `
       <p class="kicker">Live markup preview</p>
       <h2 id="chronicle-name"></h2>
       <p class="era" id="preview-era"></p>
+      <p class="seed-note" id="preview-seed"></p>
       <blockquote>Names do not decorate a world. They make coordinates memorable enough to become places.</blockquote>
       <ol class="places" id="preview-places"></ol>
       <div class="stack">
@@ -99,6 +104,7 @@ const fields = {
   civilization: form.elements.namedItem('civilization') as HTMLInputElement,
   sigil: form.elements.namedItem('sigil') as HTMLInputElement,
   era: form.elements.namedItem('era') as HTMLInputElement,
+  seed: form.elements.namedItem('seed') as HTMLInputElement,
   alpha: form.elements.namedItem('alpha') as HTMLInputElement,
   bravo: form.elements.namedItem('bravo') as HTMLInputElement,
   charlie: form.elements.namedItem('charlie') as HTMLInputElement,
@@ -109,6 +115,10 @@ function values(): WorldProfile {
     civ: fields.civilization.value,
     sigil: fields.sigil.value,
     era: fields.era.value,
+    // The seed is carried, not authored: a learner arrives from Chapter II with
+    // the seed they shaped, and readWorldProfile clamps anything invalid back to
+    // the shipped world's seed. It is the "same world" half of the deep-link.
+    seed: fields.seed.value,
     alpha: fields.alpha.value,
     bravo: fields.bravo.value,
     charlie: fields.charlie.value,
@@ -130,6 +140,8 @@ function render(): void {
   document.querySelector<HTMLElement>('#preview-sigil')!.textContent = profile.sigil;
   document.querySelector<HTMLElement>('#chronicle-name')!.textContent = profile.civilization;
   document.querySelector<HTMLElement>('#preview-era')!.textContent = profile.era;
+  document.querySelector<HTMLElement>('#preview-seed')!.textContent =
+    `Founded on seed #${profile.seed} — the land the game will bake.`;
   document.querySelector<HTMLElement>('#preview-places')!.innerHTML = (
     Object.entries(profile.places) as Array<[keyof WorldProfile['places'], string]>
   )
@@ -185,6 +197,7 @@ function load(profile: WorldProfile): void {
   fields.civilization.value = profile.civilization;
   fields.sigil.value = profile.sigil;
   fields.era.value = profile.era;
+  fields.seed.value = String(profile.seed);
   fields.alpha.value = profile.places.ALPHA;
   fields.bravo.value = profile.places.BRAVO;
   fields.charlie.value = profile.places.CHARLIE;

@@ -12,6 +12,7 @@
  * mode that renders pixel-stable states for tools/learn-shots.mjs.
  */
 import './theme.css';
+import { applyWorldProfile, DEFAULT_WORLD_PROFILE } from '@/engine/world-profile';
 import { renderMarkdown } from './md';
 import type { Demo, DemoCtx } from './demos/types';
 import { seedDemo } from './demos/seed';
@@ -137,6 +138,29 @@ function saveProgress(): void {
   if (!FROZEN) localStorage.setItem(PROGRESS_KEY, JSON.stringify([...completed]));
 }
 
+/**
+ * The deep-link out of the academy and into the running game. The seed the
+ * learner has been shaping across the chapters is carried through the shared
+ * WorldProfile contract, so the terrain they shaped in Chapter II is the terrain
+ * the engine bakes. `applyWorldProfile` builds the same `?teach=1&seed=…` link
+ * the forge and the durable publisher produce — one contract, three doors.
+ */
+function worldBridge(): string {
+  const gameUrl = applyWorldProfile(new URL('../', location.href), {
+    ...DEFAULT_WORLD_PROFILE,
+    seed,
+  }).href;
+  const forgeUrl = new URL('../forge/', location.href);
+  forgeUrl.searchParams.set('seed', String(seed >>> 0));
+  return `
+    <div class="worldbridge" aria-label="Enter the living world">
+      <span class="worldbridge-kicker">The bridge · seed #${seed}</span>
+      <p>The same seed that shaped this map boots the real 3D world.</p>
+      <a class="worldbridge-play" href="${gameUrl}">Walk this world ▸</a>
+      <a class="worldbridge-forge" href="${forgeUrl.href}">Name it first ↗</a>
+    </div>`;
+}
+
 function updateMissionUi(chapter: Chapter): void {
   const mission = MISSIONS[chapter.id];
   const status = document.getElementById('mission-status');
@@ -206,6 +230,7 @@ function render(): void {
         <div class="progress-meter" id="progress-meter" style="--progress:${(completed.size / CHAPTERS.length) * 100}%"></div>
       </div>
       ${nav}
+      ${worldBridge()}
       <div class="footer">
         a <a href="https://dharmicdata.org" rel="noopener">DharmicData.org</a> teaching world<br/>
         built from the <a href="../" rel="noopener">IRONSIGHT</a> engine ·

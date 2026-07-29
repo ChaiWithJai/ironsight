@@ -110,6 +110,7 @@ button { border: 0; background: transparent; color: var(--dim); cursor: pointer;
 }
 .chronicle h2 { position: relative; margin-top: 12vh; font-size: clamp(42px, 7vw, 92px); max-width: 10ch; }
 .era { color: var(--gold); font: italic 20px Georgia, serif; }
+.seed-note { margin-top: 6px; color: var(--dim); font: 12px ui-monospace, monospace; }
 blockquote {
   max-width: 42ch;
   margin: 32px 0;

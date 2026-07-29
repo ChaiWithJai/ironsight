@@ -9,6 +9,15 @@ export interface WorldProfile {
   readonly civilization: string;
   readonly sigil: string;
   readonly era: string;
+  /**
+   * The generating seed — what makes an authored world *the same world* across
+   * the whole stack. The 2D map a learner shapes in the academy (Chapter II)
+   * and the 3D terrain the real engine bakes are both a pure function of this
+   * one number, so carrying it in the URL is the deep-link: enter the game with
+   * `?seed=N` and the world you walked in the lesson is the world that boots.
+   * A uint32, the same domain as the engine's root RNG seed.
+   */
+  readonly seed: number;
   readonly places: Readonly<{
     ALPHA: string;
     BRAVO: string;
@@ -22,10 +31,23 @@ export interface WorldProfileValidation {
   readonly issues: readonly string[];
 }
 
+/**
+ * The seed that generates the shipped Harbour Reach. It mirrors the engine's
+ * `BOOT_SEED` (0x1205) BY VALUE, not by import: this seam must stay free of any
+ * engine internals so the few-kilobyte academy bundle never pulls in three.js.
+ * Keeping the two equal means a default profile (no `?seed=`) boots the exact
+ * world the game has always shipped — the reseed below is then a no-op.
+ */
+export const DEFAULT_WORLD_SEED = 0x1205;
+
+/** uint32 domain; the RNG treats seeds with `>>> 0`, so we match it here. */
+const MAX_WORLD_SEED = 0xffffffff;
+
 export const DEFAULT_WORLD_PROFILE: WorldProfile = Object.freeze({
   civilization: 'Harbour Reach',
   sigil: '⚑',
   era: 'The Contest',
+  seed: DEFAULT_WORLD_SEED,
   places: Object.freeze({
     ALPHA: 'Market Square',
     BRAVO: 'Harbour Cranes',
@@ -37,10 +59,24 @@ const PARAMS = Object.freeze({
   civilization: 'civ',
   sigil: 'sigil',
   era: 'era',
+  seed: 'seed',
   ALPHA: 'alpha',
   BRAVO: 'bravo',
   CHARLIE: 'charlie',
 });
+
+/** Coerce any input to a valid uint32 world seed, or null if it is not one. */
+function coerceSeed(raw: unknown): number | null {
+  const value = typeof raw === 'string' ? Number(raw) : typeof raw === 'number' ? raw : NaN;
+  if (!Number.isFinite(value) || !Number.isInteger(value)) return null;
+  if (value < 0 || value > MAX_WORLD_SEED) return null;
+  return value >>> 0;
+}
+
+/** Forgiving seed read for URL play: fall back to the shipped world's seed. */
+function cleanSeed(raw: string | null): number {
+  return coerceSeed(raw) ?? DEFAULT_WORLD_SEED;
+}
 
 function clean(raw: string | null, fallback: string, maxLength: number): string {
   if (raw === null) return fallback;
@@ -82,10 +118,18 @@ export function validateWorldProfile(input: unknown): WorldProfileValidation {
       : {};
   if (!record.places || Object.keys(places).length === 0) issues.push('places must be an object');
 
+  let seed = DEFAULT_WORLD_SEED;
+  if (record.seed !== undefined) {
+    const coerced = coerceSeed(record.seed);
+    if (coerced === null) issues.push('seed must be an integer between 0 and 4294967295');
+    else seed = coerced;
+  }
+
   const profile: WorldProfile = {
     civilization: validatedText(record.civilization, 'civilization', 24, issues),
     sigil: validatedText(record.sigil, 'sigil', 8, issues),
     era: validatedText(record.era, 'era', 48, issues),
+    seed,
     places: {
       ALPHA: validatedText(places.ALPHA, 'places.ALPHA', 32, issues),
       BRAVO: validatedText(places.BRAVO, 'places.BRAVO', 32, issues),
@@ -101,6 +145,7 @@ export function readWorldProfile(search: string | URLSearchParams): WorldProfile
     civilization: clean(params.get(PARAMS.civilization), DEFAULT_WORLD_PROFILE.civilization, 24),
     sigil: clean(params.get(PARAMS.sigil), DEFAULT_WORLD_PROFILE.sigil, 8),
     era: clean(params.get(PARAMS.era), DEFAULT_WORLD_PROFILE.era, 48),
+    seed: cleanSeed(params.get(PARAMS.seed)),
     places: {
       ALPHA: clean(params.get(PARAMS.ALPHA), DEFAULT_WORLD_PROFILE.places.ALPHA, 32),
       BRAVO: clean(params.get(PARAMS.BRAVO), DEFAULT_WORLD_PROFILE.places.BRAVO, 32),
@@ -138,6 +183,7 @@ export function applyWorldProfile(url: URL, profile: WorldProfile): URL {
   next.searchParams.set(PARAMS.civilization, profile.civilization);
   next.searchParams.set(PARAMS.sigil, profile.sigil);
   next.searchParams.set(PARAMS.era, profile.era);
+  next.searchParams.set(PARAMS.seed, String(profile.seed >>> 0));
   next.searchParams.set(PARAMS.ALPHA, profile.places.ALPHA);
   next.searchParams.set(PARAMS.BRAVO, profile.places.BRAVO);
   next.searchParams.set(PARAMS.CHARLIE, profile.places.CHARLIE);
