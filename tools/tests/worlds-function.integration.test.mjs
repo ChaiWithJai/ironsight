@@ -29,7 +29,9 @@ const profile = {
 
 before(async () => {
   localDatabase = new NetlifyDB({ logger: () => {} });
-  const connectionString = await localDatabase.start();
+  const localConnection = new URL(await localDatabase.start());
+  localConnection.username = 'netlify_test';
+  const connectionString = localConnection.href;
   await localDatabase.applyMigrations('./netlify/database/migrations');
   const pool = new pg.Pool({ connectionString });
   database = {
