@@ -78,7 +78,10 @@ import {
   boltCycle,
   clearClip,
   makeClipPose,
+  MELEE_STRIKE_IMPACT_PHASE,
+  MELEE_SWING_SECONDS,
   sampleInspect,
+  sampleMelee,
   sampleReload,
   triggerBreak,
   type ClipPose,
@@ -416,7 +419,8 @@ class IronViewmodel implements ViewmodelRig {
    */
   private stepAds(dt: number, sim: Readonly<WeaponState>, def: Readonly<WeaponDef>): void {
     const forced = this.forcedPose;
-    const wants = forced === 'ads' ? true : forced === 'sprint' || forced === 'reload' ? false : sim.adsWanted;
+    const wants =
+      forced === 'ads' ? true : forced === 'sprint' || forced === 'reload' || forced === 'melee' ? false : sim.adsWanted;
     const target = wants ? 1 : 0;
     if (target !== this.adsTarget) {
       this.adsFrom = this.feel.adsBlend;
@@ -463,13 +467,38 @@ class IronViewmodel implements ViewmodelRig {
       sampleInspect(0.62, this.clip);
       return;
     }
+    if (this.forcedPose === 'melee') {
+      // The strike itself — the single most legible frame of the swing.
+      sampleMelee(MELEE_STRIKE_IMPACT_PHASE, this.clip);
+      return;
+    }
+
+    // A swing, whether triggered by the harness's own tick-accurate timing or
+    // by a human playing, is read off `WeaponState` exactly like a reload is:
+    // `lastMeleeTick` plus the shared `MELEE_SWING_SECONDS` gives the phase,
+    // so the rig never owns a clock of its own for it and a swing forced
+    // directly into the sim (`forceWeaponState({ meleePhase })`) plays back
+    // identically to one a real trigger pull started.
+    //
+    // Reload and melee share `this.clip` rather than each owning their own —
+    // `system.ts` gates them off each other (a swing cannot start mid-reload
+    // and a reload cannot start mid-swing), so exactly one is ever live, and a
+    // shared slot is what lets every "1 − clip.weight" suppression elsewhere
+    // in this file (sway, bob, breathing) cover both without being written
+    // twice.
+    const tickNow = ctx.time * Sim.TICK_HZ;
+    const meleeElapsed = (tickNow - sim.lastMeleeTick) * Sim.TICK_DT;
+    if (meleeElapsed >= 0 && meleeElapsed < MELEE_SWING_SECONDS) {
+      sampleMelee(clamp01(meleeElapsed / MELEE_SWING_SECONDS), this.clip);
+      return;
+    }
+
     if (!sim.reloading) {
       clearClip(this.clip);
       return;
     }
     const empty = sim.ammo === 0;
     const duration = empty ? def.reloadEmpty : def.reloadTactical;
-    const tickNow = ctx.time * Sim.TICK_HZ;
     const remaining = (sim.reloadEndTick - tickNow) * Sim.TICK_DT;
     sampleReload(1 - remaining / Math.max(0.05, duration), empty, this.clip);
   }
@@ -1134,6 +1163,8 @@ function restingState(def: Readonly<WeaponDef>): Readonly<WeaponState> {
     aimPunchVelocity: new THREE.Vector3(),
     currentSpreadDeg: def.spread.baseHip,
     heat: 0,
+    meleeIndex: 0,
+    lastMeleeTick: -999,
   };
   restingCache.set(def.id, state);
   return state;

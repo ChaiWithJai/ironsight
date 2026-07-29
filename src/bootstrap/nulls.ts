@@ -1262,6 +1262,13 @@ export function createNullWeapons(): WeaponService {
     aimPunchVelocity: new THREE.Vector3(),
     currentSpreadDeg: 2.4,
     heat: 0,
+    // p1-melee: `WeaponState` grew these two fields so the rig can drive the
+    // swing pose off sim state exactly like it does the reload. Nobody plays
+    // against this null service — WEAPONS has shipped a real one since day
+    // one — but it must stay type-complete, same reason every other field
+    // here exists.
+    meleeIndex: 0,
+    lastMeleeTick: -999,
   };
 
   return {
