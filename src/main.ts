@@ -31,6 +31,7 @@ import { tierName } from '@/engine/quality';
 import { SHOT_MODULE_COUNT } from '@/shots/index';
 import { installTeachingMode } from '@/teach/game';
 import { hydratePublishedWorld } from '@/engine/world-publication';
+import { createBootProgress, probeBakeCacheWarm } from '@/ui/boot-progress';
 
 const container = document.getElementById('app');
 if (!container) throw new Error('index.html is missing #app');
@@ -41,30 +42,17 @@ if (!container) throw new Error('index.html is missing #app');
  * screenshots the canvas element only, so this is structurally incapable of
  * appearing in a shot — which is exactly what we want from a loading screen and
  * exactly what we must NOT accept from the game HUD.
+ *
+ * The presentation itself — detected tier, cold/warm cache state, an
+ * accessible progress bar, and stall/recovery guidance — belongs to HUD
+ * (`src/ui/boot-progress.ts`, perf issue #2 "perf-bake-progress-ui"). This
+ * file only calls it at the right points in the boot ORDER, which is what it
+ * already owns.
  */
-const loading = document.createElement('div');
-loading.style.cssText = [
-  'position:fixed', 'inset:0', 'z-index:10', 'display:flex', 'flex-direction:column',
-  'align-items:center', 'justify-content:center', 'gap:14px', 'background:#05070a',
-  'font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace', 'color:#8fa8b8',
-  'letter-spacing:0.16em', 'transition:opacity 320ms ease',
-].join(';');
-const title = document.createElement('div');
-title.textContent = 'I R O N S I G H T';
-title.style.cssText = 'font-size:16px;letter-spacing:0.5em;color:#d6b483';
-const barOuter = document.createElement('div');
-barOuter.style.cssText = 'width:280px;height:2px;background:#16202a;overflow:hidden';
-const barInner = document.createElement('div');
-barInner.style.cssText = 'width:0%;height:100%;background:#d6b483;transition:width 140ms linear';
-barOuter.appendChild(barInner);
-const label = document.createElement('div');
-label.textContent = 'INITIALISING';
-loading.append(title, barOuter, label);
-container.appendChild(loading);
+const bootUi = createBootProgress(container as HTMLElement);
 
 function progress(fraction: number, text: string): void {
-  barInner.style.width = `${Math.round(Math.max(0, Math.min(1, fraction)) * 100)}%`;
-  label.textContent = text.toUpperCase();
+  bootUi.setStatus(fraction, text);
   setStatus(text);
 }
 
@@ -95,6 +83,20 @@ async function boot(): Promise<void> {
       ` · bake profile ${engine.quality.settings.bake.name}` +
       ` · ${engine.quality.settings.bake.workerCount} worker(s)`,
   );
+  bootUi.setDevice({
+    tier: caps.estimatedTier,
+    tierLabel: tierName(caps.estimatedTier),
+    isSoftware: caps.isSoftware,
+    vendor: caps.vendor,
+    rendererName: caps.renderer,
+    bakeProfileName: engine.quality.settings.bake.name,
+    workerCount: engine.quality.settings.bake.workerCount,
+    deviceMemoryGb: caps.deviceMemoryGb,
+  });
+  // Best-guess cold/warm ahead of the bake itself — `BakeStats.cacheHits` only
+  // becomes exact once `bakeAll` resolves (see `probeBakeCacheWarm`'s doc
+  // comment for why this is a heuristic, not a contract read).
+  void probeBakeCacheWarm().then((state) => bootUi.setCacheState(state));
 
   progress(0.08, 'asset registry');
   await engine.bootAssets();
@@ -107,11 +109,17 @@ async function boot(): Promise<void> {
     // 12% → 62% of the bar. The bake is the long pole on a cold load and under
     // SwiftShader it is essentially the entire load, so it owns half the bar.
     progress(0.12 + p.fraction * 0.5, `bake: ${p.phase} ${(p.fraction * 100).toFixed(0)}%`);
+    bootUi.update(p.fraction, p.phase, p.elapsedMs);
   });
   const bakeStats = engine.services.assets.stats;
   if (bakeStats.degraded.length > 0) {
     console.info(`[boot] bake degraded to fit the unit ceiling: ${bakeStats.degraded.join(', ')}`);
   }
+  bootUi.finishBake({
+    cacheHits: bakeStats.cacheHits,
+    stepCount: Object.keys(bakeStats.perStepMs).length,
+    degraded: bakeStats.degraded,
+  });
 
   progress(0.64, 'building world');
   await engine.bootRemaining();
@@ -195,8 +203,7 @@ async function boot(): Promise<void> {
   );
 
   progress(1, 'ready');
-  loading.style.opacity = '0';
-  setTimeout(() => loading.remove(), 340);
+  bootUi.finish();
   markReady();
 }
 
@@ -206,13 +213,7 @@ boot().catch((error: unknown) => {
   // reviewer nothing about which subsystem threw.
   const message = error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error);
   setStatus(`boot failed: ${message.split('\n')[0]}`);
-  label.textContent = 'BOOT FAILED';
-  label.style.color = '#e2705a';
-  title.style.color = '#e2705a';
-  const detail = document.createElement('pre');
-  detail.textContent = message;
-  detail.style.cssText = 'max-width:80vw;white-space:pre-wrap;color:#e2705a;font-size:11px;text-align:left';
-  loading.appendChild(detail);
+  bootUi.fail(message.split('\n')[0], message);
   console.error('[boot] failed', error);
   throw error;
 });
