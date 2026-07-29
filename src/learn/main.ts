@@ -19,7 +19,8 @@ import { landDemo } from './demos/land';
 import { peopleDemo } from './demos/people';
 import { ledgerDemo } from './demos/ledger';
 import { gateDemo } from './demos/gate';
-import { MISSIONS, type MissionEvidence, type MissionResult } from './course';
+import { COURSE_VERSION, MISSIONS, type MissionEvidence, type MissionResult } from './course';
+import { createCourseProgressSync } from '@/engine/course-progress';
 
 import seedMd from './lessons/01-seed.md?raw';
 import landMd from './lessons/02-land.md?raw';
@@ -117,6 +118,18 @@ const completed = new Set<string>(storedProgress());
 let evidence: MissionEvidence = {};
 let missionResult: MissionResult = { complete: false, feedback: '' };
 
+/**
+ * Offline-first durable-progress mirror. `localStorage` above stays the source
+ * of truth for the academy; this sync opportunistically pushes completed
+ * missions to the course-runs API and is a complete no-op in `?frozen` capture
+ * mode, so deterministic shots never touch the network.
+ */
+const progress = createCourseProgressSync({
+  courseVersion: COURSE_VERSION,
+  worldId: params.get('world'),
+  disabled: FROZEN,
+});
+
 const app = document.getElementById('academy')!;
 let disposeDemo: (() => void) | null = null;
 
@@ -164,10 +177,20 @@ function updateMissionUi(chapter: Chapter): void {
 
 function reportEvidence(chapter: Chapter, next: MissionEvidence): void {
   evidence = { ...evidence, ...next };
-  missionResult = MISSIONS[chapter.id].evaluate(evidence);
+  const mission = MISSIONS[chapter.id];
+  missionResult = mission.evaluate(evidence);
   if (missionResult.complete && !completed.has(chapter.id)) {
     completed.add(chapter.id);
     saveProgress();
+    // Durable, idempotent record of the passing attempt. Fire-and-forget: a
+    // failed sync never blocks the academy — the localStorage set already won.
+    progress.recordAttempt({
+      missionId: mission.id,
+      evaluatorVersion: mission.evaluatorVersion,
+      passed: true,
+      evidence,
+    });
+    if (completed.size === CHAPTERS.length) progress.flush();
   }
   updateMissionUi(chapter);
 }
@@ -273,9 +296,15 @@ const probe = {
 declare global {
   interface Window {
     __LEARN__?: typeof probe;
+    __PROGRESS__?: typeof progress.probe;
   }
 }
 window.__LEARN__ = probe;
+window.__PROGRESS__ = progress.probe;
 
 window.addEventListener('hashchange', render);
 render();
+
+// Start/resume the durable run once the page is interactive. Non-blocking and
+// disabled in frozen mode, so it never delays first paint or a capture.
+progress.ensureRun();
