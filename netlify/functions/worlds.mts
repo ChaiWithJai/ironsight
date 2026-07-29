@@ -5,45 +5,21 @@ import {
   type WorldProfile,
 } from '../../src/engine/world-profile.ts';
 import { createWorldRepository, type WorldRepository, type WorldRow } from './lib/world-store.mts';
+import { isSameOriginRequest, json, readLearnerCookie, sessionCookie } from './lib/session.mts';
 
 const WORLD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const SESSION_COOKIE = 'ironsight_learner';
 const MAX_BODY_BYTES = 4_096;
 
-function json(value: unknown, status = 200, headers?: HeadersInit): Response {
-  return Response.json(value, {
-    status,
-    headers: {
-      'cache-control': status >= 400 ? 'no-store' : 'private, no-store',
-      'x-content-type-options': 'nosniff',
-      ...headers,
-    },
-  });
-}
+// A publish is itself the affirmative consent act (docs/PRIVACY.md §5). We record
+// which implicit notice the learner acted under, without adding a required field.
+const PUBLISH_CONSENT = 'implicit-publish@2026-07-29';
 
-function cookieValue(request: Request): string | null {
-  const cookie = request.headers.get('cookie') ?? '';
-  for (const item of cookie.split(';')) {
-    const [name, ...rest] = item.trim().split('=');
-    if (name === SESSION_COOKIE) {
-      const value = decodeURIComponent(rest.join('='));
-      return WORLD_ID.test(value) ? value : null;
-    }
-  }
-  return null;
-}
-
+/** Learner id from the session cookie, minting+setting a new one on first publish. */
 function learnerSession(request: Request): { id: string; cookie?: string } {
-  const existing = cookieValue(request);
+  const existing = readLearnerCookie(request);
   if (existing) return { id: existing };
   const id = crypto.randomUUID();
-  const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
-  return {
-    id,
-    cookie:
-      `${SESSION_COOKIE}=${encodeURIComponent(id)}; Path=/; HttpOnly; SameSite=Lax; ` +
-      `Max-Age=31536000${secure}`,
-  };
+  return { id, cookie: sessionCookie(id, request) };
 }
 
 function playableUrl(request: Request, world: WorldRow): string {
@@ -112,10 +88,14 @@ export function createWorldsHandler(repository: WorldRepository) {
       }
 
       if (request.method === 'POST' && !id) {
+        // CSRF defense-in-depth behind the SameSite=Lax session cookie.
+        if (!isSameOriginRequest(request)) {
+          return json({ code: 'CROSS_ORIGIN_BLOCKED', message: 'Cross-site requests are not allowed.' }, 403);
+        }
         const parsed = await bodyProfile(request);
         if (!parsed.ok) return parsed.response;
         const learner = learnerSession(request);
-        const world = await repository.create(parsed.profile, learner.id);
+        const world = await repository.create(parsed.profile, learner.id, PUBLISH_CONSENT);
         const headers: HeadersInit = {};
         if (learner.cookie) headers['set-cookie'] = learner.cookie;
         headers.location = `/api/worlds/${world.id}`;

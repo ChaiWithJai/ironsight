@@ -25,7 +25,7 @@
     "typecheck:functions": "tsc --noEmit -p netlify/functions/tsconfig.json",
     "boundaries": "bash tools/with-node.sh node tools/check-boundaries.mjs",
     "test:unit": "bash tools/with-node.sh node --test tools/tests/world-profile.test.mjs",
-    "test:integration": "bash tools/with-node.sh node --test tools/tests/worlds-function.integration.test.mjs",
+    "test:integration": "bash tools/with-node.sh node --test tools/tests/worlds-function.integration.test.mjs tools/tests/session-function.integration.test.mjs",
     "test": "npm run test:unit && npm run test:integration",
     "shots": "bash tools/shoot.sh",
     "learn:shots": "bash tools/learn-shots.sh",
