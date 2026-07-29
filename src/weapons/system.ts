@@ -49,7 +49,20 @@ type MutableWeaponState = { -readonly [K in keyof WeaponState]: WeaponState[K] }
 
 interface Slot {
   readonly entity: EntityId;
-  readonly state: MutableWeaponState;
+  /** ACTIVE weapon's sim state. Replaced (not reset) by `selectSlot`. */
+  state: MutableWeaponState;
+  /** Loadout ids in key-slot order — index 0 is key "1", index 1 is key "2". */
+  loadout: WeaponId[];
+  /** Index into `loadout` matching `state.def`. */
+  active: number;
+  /**
+   * Ammo/reserve/fire-mode memory for loadout slots that are NOT active. A
+   * stowed weapon keeps exactly what it had when it was put away — this is
+   * what makes switching to the sidearm and back not a free reload.
+   */
+  readonly stash: Map<WeaponId, MutableWeaponState>;
+  /** ctx.tick before which the active weapon cannot fire/reload/ADS. */
+  deployUntilTick: number;
   /** Harness / scripted overrides. Null means "read the intent". */
   triggerOverride: boolean | null;
   adsOverride: boolean | null;
@@ -65,6 +78,12 @@ interface Slot {
 }
 
 const DEFAULT_WEAPON: WeaponId = 'ar_service';
+/**
+ * The second loadout slot (key "2"), issued alongside whatever `equip` was
+ * called with. If a soldier's primary IS the sidearm, the secondary becomes
+ * the default rifle instead — a loadout is never one weapon deep.
+ */
+const SECONDARY_WEAPON: WeaponId = 'sidearm';
 
 class IronWeapons implements WeaponService, TickSystem {
   readonly name = 'weapons.fireControl';
@@ -108,15 +127,32 @@ class IronWeapons implements WeaponService, TickSystem {
     return this.slots.get(entity)?.state ?? null;
   }
 
+  /**
+   * Issues a FRESH two-weapon loadout — `weapon` in slot 0 (key "1") plus the
+   * sidearm in slot 1 (key "2", or the default rifle if `weapon` IS the
+   * sidearm). This is the spawn/respawn/class-change seam; `switchToSlot` and
+   * `cycleSlot` are the ones a player reaches for mid-match and they never
+   * discard a stowed weapon's ammo the way this does.
+   */
   equip(entity: EntityId, weapon: WeaponId): void {
+    // `state.def` is always the RESOLVED id: the viewmodel rig's mesh map
+    // (`WEAPON_IDS`) only has entries for the four authored classes, so an
+    // unauthored alias left unresolved here would silently fail to swap the
+    // held mesh. `loadout` below keeps the ORIGINAL id for display — the HUD
+    // shows "sidearm", the sim fires an `smg_compact`.
     const id = resolveId(weapon);
     const def = this.def(id);
+    const secondary = weapon === SECONDARY_WEAPON ? DEFAULT_WEAPON : SECONDARY_WEAPON;
     const existing = this.slots.get(entity);
     if (existing) {
       // A weapon swap keeps nothing: fresh magazine, fresh spread, fresh recoil
       // step. Carrying the step across a swap is how a player ends up with the
       // LMG's step 19 on their first pistol shot.
       resetSlotTo(existing.state, id, def);
+      existing.loadout = [weapon, secondary];
+      existing.active = 0;
+      existing.stash.clear();
+      existing.deployUntilTick = 0;
       existing.nextFireAt = 0;
       existing.reloadIsEmpty = false;
       existing.magInPlayed = false;
@@ -126,6 +162,10 @@ class IronWeapons implements WeaponService, TickSystem {
     const slot: Slot = {
       entity,
       state: newState(id, def),
+      loadout: [weapon, secondary],
+      active: 0,
+      stash: new Map(),
+      deployUntilTick: 0,
       triggerOverride: null,
       adsOverride: null,
       triggerWasDown: false,
@@ -137,6 +177,84 @@ class IronWeapons implements WeaponService, TickSystem {
     };
     this.slots.set(entity, slot);
     this.attachOrder.push(entity);
+  }
+
+  loadoutOf(entity: EntityId): readonly WeaponId[] {
+    return this.slots.get(entity)?.loadout ?? [];
+  }
+
+  activeSlot(entity: EntityId): number {
+    return this.slots.get(entity)?.active ?? -1;
+  }
+
+  slotStateOf(entity: EntityId, slotIndex: number): Readonly<WeaponState> | null {
+    const slot = this.slots.get(entity);
+    if (!slot || slotIndex < 0 || slotIndex >= slot.loadout.length) return null;
+    if (slotIndex === slot.active) return slot.state;
+    return slot.stash.get(slot.loadout[slotIndex]!) ?? null;
+  }
+
+  switchToSlot(entity: EntityId, slotIndex: number): void {
+    const slot = this.slots.get(entity);
+    if (slot) this.selectSlot(slot, slotIndex, this.ctx.services.clock.tick);
+  }
+
+  cycleSlot(entity: EntityId, dir: 1 | -1): void {
+    const slot = this.slots.get(entity);
+    if (slot) this.cycle(slot, dir, this.ctx.services.clock.tick);
+  }
+
+  isDeploying(entity: EntityId): boolean {
+    const slot = this.slots.get(entity);
+    return slot ? this.ctx.services.clock.tick < slot.deployUntilTick : false;
+  }
+
+  private cycle(slot: Slot, dir: 1 | -1, tick: number): void {
+    if (slot.loadout.length === 0) return;
+    const next = (slot.active + dir + slot.loadout.length) % slot.loadout.length;
+    this.selectSlot(slot, next, tick);
+  }
+
+  /**
+   * THE weapon swap. Stows the outgoing slot's sim state (ammo, reserve, fire
+   * mode intact) and either restores or freshly issues the incoming slot's
+   * state, cancels whatever the outgoing weapon was doing, and starts the
+   * incoming weapon's deploy timer (`WeaponDef.deployTime`). No-op if
+   * `index` is already active or out of range for this loadout.
+   */
+  private selectSlot(slot: Slot, index: number, tick: number): void {
+    if (index < 0 || index >= slot.loadout.length || index === slot.active) return;
+    const outgoingId = slot.loadout[slot.active]!;
+    slot.stash.set(outgoingId, slot.state);
+
+    const incomingId = slot.loadout[index]!;
+    const incoming = slot.stash.get(incomingId);
+    slot.stash.delete(incomingId);
+    // `newState` writes its first argument straight into `state.def`, so the
+    // RESOLVED id goes in here for the same reason `equip` resolves it — the
+    // viewmodel rig's mesh map only knows the four authored classes.
+    const resolvedId = resolveId(incomingId);
+    slot.state = incoming ?? newState(resolvedId, this.def(resolvedId));
+    slot.active = index;
+
+    // A swap CANCELS an in-progress reload rather than finishing it — the
+    // magazine you were feeding stays exactly where it was, so ducking to the
+    // sidearm and back is not a free reload. ADS and aim punch reset because
+    // a weapon that was mid-transition when stowed comes back out settled.
+    slot.state.reloading = false;
+    slot.state.firing = false;
+    slot.state.burstRemaining = 0;
+    slot.state.adsSim = 0;
+    slot.state.adsWanted = false;
+    slot.state.aimPunch.set(0, 0, 0);
+    slot.state.aimPunchVelocity.set(0, 0, 0);
+
+    slot.triggerOverride = null;
+    slot.adsOverride = null;
+    slot.triggerWasDown = false;
+    slot.nextFireAt = tick;
+    slot.recoverAfterTick = tick;
+    slot.deployUntilTick = tick + Math.round(this.def(incomingId).deployTime * Sim.TICK_HZ);
   }
 
   setTrigger(entity: EntityId, held: boolean): void {
@@ -233,18 +351,35 @@ class IronWeapons implements WeaponService, TickSystem {
   }
 
   private tickSlot(slot: Slot, ctx: TickCtx): void {
+    const intent = ctx.services.player.intentOf(slot.entity);
+    const pressed = intent?.pressed ?? 0;
+
+    /* Weapon switching. Handled BEFORE `s`/`def` below are read so the rest of
+     * this tick already sees whichever weapon just became active — a press
+     * of "1" and the first frame of that weapon's spread/reload state land in
+     * the same tick, exactly like every other edge-triggered input here.
+     * Digits select a slot directly; "X" and the wheel's ±1 sentinels cycle. */
+    if ((pressed & Btn.SwapWeapon) !== 0) this.cycle(slot, 1, ctx.tick);
+    const wanted = intent?.weaponSlot ?? -1;
+    if (wanted >= 0) this.selectSlot(slot, wanted, ctx.tick);
+    else if (wanted === -2) this.cycle(slot, -1, ctx.tick);
+    else if (wanted === -3) this.cycle(slot, 1, ctx.tick);
+
     const s = slot.state;
     const def = this.def(s.def);
-    const intent = ctx.services.player.intentOf(slot.entity);
     const player = ctx.services.player.stateOf(slot.entity);
 
     const buttons = intent?.buttons ?? 0;
-    const pressed = intent?.pressed ?? 0;
-    const trigger = slot.triggerOverride ?? (buttons & Btn.Fire) !== 0;
-    const wantsAds = slot.adsOverride ?? (buttons & Btn.Ads) !== 0;
+    // The freshly-drawn weapon cannot fire, ADS or reload until its deploy
+    // timer elapses — `WeaponDef.deployTime`, the cost of actually switching.
+    const deploying = ctx.tick < slot.deployUntilTick;
+    const trigger = !deploying && (slot.triggerOverride ?? (buttons & Btn.Fire) !== 0);
+    const wantsAds = !deploying && (slot.adsOverride ?? (buttons & Btn.Ads) !== 0);
 
-    if ((pressed & Btn.Reload) !== 0) this.beginReload(slot, ctx);
-    if ((pressed & Btn.FireMode) !== 0) this.cycleFireMode(slot.entity);
+    if (!deploying) {
+      if ((pressed & Btn.Reload) !== 0) this.beginReload(slot, ctx);
+      if ((pressed & Btn.FireMode) !== 0) this.cycleFireMode(slot.entity);
+    }
 
     /* ADS blend, at TICK rate. This is the value spread and recoil read; the
      * camera reads the RENDER-rate one from the viewmodel rig, and the two are
@@ -504,7 +639,14 @@ class IronWeapons implements WeaponService, TickSystem {
     for (const entity of this.attachOrder) {
       const slot = this.slots.get(entity);
       if (!slot) continue;
-      resetSlotTo(slot.state, slot.state.def, this.def(slot.state.def));
+      // Re-baseline to loadout slot 0, fully drawn, with nothing stashed — a
+      // sidearm left half-loaded from the previous capture would be an
+      // order-dependent HUD readout, exactly like the fields below it.
+      const primary = resolveId(slot.loadout[0] ?? slot.state.def);
+      resetSlotTo(slot.state, primary, this.def(primary));
+      slot.active = 0;
+      slot.stash.clear();
+      slot.deployUntilTick = 0;
       slot.triggerOverride = null;
       slot.adsOverride = null;
       slot.triggerWasDown = false;

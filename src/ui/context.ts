@@ -80,8 +80,18 @@ export interface HudContext {
   readonly player: Readonly<PlayerState>;
   readonly weapon: Readonly<WeaponState> | null;
   readonly weaponDef: Readonly<WeaponDef> | null;
+  /**
+   * True while the active weapon is still being drawn (`WeaponService.isDeploying`).
+   * The weapon card's brackets — the "active weapon" affordance, HUD_SPEC
+   * §6.9 — hide during this window: "a transitional state" per the spec, and
+   * the only honest way to show a weapon swap actually costing time.
+   */
+  readonly deploying: boolean;
+  /** The REAL stowed weapon — `WeaponService.loadoutOf` slot 1 — not a guess. */
   readonly secondary: Readonly<WeaponDef> | null;
   readonly secondaryAmmo: readonly [number, number];
+  /** The digit key ("1".."9") that draws `secondary` — the stowed row's chip. */
+  readonly secondaryKey: string;
   readonly squad: readonly SquadRow[];
   readonly points: readonly Readonly<CapturePointDef>[];
   readonly gadgets: readonly GadgetSlot[];
