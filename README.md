@@ -262,6 +262,16 @@ the measurements those scores were taken against.
 | [`docs/TEACHING.md`](docs/TEACHING.md) | The `/learn/` academy: teaching the JAMStack through worldbuilding. |
 | [`docs/NETLIFY_RUNBOOK.md`](docs/NETLIFY_RUNBOOK.md) | Local, staging, production, data isolation, release and rollback. |
 | [`docs/adr/0001-fullstack-netlify.md`](docs/adr/0001-fullstack-netlify.md) | Why Netlify Database, Functions, Blobs, and URL fallback coexist. |
+| [`SECURITY.md`](SECURITY.md) | Vulnerability reporting, scope, and the security contact. |
+
+---
+
+## Security
+
+Found a vulnerability? See [`SECURITY.md`](SECURITY.md) — report privately to
+**jai.ghodwala@gmail.com**, not a public issue. Security headers (CSP, `X-Frame-Options`,
+`Referrer-Policy`, `Permissions-Policy`) are set repo-wide in `netlify.toml`/`vercel.json`, and
+Dependabot + `npm audit` in CI keep dependencies patched.
 
 ---
 
