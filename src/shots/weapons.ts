@@ -165,3 +165,32 @@ registerShot({
     });
   },
 });
+
+registerShot({
+  name: 'weapon_shotgun_hipfire',
+  description:
+    'The 12-gauge pump breacher (issue #3) at hip: a fatter receiver than the AR, a ribbed pump ' +
+    'forend where the AR has a slatted handguard, and the low saddle-mounted reflex ' +
+    '`models/build.ts` gives the class instead of the AR\'s rail-height holo. Proves the weapon ' +
+    'that used to silently render and fire as `smg_compact` now has its own mesh, ADS framing ' +
+    'and ballistics.',
+  frames: 30,
+  setup(ctx) {
+    scene(ctx);
+    forceWeaponState({ weapon: 'shotgun', ads: false, trigger: false, adsSettled: true });
+  },
+});
+
+registerShot({
+  name: 'weapon_sidearm_hipfire',
+  description:
+    'The 9 mm service pistol (issue #3) at hip: a compact frame roughly a third the AR\'s ' +
+    'receiver length, no buttstock (`hasStock: false` in `models/build.ts`), a slide-mounted ' +
+    'micro red dot sitting barely above the bore. Proves the sidearm slot now equips a real, ' +
+    'distinctly smaller weapon rather than an SMG standing in for it.',
+  frames: 30,
+  setup(ctx) {
+    scene(ctx);
+    forceWeaponState({ weapon: 'sidearm', ads: false, trigger: false, adsSettled: true });
+  },
+});
