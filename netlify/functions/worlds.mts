@@ -5,6 +5,7 @@ import {
   type WorldProfile,
 } from '../../src/engine/world-profile.ts';
 import { createWorldRepository, type WorldRepository, type WorldRow } from './lib/world-store.mts';
+import { createLogger, requestIdFrom } from './lib/log.mts';
 
 const WORLD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SESSION_COOKIE = 'ironsight_learner';
@@ -98,41 +99,74 @@ async function bodyProfile(request: Request): Promise<
 
 export function createWorldsHandler(repository: WorldRepository) {
   return async (request: Request, context: Pick<Context, 'params'>): Promise<Response> => {
+    const requestId = requestIdFrom(request);
+    const startedAt = Date.now();
+    const id = context.params.id;
+    const route = id ? '/api/worlds/:id' : '/api/worlds';
+    const log = createLogger({ requestId, service: 'worlds', base: { method: request.method, route } });
+
+    // One completion line per request, plus the correlation id echoed back so a
+    // client-side error can be tied to a server-side log line.
+    const finish = (response: Response, outcome: string): Response => {
+      response.headers.set('x-request-id', requestId);
+      log.info('request.complete', {
+        status: response.status,
+        outcome,
+        durationMs: Date.now() - startedAt,
+      });
+      return response;
+    };
+
     try {
-      const id = context.params.id;
       if (request.method === 'GET' && id) {
-        if (!WORLD_ID.test(id)) return json({ code: 'INVALID_WORLD_ID', message: 'World id is invalid.' }, 400);
-        const world = await repository.find(id);
-        if (!world) return json({ code: 'WORLD_NOT_FOUND', message: 'That world does not exist.' }, 404);
-        return json(
-          { world, playUrl: playableUrl(request, world) },
-          200,
-          { 'cache-control': 'public, max-age=60, s-maxage=86400, immutable' },
+        if (!WORLD_ID.test(id)) {
+          return finish(json({ code: 'INVALID_WORLD_ID', message: 'World id is invalid.' }, 400), 'invalid_world_id');
+        }
+        const world = await repository.find(id, log);
+        if (!world) {
+          return finish(json({ code: 'WORLD_NOT_FOUND', message: 'That world does not exist.' }, 404), 'world_not_found');
+        }
+        return finish(
+          json(
+            { world, playUrl: playableUrl(request, world) },
+            200,
+            { 'cache-control': 'public, max-age=60, s-maxage=86400, immutable' },
+          ),
+          'world_read',
         );
       }
 
       if (request.method === 'POST' && !id) {
         const parsed = await bodyProfile(request);
-        if (!parsed.ok) return parsed.response;
+        if (!parsed.ok) return finish(parsed.response, 'invalid_publication');
         const learner = learnerSession(request);
-        const world = await repository.create(parsed.profile, learner.id);
+        const world = await repository.create(parsed.profile, learner.id, log);
         const headers: HeadersInit = {};
         if (learner.cookie) headers['set-cookie'] = learner.cookie;
         headers.location = `/api/worlds/${world.id}`;
-        return json({ world, playUrl: playableUrl(request, world) }, 201, headers);
+        return finish(
+          json({ world, playUrl: playableUrl(request, world) }, 201, headers),
+          learner.cookie ? 'world_created_new_session' : 'world_created',
+        );
       }
 
-      return json({ code: 'METHOD_NOT_ALLOWED', message: 'Use POST /api/worlds or GET /api/worlds/:id.' }, 405, {
-        allow: 'GET, POST',
-      });
+      return finish(
+        json({ code: 'METHOD_NOT_ALLOWED', message: 'Use POST /api/worlds or GET /api/worlds/:id.' }, 405, {
+          allow: 'GET, POST',
+        }),
+        'method_not_allowed',
+      );
     } catch (error) {
-      console.error('[worlds] request failed', error);
-      return json(
-        {
-          code: 'WORLD_SERVICE_UNAVAILABLE',
-          message: 'Durable publishing is unavailable. Your complete URL world still works.',
-        },
-        503,
+      log.error('request.exception', { error });
+      return finish(
+        json(
+          {
+            code: 'WORLD_SERVICE_UNAVAILABLE',
+            message: 'Durable publishing is unavailable. Your complete URL world still works.',
+          },
+          503,
+        ),
+        'exception',
       );
     }
   };

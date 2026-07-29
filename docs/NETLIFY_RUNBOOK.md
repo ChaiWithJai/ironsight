@@ -84,8 +84,19 @@ environment at execution time.
    must use an unmistakable `CANARY` civilization name. The first slice has no
    destructive delete endpoint, so retain the tiny publication record unless a
    database administrator can remove the exact row safely.
-5. Check Function and deploy logs for uncaught errors and unexpected 4xx/5xx
-   responses. Record screenshots and JSON proof outside source control.
+5. Confirm migration observability: `GET <origin>/api/health` must return
+   `200` with `status: "ok"` and an empty `schema.missing`. A `503`/`degraded`
+   with named missing tables means the publish ran but the migration did not —
+   stop and forward-correct rather than serving a half-migrated schema.
+6. Check Function and deploy logs for uncaught errors and unexpected 4xx/5xx
+   responses. Logs are single-line JSON keyed by `event` (`request.complete`,
+   `db.*`, `blob.*`, `migration.degraded`) and `requestId`; the same
+   `requestId` is returned in the `x-request-id` response header, so a reported
+   client failure can be traced to its server line. Filter `request.complete`
+   for `status`/`durationMs` to spot-check the latency/error SLOs in ADR 0002.
+   Record screenshots and JSON proof outside source control. Logs and
+   `/api/health` never contain learner PII: the learner id appears only as a
+   pseudonym and authored world text is never logged.
 
 ## Rollback
 

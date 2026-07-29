@@ -50,6 +50,15 @@ for (const path of routes) {
 }
 
 if (environment !== 'local') {
+  const health = await fetch(`${baseUrl}/api/health`);
+  assert.equal(health.status, 200, 'migration observability: /api/health ok');
+  const healthBody = await health.json();
+  assert.equal(healthBody.status, 'ok', 'health status ok');
+  assert.deepEqual(healthBody.schema?.missing ?? ['unknown'], [], 'no missing tables');
+  assert.ok(health.headers.get('x-request-id'), 'health echoes a correlation id');
+}
+
+if (environment !== 'local') {
   const home = await (await fetch(`${baseUrl}/`)).text();
   const assetPath = home.match(/(?:src|href)="([^"]*assets\/[^"]+)"/)?.[1];
   assert.ok(assetPath, 'built home references a hashed asset');
