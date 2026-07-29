@@ -18,13 +18,20 @@
  * The structure figure is sized against `src/level/colliders.ts`, which gives a
  * destructible `volume x healthPerM3` HP:
  *
- *   brick   1150 HP/m3, x4.8  ->  900 x 4.8 = 4320  breaches up to 3.7 m3
- *   concrete 1700 HP/m3, x4.2 ->  900 x 4.2 = 3780  breaches up to 2.2 m3
- *   sandbag  900 HP/m3, x3.4  ->  900 x 3.4 = 3060  breaches up to 3.4 m3
+ *   brick    1050 HP/m3, x5.2 ->  900 x 5.2 = 4680  one-frag breach up to 4.5 m3
+ *   concrete 1100 HP/m3, x5.0 ->  900 x 5.0 = 4500  one-frag breach up to 4.1 m3
+ *   sandbag   900 HP/m3, x3.4 ->  900 x 3.4 = 3060  one-frag breach up to 3.4 m3
  *
  * ...so one frag opens a hole in a parapet, a sandbag emplacement or a stucco
- * partition, and a heavy concrete barrier takes two. Damage ACCUMULATES in
- * `DestructionService`, so the second one always finishes the job.
+ * partition, and the biggest masonry or concrete piece the level's 12 m3
+ * cover-vs-structure cutoff allows (`classifyFor` in `src/level/colliders.ts`)
+ * takes AT MOST THREE — 13 200 HP / 4500 for concrete, 12 600 HP / 4680 for
+ * brick. That is a deliberate, tuned ceiling, not an emergent number: it used
+ * to be six and four respectively before `explosiveMultiplier` absorbed the
+ * correction (health alone is what makes concrete shrug off small arms, so it
+ * stayed high; see the comment on `CLASSES` in `colliders.ts`). Damage
+ * ACCUMULATES in `DestructionService`, so the last frag always finishes the
+ * job — a wall does not reset between hits.
  *
  * THE FUSE STARTS WHEN THE PIN IS PULLED, NOT WHEN THE GRENADE LEAVES THE HAND.
  * That is what makes cooking a mechanic rather than a delay: hold it and it

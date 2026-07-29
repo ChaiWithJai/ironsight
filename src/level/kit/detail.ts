@@ -14,8 +14,8 @@
  * That is deliberate — a dish bolted to a leaning parapet leans too.
  */
 import * as THREE from 'three';
-import { CollisionGroup, SurfaceId, type Rng } from '@/engine/types';
-import type { LevelBuild } from '@/level/build';
+import { CollisionGroup, type Rng } from '@/engine/types';
+import { colliderSurface, yawOf, type LevelBuild } from '@/level/build';
 import type { MatKey } from '@/level/materials';
 
 const _v = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
@@ -261,28 +261,46 @@ export function stairs(
   g.boxAt(0, -0.5, run / 2, width / 2, 0.5 + 0.01, run / 2, 1, 0x3f);
   b.xf.pop();
 
-  // ONE sloped collider for the whole flight.
+  // ONE sloped collider for the whole flight, composed against the CALLER's
+  // frame. `x/y/z/yaw` are local to whatever `b.xf.matrix` is active right
+  // now — that is what let the treads above land correctly wherever this is
+  // called from, purely by going through `b.xf.push`/`MeshBuilder`. A
+  // hand-built matrix does not get that composition for free: it has to
+  // multiply the caller's frame in explicitly, or it lands at the LOCAL
+  // (x, y, z) as though the level's origin were the caller's, which is
+  // exactly where a flight built inside a landmark's own pushed frame (a
+  // crane, a building) used to end up — a phantom box nowhere near the
+  // stair it was meant to be the collision for, and treads with no collider
+  // under them at all.
   const slopeAngle = Math.atan2(rise, run);
   const len = Math.hypot(rise, run);
-  const cm = new THREE.Matrix4().makeTranslation(x, y + rise / 2, z + 0);
-  cm.multiply(new THREE.Matrix4().makeRotationY(yaw));
-  cm.multiply(new THREE.Matrix4().makeTranslation(0, 0, run / 2));
-  cm.multiply(new THREE.Matrix4().makeRotationX(-slopeAngle));
+  const local = new THREE.Matrix4().makeTranslation(x, y + rise / 2, z);
+  local.multiply(new THREE.Matrix4().makeRotationY(yaw));
+  local.multiply(new THREE.Matrix4().makeTranslation(0, 0, run / 2));
+  local.multiply(new THREE.Matrix4().makeRotationX(-slopeAngle));
+  const cm = new THREE.Matrix4().multiplyMatrices(b.xf.matrix, local);
   b.collider({
     matrix: cm,
     shape: { kind: 'box', half: new THREE.Vector3(width / 2, 0.12, len / 2) },
-    surface: SurfaceId.Sandstone,
+    // The tread material's own surface, not a hardcoded stone — a steel
+    // crane stair reporting footsteps and ricochets as sandstone is its own
+    // small bug, independent of the destructible one below.
+    surface: colliderSurface(mat),
     group: CollisionGroup.StaticGeo,
+    // A stair is circulation, not cover: see `StaticColliderDef.structural`
+    // and the comment on `classifyFor` in `src/level/colliders.ts`. Without
+    // this a flat, thin tread box is exactly the shape `classifyFor` reads as
+    // a low parapet, and two frags turn a capture point's only route into a
+    // hole players fall through.
+    structural: true,
   });
-  b.deck(
+  const deckWorld = b.worldPoint(
     x + Math.sin(yaw) * (run / 2),
     y,
     z + Math.cos(yaw) * (run / 2),
-    width / 2,
-    run / 2,
-    yaw,
-    rise,
+    new THREE.Vector3(),
   );
+  b.deck(deckWorld.x, deckWorld.y, deckWorld.z, width / 2, run / 2, yaw + yawOf(b.xf.matrix), rise);
   if (railings) {
     const dirX = Math.sin(yaw);
     const dirZ = Math.cos(yaw);
