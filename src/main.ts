@@ -27,6 +27,7 @@ import { attachDriver, markReady, setStatus } from '@/engine/harness';
 import { createRenderer } from '@/engine/renderer';
 import { createEngine } from '@/engine/engine';
 import { installSoak } from '@/engine/soak';
+import { installPerf } from '@/engine/perf';
 import { tierName } from '@/engine/quality';
 import { SHOT_MODULE_COUNT } from '@/shots/index';
 import { installTeachingMode } from '@/teach/game';
@@ -131,6 +132,11 @@ async function boot(): Promise<void> {
   // actually moved. A screenshot cannot show that a bot has stood still for a
   // minute; this can.
   installSoak(engine);
+  // The RUNTIME-PERFORMANCE counterpart to the soak. `tools/perf.mjs` waits on
+  // the same `__HARNESS__.ready` flag, then reads `__PERF__.snapshot()` for the
+  // renderer's draw calls / triangles / frame time and `__PERF__.sampleFrames()`
+  // for a directional frame-time distribution — figures a screenshot cannot show.
+  installPerf(engine);
   if (new URLSearchParams(location.search).has('teach')) {
     installTeachingMode(container as HTMLElement, engine.services);
   }
