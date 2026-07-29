@@ -21,16 +21,27 @@
  * `tools/capture.mjs` hard-fails at 300 s waiting for `ready`, and every status
  * string set below is what shows up in its failure diagnostic. Keep them
  * specific enough to bisect a hang from the log alone.
+ *
+ * LAZY-LOADED ENTRY (perf-lazy-load)
+ * -----------------------------------
+ * This module's own static import graph is now deliberately tiny: only
+ * `@/engine/harness`, which has zero dependency on three/rapier/the subsystem
+ * graph. Everything that pulls in three, Rapier, the 23 subsystem factories and
+ * every lane's shot file — the ~3.86 MiB chunk this split exists to defer — is
+ * fetched with `import()` from inside `boot()`, AFTER the loading screen DOM
+ * has already been created and appended below.
+ *
+ * Why this matters: with static top-level imports, the ES module loader must
+ * resolve, fetch, parse and evaluate the ENTIRE transitive import graph before
+ * a single line of this module's own body runs — including the four lines that
+ * build the "INITIALISING" screen. The first useful pixel was gated behind
+ * parsing and compiling the whole game. Making the heavy imports dynamic lets
+ * the browser parse/compile/execute this tiny entry first, paint the loading
+ * screen, and only then start fetching + parsing the big chunk (in parallel
+ * across the split pieces, since `Promise.all` below issues every `import()`
+ * at once rather than serially awaiting each one).
  */
-import { TickPhase } from '@/engine/types';
 import { attachDriver, markReady, setStatus } from '@/engine/harness';
-import { createRenderer } from '@/engine/renderer';
-import { createEngine } from '@/engine/engine';
-import { installSoak } from '@/engine/soak';
-import { tierName } from '@/engine/quality';
-import { SHOT_MODULE_COUNT } from '@/shots/index';
-import { installTeachingMode } from '@/teach/game';
-import { hydratePublishedWorld } from '@/engine/world-publication';
 
 const container = document.getElementById('app');
 if (!container) throw new Error('index.html is missing #app');
@@ -71,6 +82,31 @@ function progress(fraction: number, text: string): void {
 /* ------------------------------------------------------------------------ boot */
 
 async function boot(): Promise<void> {
+  // Every heavy module the game needs — three, Rapier, the engine, the whole
+  // subsystem graph and every lane's shot file (via `@/shots/index`'s eager
+  // glob) — is requested here, in parallel, as the FIRST thing `boot()` does.
+  // By this point the loading screen is already in the DOM and the browser has
+  // already had a chance to parse/compile/paint this tiny entry module, so the
+  // multi-megabyte fetch+parse+compile below runs against a visible "booting"
+  // screen instead of blocking it.
+  const [
+    { TickPhase },
+    { hydratePublishedWorld },
+    { createRenderer },
+    { createEngine },
+    { installSoak },
+    { tierName },
+    { SHOT_MODULE_COUNT },
+  ] = await Promise.all([
+    import('@/engine/types'),
+    import('@/engine/world-publication'),
+    import('@/engine/renderer'),
+    import('@/engine/engine'),
+    import('@/engine/soak'),
+    import('@/engine/quality'),
+    import('@/shots/index'),
+  ]);
+
   progress(0.01, 'resolving chronicle');
   await hydratePublishedWorld();
   progress(0.02, 'creating context');
@@ -132,6 +168,8 @@ async function boot(): Promise<void> {
   // minute; this can.
   installSoak(engine);
   if (new URLSearchParams(location.search).has('teach')) {
+    // Dev/teaching-mode only — never fetched for a normal play session.
+    const { installTeachingMode } = await import('@/teach/game');
     installTeachingMode(container as HTMLElement, engine.services);
   }
 
