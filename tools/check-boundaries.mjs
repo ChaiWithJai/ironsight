@@ -63,6 +63,10 @@ const SHARED = [
   // Optional full-stack publication seam. Default play stays zero-network; a
   // stable `world` id resolves here and falls back to the complete URL profile.
   'engine/world-publication',
+  // Optional offline-first course-progress sync seam. Same doctrine as
+  // world-publication: the academy is a zero-backend JAMStack app; durable
+  // progress mirrors localStorage to the course-runs API and never gates play.
+  'engine/course-progress',
   // Shared ECS component declarations (Health, Transform, …). These are data
   // definitions every gameplay lane reads and writes through the ComponentStore;
   // routing them via a service would be indirection for its own sake.
@@ -130,9 +134,9 @@ const RULES = [
   {
     id: 'no-runtime-network',
     test: /\b(fetch\s*\(|XMLHttpRequest|new\s+WebSocket|importScripts\s*\()/,
-    allow: (f) => f === `engine${sep}world-publication.ts`,
+    allow: (f) => f === `engine${sep}world-publication.ts` || f === `engine${sep}course-progress.ts`,
     message:
-      'Runtime network is confined to the optional world-publication seam; default play remains generated locally.',
+      'Runtime network is confined to the named world-publication and course-progress seams; default play remains generated locally.',
   },
   {
     id: 'no-binary-asset-import',
