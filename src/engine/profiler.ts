@@ -46,6 +46,15 @@ export class EngineProfiler implements Profiler {
       GPU_DISJOINT_EXT: number;
     } | null;
     this.ext = ext;
+    // `renderer.info.render` is what feeds `FrameStats.drawCalls`/`triangles`,
+    // and three RESETS it on every `renderer.render()` call. The render graph
+    // issues ~30 passes per frame, so with the default `autoReset = true` the
+    // counter only ever holds the LAST pass's tally — for us the fullscreen
+    // present, i.e. a permanent "1 draw, 1 triangle". Turn autoReset off and
+    // reset exactly once per frame (in `beginFrame`) so the count accumulates
+    // across the whole frame. Without this the drawCalls budget assertion in
+    // `checkBudgets` compares against 1 and can never fire.
+    renderer.info.autoReset = false;
   }
 
   setBudgets(quality: Readonly<QualitySettings>): void {
@@ -99,6 +108,10 @@ export class EngineProfiler implements Profiler {
 
   beginFrame(): void {
     this.frameStart = performance.now();
+    // One reset per frame (autoReset is off — see the constructor), so
+    // `info.render` accumulates every pass's draws and triangles until the
+    // matching `endFrame` reads the whole-frame total.
+    this.renderer.info.reset();
     for (const k of Object.keys(this.cpuMs)) delete this.cpuMs[k];
     for (const k of Object.keys(this.passMs)) delete this.passMs[k];
     this.openCpu.clear();

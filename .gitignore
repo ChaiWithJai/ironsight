@@ -40,6 +40,9 @@ tmp-*/
 tools/soak/
 tools/shots-post-*/
 
+# Web-performance reports — regenerate with ./tools/perf.sh
+tools/perf/
+
 # Full-game teaching smoke evidence — regenerated with npm run teach:smoke.
 tools/teaching/
 
