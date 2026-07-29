@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run a command under node >= 20.19.
+# Run a command under Node 22 or newer.
 #
 # The repo's default `node` on this machine is 18.x, but Vite 7 needs >= 20.19
 # (it calls crypto.hash, added in 20.12/21). Rather than force every contributor
@@ -13,8 +13,8 @@
 # stays fast and dependency-free.
 set -euo pipefail
 
-need_major=20
-need_minor=19
+need_major=22
+need_minor=0
 
 version_ok() {
   local v; v="$("$1" -e 'const [a,b]=process.versions.node.split(".").map(Number);process.stdout.write(a+" "+b)' 2>/dev/null)" || return 1
