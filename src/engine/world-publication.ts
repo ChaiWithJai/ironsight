@@ -51,25 +51,81 @@ function responseWorld(value: unknown): PublishedWorld | null {
   };
 }
 
+export interface PublishOptions {
+  /** Publish an immutable revision of an owned world; the old URL keeps its meaning. */
+  readonly supersedes?: string;
+  /** Mark this world for canary/test disposal (harmless without the maintenance token). */
+  readonly disposable?: boolean;
+}
+
+/** A learner's own world as returned by the ownership listing. */
+export interface OwnedWorld {
+  readonly id: string;
+  readonly civilization: string;
+  readonly sigil: string;
+  readonly era: string;
+  readonly status: 'published' | 'withdrawn';
+  readonly supersedesId: string | null;
+  readonly createdAt: string;
+  readonly withdrawnAt: string | null;
+}
+
+function errorMessage(payload: unknown, status: number, fallback: string): string {
+  return payload && typeof payload === 'object' && typeof (payload as Record<string, unknown>).message === 'string'
+    ? String((payload as Record<string, unknown>).message)
+    : `${fallback} (${status})`;
+}
+
 export async function publishWorld(
   profile: WorldProfile,
+  options: PublishOptions = {},
   fetcher: typeof fetch = fetch,
 ): Promise<PublishedWorld> {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (options.disposable) headers['x-ironsight-disposable'] = '1';
+  const body: Record<string, unknown> = { profile };
+  if (options.supersedes) body.supersedes = options.supersedes;
   const response = await fetcher('/api/worlds', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ profile }),
+    headers,
+    body: JSON.stringify(body),
   });
   const payload: unknown = await response.json().catch(() => null);
   const world = response.ok ? responseWorld(payload) : null;
-  if (!world) {
-    const message =
-      payload && typeof payload === 'object' && typeof (payload as Record<string, unknown>).message === 'string'
-        ? String((payload as Record<string, unknown>).message)
-        : `publication failed (${response.status})`;
-    throw new Error(message);
-  }
+  if (!world) throw new Error(errorMessage(payload, response.status, 'publication failed'));
   return world;
+}
+
+/**
+ * Lists only the calling learner's own worlds. The server scopes the query to the
+ * anonymous session cookie, so this can never surface another learner's work.
+ */
+export async function listMyWorlds(fetcher: typeof fetch = fetch): Promise<OwnedWorld[]> {
+  const response = await fetcher('/api/worlds', { headers: { accept: 'application/json' } });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok || !payload || typeof payload !== 'object') return [];
+  const worlds = (payload as Record<string, unknown>).worlds;
+  return Array.isArray(worlds) ? (worlds as OwnedWorld[]) : [];
+}
+
+/**
+ * Withdraws (unpublishes) a world the learner owns. Shared URLs still boot the
+ * civilization from the URL contract; only the durable record is retired.
+ */
+export async function withdrawWorld(
+  id: string,
+  fetcher: typeof fetch = fetch,
+): Promise<{ ok: boolean; status: string; message: string }> {
+  const response = await fetcher(`/api/worlds/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  const payload: unknown = await response.json().catch(() => null);
+  const message = errorMessage(payload, response.status, 'withdrawal failed');
+  const status =
+    payload && typeof payload === 'object' && typeof (payload as Record<string, unknown>).status === 'string'
+      ? String((payload as Record<string, unknown>).status)
+      : response.ok
+        ? 'withdrawn'
+        : 'error';
+  return { ok: response.ok, status, message };
 }
 
 /**
