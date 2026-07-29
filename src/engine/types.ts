@@ -3127,6 +3127,44 @@ export interface WeaponService {
    * `services.weapons.resupply?.(entity) ?? 0`.
    */
   resupply?(entity: EntityId, fraction?: number): number;
+
+  /**
+   * The weapon ids `entity` carries, in key-slot order — index 0 is key "1",
+   * index 1 is key "2". Empty (or missing, pre-loadout) before `equip` has
+   * run. Two slots are authored today (primary + sidearm); keys past the
+   * loadout's length are legitimately inert, not unimplemented (§HUD_SPEC
+   * 6.10, `docs/ROADMAP` P1 "weapon switching").
+   *
+   * OPTIONAL for the same frozen-nulls reason as `throwableOf`.
+   */
+  loadoutOf?(entity: EntityId): readonly WeaponId[];
+  /** Index into `loadoutOf(entity)` currently drawn, or -1 with no loadout. */
+  activeSlot?(entity: EntityId): number;
+  /**
+   * Sim state for loadout slot `slot`, independent of whichever slot is
+   * active — a stowed weapon keeps its own ammo/reserve/fire-mode rather than
+   * being reset on swap-out. Null if `entity` has no loadout or `slot` is out
+   * of range. THE HUD'S STOWED-WEAPON ROW READS THIS for the weapon that is
+   * NOT currently drawn, so it never has to guess what the sidearm is loaded
+   * with (see `docs/HANDOFF.md` — this used to be a UI-side guess).
+   */
+  slotStateOf?(entity: EntityId, slot: number): Readonly<WeaponState> | null;
+  /**
+   * Draw loadout slot `slot` (key "1" → 0, "2" → 1, …). No-op if `slot` is
+   * already active, mid-deploy, or out of range for this entity's loadout.
+   * Costs `WeaponDef.deployTime`: the newly active weapon cannot fire,
+   * reload or ADS until it elapses — see `isDeploying`. Bound to
+   * `PlayerIntent.weaponSlot` (`Digit1`.."Digit9").
+   */
+  switchToSlot?(entity: EntityId, slot: number): void;
+  /**
+   * Cycle the loadout forward (`dir` > 0, mouse-wheel-down) or backward
+   * (`dir` < 0). Bound to `Btn.SwapWeapon` ("X", forward) and the mouse
+   * wheel's ±1 sentinel slots.
+   */
+  cycleSlot?(entity: EntityId, dir: 1 | -1): void;
+  /** True while `entity`'s active weapon is still being drawn (`switchToSlot`). */
+  isDeploying?(entity: EntityId): boolean;
 }
 
 export interface ShotRequest {

@@ -46,17 +46,23 @@ export function drawWeaponCard(ctx: HudContext): void {
   const flash = reloading && reloadProgress < 0.12 ? 1.5 : 1;
   batch.rect(g.left, g.top, g.right - g.left, h, COLOUR.black, ALPHA.scrim * flash * dim);
 
-  // The brackets. A literal `[` and `]`: a full-height vertical stroke with
-  // 1.0u horizontal returns at top and bottom only.
-  const stroke = 0.19 * u;
-  const arm = 1.0 * u;
-  const bracket = (x: number, dir: number): void => {
-    batch.rect(x - stroke * 0.5, g.top, stroke, h, COLOUR.whiteKey, dim);
-    batch.rect(dir > 0 ? x : x - arm, g.top, arm, stroke, COLOUR.whiteKey, dim);
-    batch.rect(dir > 0 ? x : x - arm, g.bottom - stroke, arm, stroke, COLOUR.whiteKey, dim);
-  };
-  bracket(g.left - stroke, 1);
-  bracket(g.right + stroke, -1);
+  // The brackets are the "active weapon" affordance (§6.9) and are ABSENT
+  // while the weapon is being drawn — HUD_SPEC calls this "a transitional
+  // state", and a weapon swap costing `WeaponDef.deployTime` is the one real
+  // transition this HUD has to show.
+  if (!ctx.deploying) {
+    // The brackets. A literal `[` and `]`: a full-height vertical stroke with
+    // 1.0u horizontal returns at top and bottom only.
+    const stroke = 0.19 * u;
+    const arm = 1.0 * u;
+    const bracket = (x: number, dir: number): void => {
+      batch.rect(x - stroke * 0.5, g.top, stroke, h, COLOUR.whiteKey, dim);
+      batch.rect(dir > 0 ? x : x - arm, g.top, arm, stroke, COLOUR.whiteKey, dim);
+      batch.rect(dir > 0 ? x : x - arm, g.bottom - stroke, arm, stroke, COLOUR.whiteKey, dim);
+    };
+    bracket(g.left - stroke, 1);
+    bracket(g.right + stroke, -1);
+  }
 
   const cls = weaponDef ? weaponDef.class : 'ar';
   weaponSilhouette(batch, cls, g.left + 1.3 * u, g.top + (h - 2.4 * u) * 0.5, 9.7 * u, 2.4 * u, COLOUR.art, dim, COLOUR.black, ALPHA.scrim * dim);
@@ -186,7 +192,7 @@ export function drawStowedRow(ctx: HudContext): void {
     treatment: 'shadow',
   });
 
-  keybindChip(batch, pen, '2', left - 0.65 * u - 0.925 * u, top + h * 0.5, u, ALPHA.chip * dim);
+  keybindChip(batch, pen, ctx.secondaryKey, left - 0.65 * u - 0.925 * u, top + h * 0.5, u, ALPHA.chip * dim);
 }
 
 /* --------------------------------------------------------- gadget tiles --- */

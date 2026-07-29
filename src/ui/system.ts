@@ -379,13 +379,21 @@ class HudImpl implements HudService {
     const localTeam = match.localTeam;
     this.state.syncTickets(match.tickets, ctx.dt);
 
-    const weapon = this.services.weapons.stateOf(this.services.player.localEntity);
+    const localEntity = this.services.player.localEntity;
+    const weapon = this.services.weapons.stateOf(localEntity);
     const weaponDef = weapon ? this.services.weapons.def(weapon.def) : null;
     this.state.syncSpread(weapon ? weapon.currentSpreadDeg : 0, ctx.dt);
+    const deploying = this.services.weapons.isDeploying?.(localEntity) ?? false;
 
-    // The stowed slot: the sidearm, unless the primary IS the sidearm.
-    const secondaryId = weaponDef && weaponDef.id === 'sidearm' ? 'smg_compact' : 'sidearm';
+    // THE REAL stowed weapon: whichever loadout slot is not active, read off
+    // `WeaponService` rather than guessed — a stale guess is exactly what let
+    // "X"/"1"-"9" stay inert without anyone noticing the HUD lied about it.
+    const loadoutIds = this.services.weapons.loadoutOf?.(localEntity) ?? [];
+    const activeIndex = this.services.weapons.activeSlot?.(localEntity) ?? 0;
+    const secondaryIndex = activeIndex === 0 ? 1 : 0;
+    const secondaryId = loadoutIds[secondaryIndex] ?? 'sidearm';
     const secondary = this.services.weapons.def(secondaryId);
+    const secondaryState = this.services.weapons.slotStateOf?.(localEntity, secondaryIndex) ?? null;
 
     const loadout = loadoutFor(weaponDef ? weaponDef.class : 'ar');
 
@@ -418,8 +426,10 @@ class HudImpl implements HudService {
       player,
       weapon,
       weaponDef,
+      deploying,
       secondary,
-      secondaryAmmo: [secondary.magazine, secondary.reserve],
+      secondaryAmmo: secondaryState ? [secondaryState.ammo, secondaryState.reserve] : [secondary.magazine, secondary.reserve],
+      secondaryKey: String(secondaryIndex + 1),
       squad,
       points,
       gadgets: loadout.gadgets,
