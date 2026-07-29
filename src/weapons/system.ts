@@ -20,14 +20,20 @@
 import * as THREE from 'three';
 import {
   Btn,
+  DamageKind,
   FireMode,
+  LAYER_SHOOTABLE,
   Sim,
   Stance,
   TickPhase,
   type AssetRegistry,
   type BootContext,
+  type DamageInfo,
   type EntityId,
+  type ImpactEvent,
   type QualitySettings,
+  type QueryFilter,
+  type RayHit,
   type ShotRequest,
   type TickCtx,
   type TickSystem,
@@ -42,7 +48,34 @@ import { clamp, DEG2RAD, hashInt } from '@/engine/math/curves';
 import { integrateSpring3 } from '@/engine/math/spring';
 import { declareWeaponAssets } from '@/weapons/models/assets';
 import { buildWeaponTable, resolveId } from '@/weapons/defs/index';
+import { makeHit } from '@/weapons/penetration';
+import { MELEE_STRIKE_IMPACT_PHASE, MELEE_SWING_SECONDS } from '@/weapons/viewmodel/anim';
 import { installThrowableProbe, installThrowables, resetThrowables, throwablesInstance } from '@/weapons/throwables';
+
+/**
+ * The melee strike: a rifle-butt swing, short-range and always lethal up
+ * close, exactly like every AAA shooter's knife/buttstroke. THE NUMBERS:
+ *
+ *   RANGE / RADIUS   a swept sphere rather than a ray, because a swing has
+ *                     reach in every direction across the arc, not along one
+ *                     infinitely thin line — a ray would miss a target
+ *                     standing slightly off-centre even though the stock
+ *                     would clearly have connected.
+ *   DAMAGE            deliberately ≥ full health: melee range means the
+ *                     fight is already lost or won, and a "sometimes needs
+ *                     two hits" buttstroke reads as broken rather than as
+ *                     balance. `damage.ts` already treats `DamageKind.Melee`
+ *                     as a decisive kill rather than a down, so this number
+ *                     is the whole mechanic.
+ *   SWING / COOLDOWN  the cooldown is longer than the swing so a mashed key
+ *                     cannot chain hits faster than the animation plays.
+ */
+const MELEE_RANGE = 2.15;
+const MELEE_RADIUS = 0.34;
+const MELEE_DAMAGE = 100;
+const MELEE_COOLDOWN_SECONDS = 0.68;
+/** Nominal kinetic energy of a swung rifle butt, for the impact VFX/audio scale. */
+const MELEE_IMPACT_ENERGY_J = 650;
 
 /** Mutable mirror of the read-only contract struct. Only this file writes it. */
 type MutableWeaponState = { -readonly [K in keyof WeaponState]: WeaponState[K] };
@@ -62,6 +95,12 @@ interface Slot {
   magInPlayed: boolean;
   /** Tick after which the aimPunch spring is allowed to start recovering. */
   recoverAfterTick: number;
+  /** Tick at which the NEXT swing may start — the cooldown gate. */
+  nextMeleeAt: number;
+  /** True between a swing starting and its hit-scan resolving. */
+  meleePending: boolean;
+  /** Tick the pending swing resolves its hit-scan on — see `MELEE_STRIKE_IMPACT_PHASE`. */
+  meleeHitTick: number;
 }
 
 const DEFAULT_WEAPON: WeaponId = 'ar_service';
@@ -82,6 +121,14 @@ class IronWeapons implements WeaponService, TickSystem {
   private readonly tmpEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   private readonly zero = new THREE.Vector3();
   private readonly flashColour = new THREE.Color(1.0, 0.86, 0.62);
+
+  private readonly meleeHit: RayHit = makeHit();
+  /** Reused across every swing this tick; `excludeEntity` rewritten per swing
+   *  so a soldier's own strike cannot hit the arm that threw it. */
+  private readonly meleeFilter: { -readonly [K in keyof QueryFilter]: QueryFilter[K] } = {
+    groups: LAYER_SHOOTABLE,
+    solid: true,
+  };
 
   constructor(private readonly ctx: BootContext) {}
 
@@ -121,6 +168,11 @@ class IronWeapons implements WeaponService, TickSystem {
       existing.reloadIsEmpty = false;
       existing.magInPlayed = false;
       existing.triggerWasDown = false;
+      // A weapon swap mid-swing cancels the buttstroke rather than resolving it
+      // against a stock that is no longer in the shooter's hands.
+      existing.nextMeleeAt = 0;
+      existing.meleePending = false;
+      existing.meleeHitTick = 0;
       return;
     }
     const slot: Slot = {
@@ -134,6 +186,9 @@ class IronWeapons implements WeaponService, TickSystem {
       reloadIsEmpty: false,
       magInPlayed: false,
       recoverAfterTick: 0,
+      nextMeleeAt: 0,
+      meleePending: false,
+      meleeHitTick: 0,
     };
     this.slots.set(entity, slot);
     this.attachOrder.push(entity);
@@ -243,13 +298,28 @@ class IronWeapons implements WeaponService, TickSystem {
     const trigger = slot.triggerOverride ?? (buttons & Btn.Fire) !== 0;
     const wantsAds = slot.adsOverride ?? (buttons & Btn.Ads) !== 0;
 
-    if ((pressed & Btn.Reload) !== 0) this.beginReload(slot, ctx);
+    // The rig's viewmodel clip is SHARED between reload and melee (see
+    // `ViewmodelRig.stepClip`), on the strength of this mutual exclusion: a
+    // reload cannot start while the swing animation is still playing, and (a
+    // few lines down) a swing cannot start mid-reload. Exactly one of the two
+    // is ever live, which is what lets a single "1 − clip.weight" suppression
+    // cover both without the rig needing to know which one it is.
+    const meleeAnimating = ctx.tick - s.lastMeleeTick < MELEE_SWING_SECONDS * Sim.TICK_HZ;
+    if ((pressed & Btn.Reload) !== 0 && !meleeAnimating) this.beginReload(slot, ctx);
     if ((pressed & Btn.FireMode) !== 0) this.cycleFireMode(slot.entity);
+    // Melee is gated off reloading exactly like fire is: a soldier with both
+    // hands busy seating a magazine cannot also swing the weapon. It is NOT
+    // gated by ammo or by the trigger's own state — it is an independent
+    // action, on its own cooldown, same as a real shooter's knife/melee bind.
+    if ((pressed & Btn.Melee) !== 0 && !s.reloading && ctx.tick >= slot.nextMeleeAt) {
+      this.beginMelee(slot, ctx);
+    }
+    if (slot.meleePending && ctx.tick >= slot.meleeHitTick) this.resolveMelee(slot, ctx);
 
     /* ADS blend, at TICK rate. This is the value spread and recoil read; the
      * camera reads the RENDER-rate one from the viewmodel rig, and the two are
      * deliberately different numbers with the same shape. */
-    s.adsWanted = wantsAds && !s.reloading && !(player?.sprinting ?? false);
+    s.adsWanted = wantsAds && !s.reloading && !meleeAnimating && !(player?.sprinting ?? false);
     const adsRate = ctx.dt / Math.max(0.02, def.ads.time);
     s.adsSim = clamp(s.adsSim + (s.adsWanted ? adsRate : -adsRate * 1.35), 0, 1);
 
@@ -453,6 +523,88 @@ class IronWeapons implements WeaponService, TickSystem {
     return out;
   }
 
+  /* ----------------------------------------------------------------- melee -- */
+
+  /**
+   * Start a swing. This tick only schedules it — `resolveMelee` does the
+   * actual hit-scan, at the tick the animation's strike keyframe lands on, so
+   * a lunge always connects (or doesn't) at the moment it visually should.
+   */
+  private beginMelee(slot: Slot, ctx: TickCtx): void {
+    const s = slot.state;
+    s.meleeIndex += 1;
+    s.lastMeleeTick = ctx.tick;
+    slot.meleePending = true;
+    slot.meleeHitTick = ctx.tick + Math.round(MELEE_SWING_SECONDS * MELEE_STRIKE_IMPACT_PHASE * Sim.TICK_HZ);
+    slot.nextMeleeAt = ctx.tick + Math.round(MELEE_COOLDOWN_SECONDS * Sim.TICK_HZ);
+    // The swing plays every time, whether or not it will connect — a knife
+    // that only whooshes on a hit is a dead giveaway that the animation is
+    // reacting to the sim rather than the other way around.
+    ctx.fx.emit('sound', { cue: 'w.melee', position: null });
+  }
+
+  /**
+   * The hit-scan itself: a swept sphere rather than a ray (see the constants'
+   * header comment), against the same `LAYER_SHOOTABLE` group ballistics uses
+   * so a swing and a bullet agree on what counts as a target.
+   */
+  private resolveMelee(slot: Slot, ctx: TickCtx): void {
+    slot.meleePending = false;
+    this.aimBasis(slot.entity, this.tmpOrigin, this.tmpDir);
+    this.meleeFilter.excludeEntity = slot.entity;
+    const connected = ctx.services.physics.sphereCast(
+      this.tmpOrigin,
+      this.tmpDir,
+      MELEE_RADIUS,
+      MELEE_RANGE,
+      this.meleeFilter,
+      this.meleeHit,
+    );
+    if (!connected) return;
+
+    const hit = this.meleeHit;
+    // The same landmark decal/particle/sound path a bullet's impact drives —
+    // reusing it is what makes a buttstroke into stone throw the same chip
+    // burst a round would, and a buttstroke into a soldier throw the same
+    // blood the flesh-surface impact already knows how to draw.
+    const impact: ImpactEvent = {
+      point: hit.point.clone(),
+      normal: hit.normal.clone(),
+      incoming: this.tmpDir.clone(),
+      surface: hit.surface,
+      energyJ: MELEE_IMPACT_ENERGY_J,
+      shooter: slot.entity,
+      target: hit.entity,
+      zone: hit.zone,
+      weapon: slot.state.def,
+      distanceM: hit.distance,
+      penetrated: false,
+      ricochet: false,
+    };
+    ctx.fx.emit('impact', impact);
+    ctx.fx.emit('cameraShake', { trauma: 0.08, frequencyHz: 15 });
+
+    if (hit.entity === (0 as EntityId)) return;
+    const info: DamageInfo = {
+      target: hit.entity,
+      attacker: slot.entity,
+      amount: MELEE_DAMAGE,
+      kind: DamageKind.Melee,
+      zone: hit.zone,
+      point: hit.point.clone(),
+      normal: hit.normal.clone(),
+      direction: this.tmpDir.clone(),
+      surface: hit.surface,
+      // No per-weapon curve applies to melee (`game/damage.ts`'s
+      // `resolveAmount` trusts `amount` outright for every non-bullet kind),
+      // so there is no `WeaponId` to name here — same as an explosion or a fall.
+      weapon: null,
+      energyJ: MELEE_IMPACT_ENERGY_J,
+      penetrated: false,
+    };
+    ctx.sim.emit('damage.applied', info);
+  }
+
   /* ---------------------------------------------------------------- reload -- */
 
   private beginReload(slot: Slot, ctx: TickCtx | null): void {
@@ -513,6 +665,9 @@ class IronWeapons implements WeaponService, TickSystem {
       slot.reloadIsEmpty = false;
       slot.magInPlayed = false;
       slot.recoverAfterTick = 0;
+      slot.nextMeleeAt = 0;
+      slot.meleePending = false;
+      slot.meleeHitTick = 0;
     }
   }
 
@@ -546,6 +701,14 @@ class IronWeapons implements WeaponService, TickSystem {
       s.ammo = empty ? 0 : Math.max(1, Math.round(def.magazine * 0.25));
       s.recoilStep = 0;
     }
+    if (spec.meleePhase !== undefined) {
+      const tick = this.ctx.services.clock.tick;
+      const swingTicks = Math.round(MELEE_SWING_SECONDS * Sim.TICK_HZ);
+      const capture = tick + (spec.framesAhead ?? 0);
+      s.meleeIndex += 1;
+      s.lastMeleeTick = capture - spec.meleePhase * swingTicks;
+      slot.meleePending = false;
+    }
   }
 }
 
@@ -571,6 +734,8 @@ function newState(id: WeaponId, def: Readonly<WeaponDef>): MutableWeaponState {
     aimPunchVelocity: new THREE.Vector3(),
     currentSpreadDeg: def.spread.baseHip,
     heat: 0,
+    meleeIndex: 0,
+    lastMeleeTick: -999,
   };
 }
 
@@ -593,6 +758,8 @@ function resetSlotTo(s: MutableWeaponState, id: WeaponId, def: Readonly<WeaponDe
   s.aimPunchVelocity.set(0, 0, 0);
   s.currentSpreadDeg = def.spread.baseHip;
   s.heat = 0;
+  s.meleeIndex = 0;
+  s.lastMeleeTick = -999;
 }
 
 /**
@@ -622,6 +789,9 @@ export interface ForceSpec {
   /** 0..1 through the reload at capture time. */
   reloadPhase?: number;
   reloadEmpty?: boolean;
+  /** 0..1 through the melee swing at capture time — poses the rig directly,
+   *  same idea as `reloadPhase`, without waiting for the hit-scan tick. */
+  meleePhase?: number;
   /** Frames the harness will render after setup — `ShotSpec.frames`. */
   framesAhead?: number;
 }

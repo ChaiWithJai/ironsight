@@ -1,7 +1,7 @@
 /**
  * WEAPONS's shot file. Owned by WEAPONS and by nobody else.
  *
- * MUST PROVE: hip / ADS / mid-burst / reload viewmodel poses, muzzle flash lighting the world.
+ * MUST PROVE: hip / ADS / mid-burst / reload / melee viewmodel poses, muzzle flash lighting the world.
  *
  * FRAMING. All four are calibrated against `reference/gameplay/bf6_gp_004.jpg`:
  * the weapon enters from the LOWER RIGHT, the optic sits right of and below
@@ -159,6 +159,27 @@ registerShot({
       weapon: 'ar_service',
       reloadPhase: 0.26,
       reloadEmpty: true,
+      framesAhead: 30,
+      ads: false,
+      trigger: false,
+    });
+  },
+});
+
+registerShot({
+  name: 'weapon_melee',
+  description:
+    "The buttstroke's strike frame: the stock thrown forward and down-across, muzzle dropped, " +
+    'support hand half off the handguard — the moment `system.ts` resolves the short-range hit.',
+  frames: 30,
+  setup(ctx) {
+    scene(ctx);
+    // `MELEE_STRIKE_IMPACT_PHASE` (0.42) is the same phase the sim's own
+    // hit-scan fires the swing on, so this is not a hand-posed approximation
+    // of the strike — it is the exact frame the game registers a melee kill.
+    forceWeaponState({
+      weapon: 'ar_service',
+      meleePhase: 0.42,
       framesAhead: 30,
       ads: false,
       trigger: false,

@@ -430,6 +430,54 @@ export const synthShell: CueSynth = (fs, variation, seed) => {
   return out;
 };
 
+/**
+ * The melee swing: a rifle-butt strike, not a blade — the whole repo is one
+ * soldier's kit and nobody is issued a knife. Two layers, same as a real
+ * strike: the WHOOSH of the stock displacing air on the way in, rising in
+ * pitch as the swing accelerates, then a single hard, well-damped THUMP where
+ * a strike would land (buttstock into a body or a wall) whether or not this
+ * particular swing actually connects — the cue is the SWING, not the hit; the
+ * surface-keyed `i.*` cue layered on top by the impact path is what tells the
+ * ear what, if anything, it hit.
+ */
+export const synthMelee: CueSynth = (fs, variation, seed) => {
+  const u = makeUniform(seed ^ (variation * 746497));
+  const out = new Float32Array(Math.ceil(0.34 * fs));
+  // The whoosh: an upward sweep, because a swing accelerates through impact
+  // rather than arriving at constant speed.
+  layerSweep(out, fs, {
+    at: 0,
+    gainDb: -11,
+    hz0: 260 * jitter(u, 0.1),
+    hz1: 620 * jitter(u, 0.08),
+    decay: 0.14,
+    attack: 0.01,
+    bend: 0.7,
+  });
+  layerNoiseBand(
+    out,
+    fs,
+    { at: 0.01, gainDb: -16, hz0: 2200, hz1: 900, q: 0.8, attack: 0.02, decay: 0.1, lowpassHz: 5000 },
+    seed ^ 30,
+  );
+  // The strike, timed to the end of the swing: heavy, dead, almost no ring —
+  // wood and steel meeting flesh or masonry, not a bell.
+  layerModes(
+    out,
+    fs,
+    0.145 * jitter(u, 0.06),
+    0.0022,
+    [
+      { hz: 210 * jitter(u, 0.08), q: 3.2, decay: 0.05, gainDb: -3 },
+      { hz: 640 * jitter(u, 0.07), q: 5, decay: 0.03, gainDb: -8 },
+      { hz: 1750 * jitter(u, 0.09), q: 8, decay: 0.014, gainDb: -14 },
+    ],
+    seed ^ 31,
+  );
+  normalise(out, 0.82);
+  return out;
+};
+
 /* ============================================================================
  * Ballistics
  * ========================================================================= */

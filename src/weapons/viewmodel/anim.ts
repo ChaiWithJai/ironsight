@@ -156,6 +156,48 @@ const INSPECT: readonly Key[] = [
 ];
 
 /**
+ * The melee strike: a rifle-butt swing, not a knife pull — nobody in this
+ * loadout carries a blade, so the "melee" every shooter has is the buttstroke
+ * every soldier's weapon can already throw.
+ *
+ * Three beats, same as the reload's shape: WIND UP (the stock comes off the
+ * shoulder and draws back and down, out of the way of the sight), STRIKE (a
+ * fast punch forward and across, muzzle dropping so the heel of the stock
+ * leads), RECOVER (back to the hip, slower than the strike — a swing this
+ * size does not un-happen instantly). `t: 0.42` is the strike's peak and is
+ * where `system.ts` resolves the hit — the two must move together or the
+ * animation and the sim-side lunge visibly disagree about when contact
+ * happens.
+ */
+const MELEE_STRIKE: readonly Key[] = [
+  { t: 0.00, pos: [0, 0, 0], rot: [0, 0, 0], mag: 0, charge: 0, hand: 0 },
+  // Wind up: drawn back toward the shoulder, rolled so the butt clears the sight.
+  { t: 0.22, pos: [0.028, -0.038, 0.052], rot: [-0.12, -0.22, 0.16], mag: 0, charge: 0, hand: 0.4 },
+  // THE STRIKE. Thrown forward and down-across, fast — this is the frame the
+  // sim's short-range check fires on.
+  { t: 0.42, pos: [-0.034, -0.082, -0.118], rot: [0.34, 0.31, -0.22], mag: 0, charge: 0, hand: 0.65 },
+  // Follow-through, a beat longer than the strike itself.
+  { t: 0.58, pos: [-0.022, -0.058, -0.07], rot: [0.2, 0.2, -0.12], mag: 0, charge: 0, hand: 0.4 },
+  { t: 1.00, pos: [0, 0, 0], rot: [0, 0, 0], mag: 0, charge: 0, hand: 0 },
+];
+
+/** The phase at which `MELEE_STRIKE` reaches contact — `system.ts`'s hit-scan
+ *  timing shares this constant so the sim and the view can never drift apart. */
+export const MELEE_STRIKE_IMPACT_PHASE = 0.42;
+
+/**
+ * Total swing duration, seconds. Shared by `system.ts` (which turns it into a
+ * tick offset for `nextMeleeAt`/`meleeHitTick`) and `rig.ts` (which turns it
+ * into the clip's playback rate) — ONE number, so the animation and the
+ * cooldown can never disagree about how long a swing takes.
+ */
+export const MELEE_SWING_SECONDS = 0.5;
+
+export function sampleMelee(phase: number, out: ClipPose): ClipPose {
+  return sample(MELEE_STRIKE, phase, out);
+}
+
+/**
  * Sample a key table at `phase` (0..1) into `out`.
  *
  * Pose channels use `smoothstep` between keys: velocity is zero AT each key,

@@ -19,6 +19,7 @@ import {
   synthDryFire,
   synthMagIn,
   synthMagOut,
+  synthMelee,
   synthShell,
   synthWeaponDistant,
   synthWeaponTail,
@@ -132,6 +133,7 @@ export const LIBRARY: Readonly<Record<SoundId, CueRecipe>> = {
   'w.bolt': { synth: synthBolt, variations: 3, priority: 6, bus: 'weapons', refDb: -12, maxDistance: 30, maxInstances: 3, cost: 2 },
   'w.ads': { synth: synthAds, variations: 3, priority: 4, bus: 'weapons', refDb: -19, maxDistance: 8, maxInstances: 2, cost: 1 },
   'w.shell': { synth: synthShell, variations: 4, priority: 2, bus: 'sfx', refDb: -20, maxDistance: 18, maxInstances: 4, cost: 2 },
+  'w.melee': { synth: synthMelee, variations: 3, priority: 8, bus: 'weapons', refDb: -6, maxDistance: 30, maxInstances: 3, cost: 2 },
 
   'b.whizby': { synth: synthWhizby, variations: 4, priority: 7, bus: 'sfx', refDb: -6, maxDistance: 14, maxInstances: 4, cost: 2 },
   // The crack is the round's own shock wave, generated AT the listener, so it

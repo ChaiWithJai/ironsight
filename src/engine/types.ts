@@ -3046,6 +3046,15 @@ export interface WeaponState {
   readonly aimPunchVelocity: Vec3;
   readonly currentSpreadDeg: number;
   readonly heat: number;
+  /**
+   * Incremented once per melee swing, the same "index that only moves on a new
+   * event" shape `shotIndex` uses for recoil — the rig detects a new swing by
+   * comparing this against its own last-seen value rather than owning a timer,
+   * so a swing posed directly by the harness (§8.1) animates correctly too.
+   */
+  readonly meleeIndex: number;
+  /** Tick of the most recent swing. Drives the clip phase, same as `reloadEndTick`. */
+  readonly lastMeleeTick: number;
 }
 
 /** RENDER-side feel state. Frame rate. Purely cosmetic. */
@@ -3233,7 +3242,7 @@ export interface ViewmodelRig {
   update(ctx: FrameCtx, sim: Readonly<WeaponState>, def: Readonly<WeaponDef>): Readonly<WeaponFeelState>;
   muzzleWorld(out: Vec3): Vec3;
   setVisible(visible: boolean): void;
-  /** Harness hook: 'idle' | 'ads' | 'sprint' | 'firing' | 'reload' | 'inspect'. */
+  /** Harness hook: 'idle' | 'ads' | 'sprint' | 'firing' | 'reload' | 'inspect' | 'melee'. */
   forcePose(pose: string): void;
 }
 
@@ -3350,6 +3359,7 @@ export type SoundId =
   | 'w.bolt'
   | 'w.ads'
   | 'w.shell'
+  | 'w.melee'
   | 'b.whizby'
   | 'b.crack'
   | 'i.stone'
