@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
+import { DEFAULT_WORLD_SEED } from '../../src/engine/world-profile.ts';
 
 // Netlify's build environment injects the production serverless driver. Force
 // the server driver before loading the SDK so this suite stays on its isolated
@@ -20,6 +21,10 @@ const profile = {
   civilization: 'City of Many Rivers',
   sigil: '☀',
   era: 'The Dawn Accord',
+  // The world's generating seed round-trips through the profile jsonb. Absent
+  // input defaults to the shipped world's seed, so the resolved record carries
+  // it and the deepEqual below must include it too.
+  seed: DEFAULT_WORLD_SEED,
   places: {
     ALPHA: 'Sun Assembly',
     BRAVO: 'Moon Quay',
