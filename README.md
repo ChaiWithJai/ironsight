@@ -36,6 +36,15 @@ canvas to lock the pointer**. `Esc` releases it.
 > Nothing to configure for Node — the scripts route through `tools/with-node.sh`, which finds a
 > Node ≥ 20.19 itself. Override with `IRONSIGHT_NODE_BIN`.
 
+### Learn it — the JAMStack academy
+
+The repo also ships **The Chronicle of Harbour Reach**, an interactive teaching site at `/learn/`
+(same dev server, second Vite entry). Five chapters teach the JAMStack — JavaScript, APIs, Markup —
+by building a civilization from a single seed: deterministic randomness, procedural terrain,
+tick-stepped agents, build-time data, and the entropy-containing test loop, each as a live seeded
+demo backed by the engine's own infrastructure. See [`docs/TEACHING.md`](docs/TEACHING.md) for the
+why and the roadmap. Capture its deterministic screenshots with `npm run learn:shots`.
+
 ### Controls
 
 | | |
@@ -230,6 +239,7 @@ the measurements those scores were taken against.
 | [`docs/LOOK_SPEC.md`](docs/LOOK_SPEC.md) | Art-direction target as implementable numbers. |
 | [`docs/HUD_SPEC.md`](docs/HUD_SPEC.md) | The HUD, element by element. |
 | [`docs/AAA_RUBRIC.md`](docs/AAA_RUBRIC.md) | How frames are scored, and why the scores drift. |
+| [`docs/TEACHING.md`](docs/TEACHING.md) | The `/learn/` academy: teaching the JAMStack through worldbuilding. |
 
 ---
 

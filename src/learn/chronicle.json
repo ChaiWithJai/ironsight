@@ -1,0 +1,42 @@
+{
+  "civilization": "Harbour Reach",
+  "motto": "Everything in the frame was computed. Nothing was downloaded.",
+  "compiled": "at build time — this object was folded into the JavaScript bundle by Vite; no request fetched it",
+  "eras": [
+    {
+      "sigil": "✶",
+      "name": "The Seeding",
+      "span": "before tick 0",
+      "story": "A single integer is spoken, and from it every future draw of fate is fixed: bullet spread, wind phase, the wear on every wall. The seed is small enough to write on a coin, and the coin is the whole world.",
+      "source": "src/engine/rng.ts — PCG32, the only randomness in the repository"
+    },
+    {
+      "sigil": "⛰",
+      "name": "The Shaping",
+      "span": "bake, phase 3 of 16",
+      "story": "The land rises as layered noise, then sixty-four seasons of rain are simulated in a single breath — hydraulic erosion carving valleys on the GPU before a single frame is drawn.",
+      "source": "src/world/terrain — fBm heightfield + erosion ping-pong"
+    },
+    {
+      "sigil": "⚒",
+      "name": "The Raising",
+      "span": "bake, phases 7–10",
+      "story": "Markets, cranes, the old fort — every wall lathed and lofted from arithmetic in eight parallel workshops. No mesh was ever imported; the town is an opinion held by code.",
+      "source": "src/level — kit pieces, landmarks, dressing"
+    },
+    {
+      "sigil": "𐂃",
+      "name": "The Peopling",
+      "span": "tick 0 onward",
+      "story": "Twenty-four souls wake with the same body of laws as the player: they perceive, they choose, and they express their choices in the very same PlayerIntent the human's hands produce. Character is architecture.",
+      "source": "src/ai — perception, utility scoring, intent"
+    },
+    {
+      "sigil": "⚑",
+      "name": "The Contest",
+      "span": "every match",
+      "story": "Three places — the market, the harbour, the fort — and two banners contending for them. History here is not stored on any server; it is recomputed, identically, wherever the chronicle is opened.",
+      "source": "src/game/conquest.ts — capture logic, ticket bleed"
+    }
+  ]
+}
