@@ -2575,6 +2575,16 @@ export interface StaticColliderDef {
    */
   readonly visuals?: readonly DestructibleVisual[];
   readonly occluder?: boolean;
+  /**
+   * APPENDED BY LEVEL. Present and true ⇒ this collider is CIRCULATION, not
+   * cover: a stair flight, ramp or landing that a capture point's route runs
+   * over. `finaliseColliders`'s whole-level tagging pass must never consider
+   * it destructible, regardless of what its surface/volume/height would
+   * otherwise qualify for — a thoroughfare with a health bar is a route that
+   * evaporates under fire, and unlike a wall coming down it does not open a
+   * new sightline, it just drops the player who was standing on it.
+   */
+  readonly structural?: boolean;
 }
 
 /**

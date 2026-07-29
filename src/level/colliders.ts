@@ -31,7 +31,11 @@
  * light infill panels between structural piers. Load-bearing masonry, the fort
  * curtain, the quay, the cranes and the hull of the freighter are all permanent
  * — not because they could not be broken, but because a map where the player can
- * delete the level geometry is a map with no level design left in it.
+ * delete the level geometry is a map with no level design left in it. Stairs,
+ * ramps and landings are permanent for the same reason from the other
+ * direction: they are not cover at all, so `classifyFor` never gets asked —
+ * `StaticColliderDef.structural` rules them out before it looks at surface or
+ * volume. See `src/level/kit/detail.ts`'s `stairs()`.
  */
 import * as THREE from 'three';
 import {
@@ -303,6 +307,36 @@ interface ClassTemplate {
  * a sandbag wall absorbs hundreds of rounds and dies to one rocket; a market
  * stall falls over if you look at it; a jersey barrier shrugs off small arms
  * entirely (the multiplier does the work, not the health).
+ *
+ * THE FRAG BUDGET, AND WHY concrete/masonry WERE RETUNED.
+ * `classifyFor` below admits anything up to 12 m3 as "cover, not structure" —
+ * that is the whole level's ceiling, shared by every class, not a number
+ * either of these two chose for themselves. At the OLD numbers (concrete 1700
+ * HP/m3 x4.2, masonry 1150 HP/m3 x4.8) a piece anywhere near that ceiling took
+ * 6 and 4 M67 frags respectively to fully collapse — and a player who has
+ * thrown a stack of frags at a wall that is still standing reads that as
+ * broken, not as "very tough cover", because nothing on screen told them how
+ * much health was left. `src/weapons/defs/frag-grenade.ts` documents the same
+ * arithmetic from the grenade's side; keep the two in sync if either changes.
+ *
+ * The fix moves both knobs together rather than just lowering health, because
+ * health alone is what makes a jersey barrier shrug off small arms (see the
+ * paragraph above) and gutting it to hit a frag target would undo that. So
+ * `explosiveMultiplier` — which only ever applies to `DamageKind.Explosion` —
+ * absorbs most of the correction, healthPerM3 only enough to keep concrete
+ * strictly tougher than masonry against bullets, and both multipliers stay
+ * below stucco's and wood's, preserving "denser breaks harder per unit HP":
+ *
+ *   concrete 1100 HP/m3 x5.0 -> 4500 dmg/frag, one-frag breach up to 4.1 m3,
+ *            the 12 m3 ceiling takes AT MOST 3 frags (13 200 HP / 4500).
+ *   masonry  1050 HP/m3 x5.2 -> 4680 dmg/frag, one-frag breach up to 4.5 m3,
+ *            the 12 m3 ceiling takes AT MOST 3 frags (12 600 HP / 4680).
+ *
+ * THIS IS THE DECISION: three frags is the intended worst case for any
+ * masonry or concrete destructible in HARBOUR REACH, at any volume the
+ * budget allows. Anything that takes more is a tuning regression, not a
+ * design choice — re-run this comment's arithmetic before changing either
+ * number.
  */
 const CLASSES: Record<string, ClassTemplate> = {
   sandbag: {
@@ -310,12 +344,12 @@ const CLASSES: Record<string, ClassTemplate> = {
     explosiveMultiplier: 3.4, debrisLifetime: 22, blocksLosWhenIntact: true, coverValue: 0.9,
   },
   concrete: {
-    material: 'concrete', fracture: 'concrete', healthPerM3: 1700, chipThreshold: 90,
-    explosiveMultiplier: 4.2, debrisLifetime: 30, blocksLosWhenIntact: true, coverValue: 0.95,
+    material: 'concrete', fracture: 'concrete', healthPerM3: 1100, chipThreshold: 90,
+    explosiveMultiplier: 5.0, debrisLifetime: 30, blocksLosWhenIntact: true, coverValue: 0.95,
   },
   masonry: {
-    material: 'brick', fracture: 'brick', healthPerM3: 1150, chipThreshold: 55,
-    explosiveMultiplier: 4.8, debrisLifetime: 26, blocksLosWhenIntact: true, coverValue: 0.85,
+    material: 'brick', fracture: 'brick', healthPerM3: 1050, chipThreshold: 55,
+    explosiveMultiplier: 5.2, debrisLifetime: 26, blocksLosWhenIntact: true, coverValue: 0.85,
   },
   stucco: {
     material: 'stucco', fracture: 'stucco', healthPerM3: 620, chipThreshold: 28,
@@ -401,6 +435,12 @@ function silhouetteArea(def: StaticColliderDef): number {
 }
 
 function classifyFor(def: StaticColliderDef): ClassTemplate | null {
+  // Circulation is never cover. A stair flight tagged destructible reads as a
+  // wall to the whole-level pass below (it is a shallow box well inside the
+  // volume/height budget of a parapet) but breaching it does not open a
+  // sightline — it deletes the route a capture point's fight actually needs,
+  // and drops whoever is standing on it through the floor. See `structural`.
+  if (def.structural) return null;
   // Only props and hand-placed static cover are ever destructible; the group is
   // the first filter because it is the one the emitters already set correctly.
   if (def.group !== CollisionGroup.StaticGeo && def.group !== CollisionGroup.Prop) return null;
