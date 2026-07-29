@@ -26,3 +26,136 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run verify
+
+  # P0 staging gate (docs/NETLIFY_RUNBOOK.md "Release gates" #1): a feature PR
+  # must pass Verify *and* browser acceptance against its own Deploy Preview
+  # before it can merge. This job waits for the staging project's per-PR
+  # preview at its deterministic Netlify URL, then drives the real forge →
+  # publish → play → URL-fallback flow with Playwright (tools/netlify-smoke.mjs).
+  #
+  # Requires the repository variable NETLIFY_SITE_NAME (the staging project's
+  # Netlify slug, e.g. "ironsight-staging" per docs/adr/0001-fullstack-netlify.md).
+  # It is non-secret — it is the public preview subdomain. Set it with:
+  #   gh variable set NETLIFY_SITE_NAME --body ironsight-staging
+  # Until it is set, this job fails fast with an actionable error instead of
+  # silently skipping the gate.
+  browser-acceptance:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: browser-acceptance-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Wait for the Deploy Preview
+        id: preview
+        env:
+          NETLIFY_SITE_NAME: ${{ vars.NETLIFY_SITE_NAME }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NETLIFY_SITE_NAME:-}" ]; then
+            echo "::error::Repository variable NETLIFY_SITE_NAME is not set. Set it to the staging Netlify site slug (see docs/NETLIFY_RUNBOOK.md) so this gate can locate the Deploy Preview."
+            exit 1
+          fi
+          url="https://deploy-preview-${PR_NUMBER}--${NETLIFY_SITE_NAME}.netlify.app"
+          echo "Waiting for ${url} ..."
+          attempt=0
+          until [ "${attempt}" -ge 60 ]; do
+            status=$(curl -s -o /dev/null -w '%{http_code}' "${url}/" || echo "000")
+            if [ "${status}" = "200" ]; then
+              echo "Preview is live after $((attempt * 10))s."
+              echo "url=${url}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            attempt=$((attempt + 1))
+            sleep 10
+          done
+          echo "::error::Timed out after 10 minutes waiting for ${url}. Confirm the staging Deploy Preview built successfully."
+          exit 1
+
+      - name: Browser acceptance against the Deploy Preview
+        env:
+          IRONSIGHT_PREVIEW_URL: ${{ steps.preview.outputs.url }}
+        run: npm run smoke:preview
+
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-acceptance-pr-${{ github.event.pull_request.number }}
+          path: tools/teaching/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # docs/NETLIFY_RUNBOOK.md "Release gates" #2: once the exact reviewed commit
+  # merges to staging, verify the stable staging URL and run the full teaching
+  # smoke (the deeper mission/combat drill, distinct from the lighter forge/
+  # publish/fallback acceptance above) against that origin.
+  #
+  # Requires the repository variable IRONSIGHT_STAGING_URL (the stable staging
+  # origin — non-secret per docs/NETLIFY_RUNBOOK.md). Set it with:
+  #   gh variable set IRONSIGHT_STAGING_URL --body https://<staging-origin>
+  staging-full-gate:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Wait for the staging origin to answer
+        env:
+          IRONSIGHT_STAGING_URL: ${{ vars.IRONSIGHT_STAGING_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${IRONSIGHT_STAGING_URL:-}" ]; then
+            echo "::error::Repository variable IRONSIGHT_STAGING_URL is not set. Set it to the stable staging origin (see docs/NETLIFY_RUNBOOK.md)."
+            exit 1
+          fi
+          attempt=0
+          until [ "${attempt}" -ge 60 ]; do
+            status=$(curl -s -o /dev/null -w '%{http_code}' "${IRONSIGHT_STAGING_URL}/" || echo "000")
+            if [ "${status}" = "200" ]; then
+              echo "Staging is answering after $((attempt * 10))s."
+              exit 0
+            fi
+            attempt=$((attempt + 1))
+            sleep 10
+          done
+          echo "::error::Timed out after 10 minutes waiting for ${IRONSIGHT_STAGING_URL}. The staging deploy of this exact commit may not have finished."
+          exit 1
+
+      - name: Browser acceptance against staging
+        env:
+          IRONSIGHT_STAGING_URL: ${{ vars.IRONSIGHT_STAGING_URL }}
+        run: npm run smoke:staging
+
+      - name: Full teaching smoke against staging
+        env:
+          IRONSIGHT_STAGING_URL: ${{ vars.IRONSIGHT_STAGING_URL }}
+        run: npm run teach:smoke -- --base-url "$IRONSIGHT_STAGING_URL"
+
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-full-gate-${{ github.sha }}
+          path: tools/teaching/
+          if-no-files-found: ignore
+          retention-days: 14
