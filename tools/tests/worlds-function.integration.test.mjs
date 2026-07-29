@@ -22,6 +22,9 @@ const profile = {
 };
 
 before(async () => {
+  // Netlify's build environment injects the production serverless driver.
+  // This test must remain isolated on its in-memory Postgres-compatible server.
+  delete process.env.NETLIFY_DB_DRIVER;
   localDatabase = new NetlifyDB({ logger: () => {} });
   const connectionString = await localDatabase.start();
   await localDatabase.applyMigrations('./netlify/database/migrations');
