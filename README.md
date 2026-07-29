@@ -5,7 +5,7 @@ cover — aiming at the visual and tactile bar of a modern AAA military shooter.
 
 ![IRONSIGHT — HARBOUR REACH](docs/media/hero.jpg)
 
-**▶ Play it in your browser: [ironsight-tan.vercel.app](https://ironsight-tan.vercel.app)** — desktop
+**▶ Play it in your browser: [ironsight-958.netlify.app](https://ironsight-958.netlify.app)** — desktop
 Chrome or Edge, and give it ~30–60 s to bake on first load.
 
 **Everything in that frame is generated procedurally in code at load time.** No textures, no meshes,

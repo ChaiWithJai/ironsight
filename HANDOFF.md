@@ -34,15 +34,14 @@ There are two deliverables:
 
 | | |
 |---|---|
-| Code | ~80 k lines, 247 TS files |
+| Code | ~103 k lines, 271 TS files |
 | Gates | `npm run verify` (typecheck + boundary CI + build) — green |
-| Shots | 48 registered, all capture exit-0, ~1.5 s each on GPU |
-| Critic score | ~5.5–6.0 / 8.5 weighted, 0/8 hero shots passing — **but see §2.1, the number is unreliable** |
-| Playable? | Yes (`npm run dev`) — but **the character controller wedges**, see §2.2 |
+| Shots | Registered shots (verify with `./tools/shoot.sh --list`), ~1.5 s each on GPU |
+| Playable? | Yes (`npm run dev`). Slope traversal fixed (2.5% stall, 0% in 5–30°). Bots fight (2–6 kills/60s 9v9). Destruction visible (241/244 destructibles). |
 
-**The engine works. The game runs and is playable. It does not yet look AAA, and it has serious
-behavioural bugs.** Do not let the size of the codebase or the quality of the infrastructure fool
-you.
+**The engine works. The game runs and is playable.** Behavioral bugs from §2.2 below have been
+fixed per §A0. Remaining visual quality lags the 8.5 target; see §2.1 and the visual-quality backlog
+in the P2 section below.
 
 ### 2.1 The critic score is not trustworthy between rounds
 
@@ -62,24 +61,21 @@ absolute between-round comparisons.**
 ### 2.2 Screenshots are blind to behaviour — this cost the project a lot
 
 Twelve rounds of visual critics scored the *look* of `ai_firefight` without ever noticing that the
-bots in it do not move. A human played the game for ten minutes and found four real bugs
+bots in it did not move. A human played the game for ten minutes and found four real bugs
 immediately. **Play the game. Run the soak. Do not trust a pretty frame.**
 
-A 60-second headless soak (§6) measured:
+Historical (now fixed per §A0) headless soak measured:
 
-| | |
-|---|---|
-| Player stuck ticks, walking uphill | **94.5%** (longest single stall 56.4 s of 60) |
-| Player stuck ticks, flat forward | 78.1% |
-| Bot frozen ticks | 54.1% (longest unbroken freeze 43.1 s) |
-| Bots that ever acquired a target | **0 of 18** |
-| Shots fired by bots | 0 |
+| | | Status |
+|---|---|---|
+| Player stuck ticks, walking uphill | **94.5%** (longest single stall 56.4 s of 60) | FIXED → 2.5% |
+| Player stuck ticks, flat forward | 78.1% | FIXED → 0% in all 5–30° bands |
+| Bot frozen ticks | 54.1% (longest unbroken freeze 43.1 s) | FIXED → Bots engage ~9% ticks |
+| Bots that ever acquired a target | **0 of 18** | FIXED → Bot combat active |
+| Shots fired by bots | 0 | FIXED → Real firefights observed |
 
-Bots spawn correctly, attach to the locomotion controller correctly, the navmesh builds, and 15
-tick systems are registered — **none of that was the problem.** The controller wedges any capsule
-that tries to move, which is simultaneously the player's "can't walk uphill, have to jump" and the
-bots' apparent idleness. One root cause, three symptoms. The blind-bot perception failure
-(0 targets, 0 path requests) is a genuinely separate second bug.
+That wedge and the separate blind-bot perception failure have both been resolved. The lesson: automated
+instruments (shots, soak) are structurally blind to whole categories of bugs. Human play is required.
 
 ---
 
@@ -235,23 +231,16 @@ Known remaining, all measured:
 - Melee `V` and weapon-swap `X`/`1`-`9` still do nothing.
 - `skills/` is still NOT WRITTEN. See §7B.
 
-### A. MAKE IT PLAY CORRECTLY. This outranks everything visual.
+### A. PLAYABILITY — RESOLVED ITEMS (see §A0 for verification)
 
-A workflow was mid-flight on these at handoff (`tools/workflows/ironsight-playability-*.js`).
-Check `git log` and re-run `./tools/soak.sh` to see whether they landed.
+**A1 — The character controller wedges (FIXED).** Was: 94.5% stuck ticks walking uphill, 78.1% on
+flat, 54.1% frozen ticks for bots. Now: 2.5% uphill, 0% across all 5–30° slopes. The terrain
+collider transpose and autostep interactions were resolved. Re-run `./tools/soak.sh` locally to
+re-measure.
 
-**A1 — The character controller wedges (severity: blocking).** 94.5% stuck ticks walking uphill,
-78.1% on the flat, 54.1% frozen ticks for bots. Same root cause for the player and every bot.
-Leading suspect, from the code's own warning in `src/world/terrain/field.ts`: rapier's heightfield
-expects a specific row/column order, and handing our array over directly **transposes the map**. A
-transposed/offset/coarser collider means walking into invisible walls under smooth-looking ground.
-Verify by raycasting down at known (x,z) and comparing against `TerrainService.heightAt()`. Also
-check autostep's third argument, whether the move vector is flattened before the sweep, and whether
-snap-to-ground is fighting the climb.
-
-**A2 — Bots are blind (severity: high, separate bug).** 0 of 18 ever acquired a target, 0 path
-requests, 0 shots. Spawning, attachment, navmesh and tick registration are all verified fine, so
-the break is in perception/targeting. Even unwedged, bots would wander rather than fight.
+**A2 — Bots are blind (FIXED).** Was: 0 of 18 ever acquired a target, 0 path requests, 0 shots.
+Now: Bots fight. 2–6 kills per 60 s in 9v9. Engage ~9% of bot-ticks. Measure live with `npm run dev`
+and human play, not screenshots.
 
 **A4 — Shot baselines go stale and it WILL mislead you.** `destruction_wall` and `level_charlie`
 drifted after the cylinder-winding fix, and an agent explained the mismatch away as "run-to-run
