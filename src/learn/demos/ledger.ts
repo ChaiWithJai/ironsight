@@ -25,10 +25,10 @@ export const ledgerDemo: Demo = (root, ctx) => {
   root.innerHTML = `
     <div class="era-track">${cards}</div>
     <div class="controls">
-      <button id="raw-toggle">show the raw ledger (JSON)</button>
+      <button id="raw-toggle" type="button" aria-expanded="false" aria-controls="raw">show the raw ledger (JSON)</button>
       <span>imported with <code>import chronicle from './chronicle.json'</code> — resolved at build time</span>
     </div>
-    <pre id="raw" style="display:none"><code></code></pre>
+    <pre id="raw" hidden><code></code></pre>
   `;
 
   const pre = root.querySelector<HTMLPreElement>('#raw')!;
@@ -36,9 +36,10 @@ export const ledgerDemo: Demo = (root, ctx) => {
   const btn = root.querySelector<HTMLButtonElement>('#raw-toggle')!;
   ctx.report({ rawVisible: false });
   btn.addEventListener('click', () => {
-    const showing = pre.style.display !== 'none';
-    pre.style.display = showing ? 'none' : 'block';
+    const showing = !pre.hidden;
+    pre.hidden = showing;
     btn.textContent = showing ? 'show the raw ledger (JSON)' : 'hide the raw ledger';
+    btn.setAttribute('aria-expanded', String(!showing));
     ctx.report({ rawVisible: !showing });
   });
 };

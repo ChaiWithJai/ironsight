@@ -112,14 +112,14 @@ class Sim {
 
 export const peopleDemo: Demo = (root, ctx) => {
   root.innerHTML = `
-    <canvas id="map" width="${W}" height="${H}"></canvas>
-    <div class="controls">
-      <label>seed <input id="seed-in" type="number" value="${ctx.seed}" /></label>
-      <button id="season">advance a season (+${SEASON} ticks)</button>
-      <button id="auto">${ctx.frozen ? 'autoplay (off in frozen mode)' : 'autoplay'}</button>
-      <button id="rebirth">rebirth ↺</button>
+    <canvas id="map" width="${W}" height="${H}" role="img" aria-label="Twelve villagers wandering the land in search of fertile ground" aria-describedby="stats"></canvas>
+    <div class="controls" role="group" aria-label="Settlement simulation controls">
+      <label>seed <input id="seed-in" type="number" value="${ctx.seed}" aria-label="World seed" /></label>
+      <button id="season" type="button">advance a season (+${SEASON} ticks)</button>
+      <button id="auto" type="button" aria-pressed="false" ${ctx.frozen ? 'disabled aria-disabled="true"' : ''}>${ctx.frozen ? 'autoplay (off in frozen mode)' : 'autoplay'}</button>
+      <button id="rebirth" type="button">rebirth ↺</button>
     </div>
-    <div class="readout" id="stats"></div>
+    <div class="readout" id="stats" role="status" aria-live="polite"></div>
   `;
 
   const canvas = root.querySelector<HTMLCanvasElement>('#map')!;
@@ -199,6 +199,11 @@ export const peopleDemo: Demo = (root, ctx) => {
     interacted = true;
     playing = !playing;
     autoBtn.classList.toggle('active', playing);
+    autoBtn.setAttribute('aria-pressed', String(playing));
+    // While autoplay runs, the stats line updates every few frames; keeping it
+    // a live region then would flood a screen reader with chatter. Restore the
+    // live announcement once the sim is paused or stepped by hand.
+    stats.setAttribute('aria-live', playing ? 'off' : 'polite');
     if (playing) raf = requestAnimationFrame(loop);
     else cancelAnimationFrame(raf);
   });

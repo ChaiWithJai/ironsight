@@ -66,11 +66,11 @@ const RITES: Rite[] = [
 
 export const gateDemo: Demo = (root, ctx) => {
   root.innerHTML = `
-    <div class="gate-list" id="gate-list">
+    <div class="gate-list" id="gate-list" role="list">
       ${RITES.map(
         (rite) => `
-        <div class="gate pending">
-          <div class="verdict">WAIT</div>
+        <div class="gate pending" role="listitem">
+          <div class="verdict"><span class="sr-only">Status: </span>WAIT</div>
           <div>
             <div class="what">${rite.name}</div>
             <div class="how">${rite.how}</div>
@@ -78,8 +78,8 @@ export const gateDemo: Demo = (root, ctx) => {
         </div>`,
       ).join('')}
     </div>
-    <div class="controls"><button id="run-gates">run the three rituals</button></div>
-    <div class="readout" id="gate-readout">The verdicts are waiting for you, not prewritten.</div>
+    <div class="controls"><button id="run-gates" type="button">run the three rituals</button></div>
+    <div class="readout" id="gate-readout" role="status" aria-live="polite">The verdicts are waiting for you, not prewritten.</div>
   `;
   ctx.report({ gateRun: false, passed: 0, total: RITES.length });
 
@@ -88,8 +88,8 @@ export const gateDemo: Demo = (root, ctx) => {
     root.querySelector('#gate-list')!.innerHTML = results
       .map(
         ({ rite, result }) => `
-        <div class="gate">
-          <div class="verdict ${result.pass ? 'pass' : 'fail'}">${result.pass ? 'PASS' : 'FAIL'}</div>
+        <div class="gate" role="listitem">
+          <div class="verdict ${result.pass ? 'pass' : 'fail'}"><span class="sr-only">Status: </span>${result.pass ? 'PASS' : 'FAIL'}</div>
           <div>
             <div class="what">${rite.name}</div>
             <div class="how">${rite.how}</div>

@@ -43,26 +43,29 @@ mount.innerHTML = `
   <div class="forge-grid">
     <section class="workbench" aria-labelledby="workbench-title">
       <p class="kicker">Create · Bloom level 6</p>
-      <h2 id="workbench-title">Give computation a culture</h2>
+      <h2 id="workbench-title" tabindex="-1">Give computation a culture</h2>
       <p class="lede">Change all four kinds of meaning. JavaScript validates the record, the browser URL is the API, and semantic markup makes it usable. Your link boots the real game.</p>
-      <form id="world-form">
+      <form id="world-form" novalidate>
         <label>
           <span>Civilization <small>identity</small></span>
-          <input name="civilization" maxlength="24" required />
+          <input name="civilization" maxlength="24" required aria-describedby="error-civilization" />
+          <span class="field-error" id="error-civilization" role="alert"></span>
         </label>
         <label class="sigil-field">
           <span>Sigil <small>symbol</small></span>
-          <input name="sigil" maxlength="8" required />
+          <input name="sigil" maxlength="8" required aria-describedby="error-sigil" />
+          <span class="field-error" id="error-sigil" role="alert"></span>
         </label>
         <label>
           <span>Era <small>time</small></span>
-          <input name="era" maxlength="48" required />
+          <input name="era" maxlength="48" required aria-describedby="error-era" />
+          <span class="field-error" id="error-era" role="alert"></span>
         </label>
         <fieldset>
           <legend>Named places</legend>
-          <label><span>Alpha</span><input name="alpha" maxlength="32" required /></label>
-          <label><span>Bravo</span><input name="bravo" maxlength="32" required /></label>
-          <label><span>Charlie</span><input name="charlie" maxlength="32" required /></label>
+          <label><span>Alpha</span><input name="alpha" maxlength="32" required aria-describedby="error-alpha" /><span class="field-error" id="error-alpha" role="alert"></span></label>
+          <label><span>Bravo</span><input name="bravo" maxlength="32" required aria-describedby="error-bravo" /><span class="field-error" id="error-bravo" role="alert"></span></label>
+          <label><span>Charlie</span><input name="charlie" maxlength="32" required aria-describedby="error-charlie" /><span class="field-error" id="error-charlie" role="alert"></span></label>
         </fieldset>
       </form>
       <div class="proof" id="proof" role="status" aria-live="polite"></div>
@@ -103,6 +106,40 @@ const fields = {
   bravo: form.elements.namedItem('bravo') as HTMLInputElement,
   charlie: form.elements.namedItem('charlie') as HTMLInputElement,
 };
+const FIELD_LABEL: Record<keyof typeof fields, string> = {
+  civilization: 'Civilization name',
+  sigil: 'Sigil',
+  era: 'Era',
+  alpha: 'Alpha',
+  bravo: 'Bravo',
+  charlie: 'Charlie',
+};
+/** Fields the learner has blurred at least once — errors stay silent until then
+ *  so the form does not open with every required field already flagged red. */
+const touched = new Set<keyof typeof fields>();
+
+function validateField(name: keyof typeof fields): boolean {
+  const input = fields[name];
+  const error = document.getElementById(`error-${name}`)!;
+  const empty = input.value.trim() === '';
+  const invalid = touched.has(name) && empty;
+  input.setAttribute('aria-invalid', String(invalid));
+  error.textContent = invalid ? `${FIELD_LABEL[name]} is required.` : '';
+  return !empty;
+}
+
+function validateAll(): boolean {
+  return (Object.keys(fields) as Array<keyof typeof fields>)
+    .map((name) => validateField(name))
+    .every(Boolean);
+}
+
+for (const name of Object.keys(fields) as Array<keyof typeof fields>) {
+  fields[name].addEventListener('blur', () => {
+    touched.add(name);
+    validateField(name);
+  });
+}
 
 function values(): WorldProfile {
   const query = new URLSearchParams({
@@ -121,6 +158,7 @@ function gameUrl(profile: WorldProfile): URL {
 }
 
 function render(): void {
+  validateAll();
   const profile = values();
   const checks = worldAuthorshipChecks(profile);
   const complete = isAuthoredWorld(profile);
@@ -193,6 +231,23 @@ function load(profile: WorldProfile): void {
 
 form.addEventListener('input', () => {
   publication = { state: 'portable' };
+  render();
+});
+// This form has no submit action of its own — the URL updates live as the
+// learner types. Pressing Enter in a single-field form still fires an
+// implicit submit, though, which would otherwise reload the page out from
+// under a keyboard user. Catch it, surface any empty required fields, and
+// move focus to the first one instead.
+form.addEventListener('submit', (event) => {
+  event.preventDefault();
+  for (const name of Object.keys(fields) as Array<keyof typeof fields>) touched.add(name);
+  const ok = validateAll();
+  if (!ok) {
+    const firstInvalid = (Object.keys(fields) as Array<keyof typeof fields>).find(
+      (name) => fields[name].getAttribute('aria-invalid') === 'true',
+    );
+    if (firstInvalid) fields[firstInvalid].focus();
+  }
   render();
 });
 publish.addEventListener('click', async () => {

@@ -113,16 +113,16 @@ function draws(rng: Rng, n: number): string {
 export const seedDemo: Demo = (root, ctx) => {
   root.innerHTML = `
     <div class="canvas-pair">
-      <figure><canvas id="scribe-a" width="${W}" height="${H}"></canvas><figcaption>Scribe A — seed ${ctx.seed}</figcaption></figure>
-      <figure><canvas id="scribe-b" width="${W}" height="${H}"></canvas><figcaption>Scribe B — seed ${ctx.seed}</figcaption></figure>
+      <figure><canvas id="scribe-a" width="${W}" height="${H}" role="img" aria-label="Star-chart drawn by Scribe A from seed ${ctx.seed}"></canvas><figcaption>Scribe A — seed ${ctx.seed}</figcaption></figure>
+      <figure><canvas id="scribe-b" width="${W}" height="${H}" role="img" aria-label="Star-chart drawn by Scribe B from seed ${ctx.seed}, expected to match Scribe A pixel-for-pixel"></canvas><figcaption>Scribe B — seed ${ctx.seed}</figcaption></figure>
     </div>
-    <div class="controls">
-      <label>seed <input id="seed-in" type="number" value="${ctx.seed}" /></label>
-      <button id="prev-fate">◂ previous fate</button>
-      <button id="next-fate">next fate ▸</button>
+    <div class="controls" role="group" aria-label="Seed and fate controls">
+      <label>seed <input id="seed-in" type="number" value="${ctx.seed}" aria-label="World seed" /></label>
+      <button id="prev-fate" type="button">◂ previous fate</button>
+      <button id="next-fate" type="button">next fate ▸</button>
     </div>
-    <div class="readout" id="verdict"></div>
-    <div class="readout" id="fates"></div>
+    <div class="readout" id="verdict" role="status" aria-live="polite"></div>
+    <div class="readout" id="fates" aria-label="Fate stream samples"></div>
   `;
 
   const a = root.querySelector<HTMLCanvasElement>('#scribe-a')!;
