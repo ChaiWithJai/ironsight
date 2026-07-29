@@ -19,7 +19,7 @@ interface ArtifactStore {
 type Database = ReturnType<typeof getDatabase>;
 
 export interface WorldRepository {
-  create(profile: WorldProfile, learnerId: string): Promise<WorldRow>;
+  create(profile: WorldProfile, learnerId: string, consentVersion?: string): Promise<WorldRow>;
   find(id: string): Promise<WorldRow | null>;
 }
 
@@ -28,7 +28,7 @@ export function createWorldRepository(
   artifacts: ArtifactStore = getStore('teaching-artifacts'),
 ): WorldRepository {
   return {
-    async create(profile, learnerId) {
+    async create(profile, learnerId, consentVersion) {
       const id = crypto.randomUUID();
       const artifactKey = `worlds/${id}/profile.json`;
       let storedArtifact: string | null = artifactKey;
@@ -42,10 +42,21 @@ export function createWorldRepository(
         console.warn('[worlds] immutable Blob export unavailable; database publication continues', error);
       }
 
+      // Record implicit publish-consent on first sight; never clobber an
+      // explicit prior consent (docs/PRIVACY.md §5).
       await db.sql`
-        INSERT INTO anonymous_learners (id, last_seen_at)
-        VALUES (${learnerId}, NOW())
-        ON CONFLICT (id) DO UPDATE SET last_seen_at = NOW()
+        INSERT INTO anonymous_learners (id, last_seen_at, consent_version, consent_at)
+        VALUES (
+          ${learnerId}, NOW(), ${consentVersion ?? null},
+          CASE WHEN ${consentVersion ?? null}::text IS NULL THEN NULL ELSE NOW() END
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          last_seen_at = NOW(),
+          consent_version = COALESCE(anonymous_learners.consent_version, ${consentVersion ?? null}),
+          consent_at = COALESCE(
+            anonymous_learners.consent_at,
+            CASE WHEN ${consentVersion ?? null}::text IS NULL THEN NULL ELSE NOW() END
+          )
       `;
       const rows = await db.sql<{ id: string; profile: WorldProfile; created_at: Date | string }>`
         INSERT INTO worlds (
