@@ -1004,6 +1004,19 @@ export enum BakeKind {
   MainThread = 'main-thread',
 }
 
+/**
+ * State of the IndexedDB bake cache after the most recent open/read/write
+ * attempt. `ok` and `recovered-corrupt` are the only states a warm hit can
+ * come from; every other state means this bake ran (or degraded to) cold.
+ */
+export type BakeCacheStatus =
+  | 'disabled'
+  | 'ok'
+  | 'unavailable'
+  | 'private-mode'
+  | 'quota-exceeded'
+  | 'recovered-corrupt';
+
 /** How mips are generated. The wrong mode is a visible defect at distance. */
 export enum MipMode {
   /** Plain box filter in the texture's own colour space. */
@@ -1191,6 +1204,22 @@ export interface BakeStats {
   readonly cacheHits: number;
   /** Steps whose resolution was reduced to fit the unit ceiling. */
   readonly degraded: readonly string[];
+  /** IndexedDB open/read/write health as of this bake. See `BakeCacheStatus`. */
+  readonly cacheStatus: BakeCacheStatus;
+  /** Cacheable jobs that ran (or reran) because no usable entry was found. */
+  readonly cacheMisses: number;
+  /** Total ms spent in IndexedDB `get()` lookups that resolved as hits. */
+  readonly cacheHitMs: number;
+  /** Total ms spent in IndexedDB `get()` lookups that resolved as misses. */
+  readonly cacheMissMs: number;
+  /**
+   * Total ms actually spent recomputing + persisting cacheable jobs on a
+   * miss — the honest "what a cold bake costs" number. A warm bake's
+   * equivalent cost is `cacheHitMs`, which is orders of magnitude smaller.
+   */
+  readonly cacheRecomputeMs: number;
+  /** Writes that aborted (typically `QuotaExceededError`). Never fatal. */
+  readonly cachePutFailures: number;
 }
 
 /**

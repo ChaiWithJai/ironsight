@@ -422,6 +422,14 @@ export class NullAssetRegistry implements AssetRegistry {
     audioBytes: 0,
     cacheHits: 0,
     degraded: [],
+    // No IndexedDB cache exists before BAKE lands (day 0 null), so this is
+    // reported as `disabled` rather than a false `ok` — see `BakeCacheStatus`.
+    cacheStatus: 'disabled',
+    cacheMisses: 0,
+    cacheHitMs: 0,
+    cacheMissMs: 0,
+    cacheRecomputeMs: 0,
+    cachePutFailures: 0,
   };
 
   constructor(
@@ -509,6 +517,12 @@ export class NullAssetRegistry implements AssetRegistry {
       audioBytes: 0,
       cacheHits: 0,
       degraded,
+      cacheStatus: 'disabled',
+      cacheMisses: 0,
+      cacheHitMs: 0,
+      cacheMissMs: 0,
+      cacheRecomputeMs: 0,
+      cachePutFailures: 0,
     };
   }
 

@@ -136,6 +136,10 @@ export class IronAssetRegistry implements AssetRegistry {
   private readonly order: string[] = [];
   private readonly cache: BakeCache;
   private baked = false;
+  /** Total ms spent actually recomputing + persisting on a cache miss —
+   * see `cachedJob`. This is the honest "what did the cold path cost" number;
+   * `cache.stats.hitMs` is its warm counterpart. */
+  private cacheRecomputeMsTotal = 0;
   private statsValue: BakeStats = {
     totalMs: 0,
     perStepMs: {},
@@ -144,6 +148,12 @@ export class IronAssetRegistry implements AssetRegistry {
     audioBytes: 0,
     cacheHits: 0,
     degraded: [],
+    cacheStatus: 'disabled',
+    cacheMisses: 0,
+    cacheHitMs: 0,
+    cacheMissMs: 0,
+    cacheRecomputeMs: 0,
+    cachePutFailures: 0,
   };
 
   constructor(
@@ -261,14 +271,21 @@ export class IronAssetRegistry implements AssetRegistry {
       await nextFrame();
     }
 
+    const cacheStats = this.cache.stats;
     this.statsValue = {
       totalMs: nowMs() - start,
       perStepMs,
       textureBytes: this.gpu.bytesResident,
       geometryBytes,
       audioBytes,
-      cacheHits: this.cache.hits,
+      cacheHits: cacheStats.hits,
       degraded: [...degraded].sort(),
+      cacheStatus: cacheStats.status,
+      cacheMisses: cacheStats.misses,
+      cacheHitMs: cacheStats.hitMs,
+      cacheMissMs: cacheStats.missMs,
+      cacheRecomputeMs: this.cacheRecomputeMsTotal,
+      cachePutFailures: cacheStats.putFailures,
     };
   }
 
@@ -365,8 +382,14 @@ export class IronAssetRegistry implements AssetRegistry {
     const key = hashKey([job, payload, this.quality().bake.name]);
     const hit = await this.cache.get<TOut>(key);
     if (hit !== undefined) return hit;
+    // A miss pays for both the worker job and the write-back; timing the pair
+    // together is what makes `cacheRecomputeMs` the true cost a cold bake
+    // (or an invalidated one) pays for this job, comparable apples-to-apples
+    // against `cache.stats.hitMs` for the same job warm.
+    const t0 = nowMs();
     const value = await this.workers.run<TIn, TOut>(job, payload);
     await this.cache.put(key, value);
+    this.cacheRecomputeMsTotal += nowMs() - t0;
     return value;
   }
 
