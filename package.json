@@ -28,6 +28,7 @@
     "test:integration": "bash tools/with-node.sh node --test tools/tests/worlds-function.integration.test.mjs",
     "test": "npm run test:unit && npm run test:integration",
     "shots": "bash tools/shoot.sh",
+    "profile": "bash tools/profile.sh",
     "learn:shots": "bash tools/learn-shots.sh",
     "teach:smoke": "bash tools/with-node.sh node tools/teach-smoke.mjs",
     "netlify:dev": "bash tools/with-node.sh npx netlify-cli@27.0.1 dev",

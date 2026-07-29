@@ -38,6 +38,9 @@ tmp-*/
 
 # Soak reports — regenerate with ./tools/soak.sh
 tools/soak/
+
+# Performance profiler reports — regenerate with ./tools/profile.sh
+tools/perf/
 tools/shots-post-*/
 
 # Full-game teaching smoke evidence — regenerated with npm run teach:smoke.
