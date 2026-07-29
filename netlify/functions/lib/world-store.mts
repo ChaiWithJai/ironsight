@@ -1,6 +1,7 @@
 import { getStore } from '@netlify/blobs';
 import { getDatabase } from '@netlify/database';
 import type { WorldProfile } from '../../../src/engine/world-profile.ts';
+import { pseudonym, silentLogger, type Logger } from './log.mts';
 
 export interface WorldRow {
   readonly id: string;
@@ -19,8 +20,8 @@ interface ArtifactStore {
 type Database = ReturnType<typeof getDatabase>;
 
 export interface WorldRepository {
-  create(profile: WorldProfile, learnerId: string): Promise<WorldRow>;
-  find(id: string): Promise<WorldRow | null>;
+  create(profile: WorldProfile, learnerId: string, log?: Logger): Promise<WorldRow>;
+  find(id: string, log?: Logger): Promise<WorldRow | null>;
 }
 
 export function createWorldRepository(
@@ -28,38 +29,52 @@ export function createWorldRepository(
   artifacts: ArtifactStore = getStore('teaching-artifacts'),
 ): WorldRepository {
   return {
-    async create(profile, learnerId) {
+    async create(profile, learnerId, log = silentLogger()) {
+      const learner = pseudonym(learnerId);
       const id = crypto.randomUUID();
       const artifactKey = `worlds/${id}/profile.json`;
       let storedArtifact: string | null = artifactKey;
       try {
-        await artifacts.set(artifactKey, `${JSON.stringify(profile, null, 2)}\n`, {
-          onlyIfNew: true,
-          metadata: { kind: 'world-profile', worldId: id, immutable: true },
-        });
+        await log.time(
+          'blob.export',
+          () =>
+            artifacts.set(artifactKey, `${JSON.stringify(profile, null, 2)}\n`, {
+              onlyIfNew: true,
+              metadata: { kind: 'world-profile', worldId: id, immutable: true },
+            }),
+          { worldId: id },
+        );
       } catch (error) {
         storedArtifact = null;
-        console.warn('[worlds] immutable Blob export unavailable; database publication continues', error);
+        log.warn('blob.export_unavailable', { worldId: id, error });
       }
 
-      await db.sql`
-        INSERT INTO anonymous_learners (id, last_seen_at)
-        VALUES (${learnerId}, NOW())
-        ON CONFLICT (id) DO UPDATE SET last_seen_at = NOW()
-      `;
-      const rows = await db.sql<{ id: string; profile: WorldProfile; created_at: Date | string }>`
-        INSERT INTO worlds (
-          id, creator_id, profile, civilization, sigil, era,
-          alpha_name, bravo_name, charlie_name, artifact_blob_key
-        )
-        VALUES (
-          ${id}, ${learnerId}, ${JSON.stringify(profile)}::jsonb,
-          ${profile.civilization}, ${profile.sigil}, ${profile.era},
-          ${profile.places.ALPHA}, ${profile.places.BRAVO}, ${profile.places.CHARLIE},
-          ${storedArtifact}
-        )
-        RETURNING id, profile, created_at
-      `;
+      await log.time(
+        'db.upsert_learner',
+        () => db.sql`
+          INSERT INTO anonymous_learners (id, last_seen_at)
+          VALUES (${learnerId}, NOW())
+          ON CONFLICT (id) DO UPDATE SET last_seen_at = NOW()
+        `,
+        { learner },
+      );
+      const rows = await log.time(
+        'db.insert_world',
+        () => db.sql<{ id: string; profile: WorldProfile; created_at: Date | string }>`
+          INSERT INTO worlds (
+            id, creator_id, profile, civilization, sigil, era,
+            alpha_name, bravo_name, charlie_name, artifact_blob_key
+          )
+          VALUES (
+            ${id}, ${learnerId}, ${JSON.stringify(profile)}::jsonb,
+            ${profile.civilization}, ${profile.sigil}, ${profile.era},
+            ${profile.places.ALPHA}, ${profile.places.BRAVO}, ${profile.places.CHARLIE},
+            ${storedArtifact}
+          )
+          RETURNING id, profile, created_at
+        `,
+        { worldId: id, learner, blobExported: storedArtifact !== null },
+      );
       const row = rows[0];
       if (!row) throw new Error('database did not return the created world');
       return {
@@ -69,10 +84,14 @@ export function createWorldRepository(
       };
     },
 
-    async find(id) {
-      const rows = await db.sql<{ id: string; profile: WorldProfile; created_at: Date | string }>`
-        SELECT id, profile, created_at FROM worlds WHERE id = ${id} LIMIT 1
-      `;
+    async find(id, log = silentLogger()) {
+      const rows = await log.time(
+        'db.find_world',
+        () => db.sql<{ id: string; profile: WorldProfile; created_at: Date | string }>`
+          SELECT id, profile, created_at FROM worlds WHERE id = ${id} LIMIT 1
+        `,
+        { worldId: id },
+      );
       const row = rows[0];
       return row
         ? {
