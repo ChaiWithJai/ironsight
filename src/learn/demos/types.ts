@@ -11,6 +11,8 @@ export interface DemoCtx {
   frozen: boolean;
   /** Ask the shell to change the seed (updates the URL, re-renders the page). */
   onSeedChange(seed: number): void;
+  /** Report observable learner/world state to the chapter's mission evaluator. */
+  report(evidence: Record<string, number | string | boolean>): void;
 }
 
 /** A demo renders into `root` and may return a disposer (cancel animation). */

@@ -71,6 +71,7 @@ import { CoverIndex, bakeCoverSlots } from '@/level/cover-bake';
 import { bakeNavmesh, type NavBakeStats } from '@/level/navmesh-bake';
 import { defineChunkAssets, finaliseColliders, insideTest } from '@/level/colliders';
 import { CAMERA_POSES, CAMERA_POSE_NAMES } from '@/level/cameras';
+import { readWorldProfile } from '@/engine/world-profile';
 
 /**
  * The one seed the whole level is generated from. 'HRCH'. Changing it reshuffles
@@ -539,10 +540,14 @@ let CHARLIE_FLOOR_Y: number = POINTS.charlie.y;
  * ======================================================================= */
 
 function capturePoints(): CapturePointDef[] {
+  // URL-authored labels are content, not simulation state. IDs, coordinates,
+  // radii and ownership remain fixed, preserving AI, conquest and captures.
+  // With no forge parameters this resolves byte-for-byte to Harbour Reach.
+  const profile = readWorldProfile(typeof location === 'undefined' ? '' : location.search);
   return [
     {
       id: 'ALPHA',
-      label: 'MARKET SQUARE',
+      label: profile.places.ALPHA.toUpperCase(),
       centre: new THREE.Vector3(POINTS.alpha.x, POINTS.alpha.y, POINTS.alpha.z) as unknown as Vec3,
       radius: POINTS.alpha.radius,
       height: POINTS.alpha.height,
@@ -553,7 +558,7 @@ function capturePoints(): CapturePointDef[] {
     },
     {
       id: 'BRAVO',
-      label: 'HARBOUR CRANES',
+      label: profile.places.BRAVO.toUpperCase(),
       centre: new THREE.Vector3(POINTS.bravo.x, POINTS.bravo.y, POINTS.bravo.z) as unknown as Vec3,
       radius: POINTS.bravo.radius,
       height: POINTS.bravo.height,
@@ -561,7 +566,7 @@ function capturePoints(): CapturePointDef[] {
     },
     {
       id: 'CHARLIE',
-      label: 'OLD FORT',
+      label: profile.places.CHARLIE.toUpperCase(),
       centre: new THREE.Vector3(POINTS.charlie.x, CHARLIE_FLOOR_Y, POINTS.charlie.z) as unknown as Vec3,
       radius: POINTS.charlie.radius,
       height: POINTS.charlie.height,
@@ -635,7 +640,7 @@ export function createLevelService(ctx: BootContext): LevelService {
   });
 
   return {
-    name: 'HARBOUR REACH',
+    name: readWorldProfile(typeof location === 'undefined' ? '' : location.search).civilization.toUpperCase(),
     ready: true,
     root: level.root,
     capturePoints: points,

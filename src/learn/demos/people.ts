@@ -132,6 +132,7 @@ export const peopleDemo: Demo = (root, ctx) => {
   let playing = false;
   let raf = 0;
   let frameParity = 0;
+  let interacted = false;
 
   const draw = () => {
     paintField(img, sim.field, SEA);
@@ -163,6 +164,7 @@ export const peopleDemo: Demo = (root, ctx) => {
       `tick ${sim.tick} · ${wandering} wandering · ${sim.settlements.length} settlement(s)` +
       (sim.settlements.length ? ` — ${sim.settlements.map((s) => s.name).join(', ')}` : '') +
       `\nstate = f(seed ${ctx.seed}, tick ${sim.tick}) — rebirth replays this history exactly`;
+    ctx.report({ interacted, tick: sim.tick, settlements: sim.settlements.length });
   };
 
   const advance = (ticks: number) => {
@@ -183,13 +185,18 @@ export const peopleDemo: Demo = (root, ctx) => {
     draw();
   }
 
-  root.querySelector('#season')!.addEventListener('click', () => advance(SEASON));
+  root.querySelector('#season')!.addEventListener('click', () => {
+    interacted = true;
+    advance(SEASON);
+  });
   root.querySelector('#rebirth')!.addEventListener('click', () => {
+    interacted = true;
     sim = new Sim(ctx.seed);
     draw();
   });
   autoBtn.addEventListener('click', () => {
     if (ctx.frozen) return;
+    interacted = true;
     playing = !playing;
     autoBtn.classList.toggle('active', playing);
     if (playing) raf = requestAnimationFrame(loop);

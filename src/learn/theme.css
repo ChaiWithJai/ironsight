@@ -66,6 +66,41 @@ nav.chapters .masthead .subtitle {
   letter-spacing: 0.02em;
 }
 
+.progress-block {
+  padding: 0 24px 16px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.progress-block > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.progress-block strong { color: var(--gold); font-weight: normal; }
+
+.progress-meter {
+  height: 3px;
+  margin-top: 8px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.progress-meter::after {
+  content: '';
+  display: block;
+  width: var(--progress);
+  height: 100%;
+  background: var(--gold);
+  transition: width 180ms ease-out;
+}
+
 nav.chapters a.chapter {
   display: flex;
   gap: 12px;
@@ -78,12 +113,18 @@ nav.chapters a.chapter {
 }
 
 nav.chapters a.chapter .sigil { font-size: 16px; width: 20px; text-align: center; }
+nav.chapters a.chapter .chapter-check {
+  margin-left: auto;
+  color: var(--good);
+  font-family: var(--mono);
+}
 nav.chapters a.chapter:hover { color: var(--ink); background: rgba(232, 180, 74, 0.05); }
 nav.chapters a.chapter.active {
   color: var(--gold);
   border-left-color: var(--gold);
   background: rgba(232, 180, 74, 0.08);
 }
+nav.chapters a.chapter.mastered:not(.active) { color: var(--ink); }
 
 nav.chapters .footer {
   margin-top: 24px;
@@ -120,6 +161,64 @@ main.scroll .epigraph {
   margin: 0 0 28px;
   font-size: 15px;
 }
+
+/* ------------------------------------------------------------ field mission */
+section.mission {
+  position: relative;
+  margin: 26px 0 22px;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--sea);
+  border-radius: 4px 10px 10px 4px;
+  background:
+    linear-gradient(120deg, rgba(42, 126, 168, 0.12), transparent 62%),
+    var(--bg-raise);
+}
+
+section.mission .mission-kicker {
+  color: #76b9d8;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+main.scroll section.mission h2 {
+  margin: 5px 0 8px;
+  padding: 0;
+  border: 0;
+  font-family: var(--sans);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+section.mission p { font-size: 14px; }
+
+.mission-success {
+  color: var(--ink-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.mission-status {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  color: #a7c7d6;
+  font-size: 13px;
+}
+
+.mission-status .mission-mark {
+  flex: none;
+  color: #76b9d8;
+  font-family: var(--mono);
+}
+
+.mission-status.complete { color: var(--good); }
+.mission-status.complete .mission-mark { color: var(--good); }
 
 main.scroll h2 {
   font-family: var(--serif);
@@ -294,6 +393,7 @@ button.active { background: var(--gold); color: #14100a; }
 .gate .verdict { font-family: var(--mono); font-size: 12px; flex: none; width: 52px; }
 .gate .verdict.pass { color: var(--good); }
 .gate .verdict.fail { color: var(--bad); }
+.gate.pending .verdict { color: var(--ink-dim); }
 .gate .what { color: var(--ink); }
 .gate .how { font-family: var(--mono); font-size: 12px; color: var(--ink-dim); margin-top: 3px; }
 

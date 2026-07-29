@@ -20,11 +20,13 @@ export default defineConfig({
     sourcemap: false,
     chunkSizeWarningLimit: 4096,
     rollupOptions: {
-      // Two entries: the game at /, the JAMStack academy at /learn/. The learn
-      // lane imports neither three nor rapier, so its chunk graph stays tiny.
+      // Three entries: the game, the academy, and the civilization forge. The
+      // teaching entries import neither three nor rapier, so their chunk graphs
+      // stay tiny and their feedback loops stay immediate.
       input: {
         main: fileURLToPath(new URL('./index.html', import.meta.url)),
         learn: fileURLToPath(new URL('./learn/index.html', import.meta.url)),
+        forge: fileURLToPath(new URL('./forge/index.html', import.meta.url)),
       },
       output: {
         manualChunks: {

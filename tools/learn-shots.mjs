@@ -13,6 +13,10 @@
  * the page logs ANY console error — so a green run doubles as a smoke test.
  * Because every demo is a pure function of (seed, tick), the PNGs are stable
  * and meaningfully diffable between commits.
+ *
+ * After capture, the harness completes all five field missions through their
+ * real controls. Screenshots prove rendering; this second pass proves that a
+ * learner can reach the mechanics and earn their feedback.
  */
 import { chromium } from 'playwright';
 import { createServer } from 'node:http';
@@ -119,6 +123,43 @@ for (const id of wanted) {
   const png = await page.screenshot({ fullPage: true });
   await writeFile(file, png);
   log(`captured ${id} → ${file} (${png.length.toLocaleString('en-US')} bytes)`);
+}
+
+// ---------------------------------------------------------- learner mechanics
+log('proving field missions through real controls…');
+await page.goto(`http://127.0.0.1:${PORT}/learn/#/seed`, { waitUntil: 'load' });
+await page.waitForFunction(() => window.__LEARN__?.ready === true);
+await page.locator('#next-fate').click();
+await page.waitForFunction(() => window.__LEARN__?.mission.complete === true);
+
+await page.goto(`http://127.0.0.1:${PORT}/learn/?seed=109#/land`, { waitUntil: 'load' });
+for (const [selector, value] of [
+  ['#sea', '0.50'],
+  ['#oct', '6'],
+]) {
+  await page.locator(selector).evaluate((input, next) => {
+    input.value = next;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }, value);
+}
+await page.waitForFunction(() => window.__LEARN__?.mission.complete === true);
+
+await page.goto(`http://127.0.0.1:${PORT}/learn/?seed=109#/people`, { waitUntil: 'load' });
+await page.locator('#season').click({ clickCount: 3 });
+await page.waitForFunction(() => window.__LEARN__?.mission.complete === true);
+
+await page.goto(`http://127.0.0.1:${PORT}/learn/?seed=109#/ledger`, { waitUntil: 'load' });
+await page.locator('#raw-toggle').click();
+await page.waitForFunction(() => window.__LEARN__?.mission.complete === true);
+
+await page.goto(`http://127.0.0.1:${PORT}/learn/?seed=109#/gate`, { waitUntil: 'load' });
+await page.locator('#run-gates').click();
+await page.waitForFunction(() => window.__LEARN__?.mission.complete === true);
+const completed = await page.evaluate(() => window.__LEARN__?.completed ?? []);
+if (completed.length !== chapters.length) {
+  fail(`field mission progress ended at ${completed.length}/${chapters.length}`);
+} else {
+  log(`proved ${completed.length}/${chapters.length} field missions`);
 }
 
 await browser.close();

@@ -29,6 +29,8 @@ import { createEngine } from '@/engine/engine';
 import { installSoak } from '@/engine/soak';
 import { tierName } from '@/engine/quality';
 import { SHOT_MODULE_COUNT } from '@/shots/index';
+import { installTeachingMode } from '@/teach/game';
+import { hydratePublishedWorld } from '@/engine/world-publication';
 
 const container = document.getElementById('app');
 if (!container) throw new Error('index.html is missing #app');
@@ -69,6 +71,8 @@ function progress(fraction: number, text: string): void {
 /* ------------------------------------------------------------------------ boot */
 
 async function boot(): Promise<void> {
+  progress(0.01, 'resolving chronicle');
+  await hydratePublishedWorld();
   progress(0.02, 'creating context');
   const { renderer, canvas, colorBufferFloat } = createRenderer(container as HTMLElement);
   if (!colorBufferFloat) {
@@ -127,6 +131,9 @@ async function boot(): Promise<void> {
   // actually moved. A screenshot cannot show that a bot has stood still for a
   // minute; this can.
   installSoak(engine);
+  if (new URLSearchParams(location.search).has('teach')) {
+    installTeachingMode(container as HTMLElement, engine.services);
+  }
 
   // One frame before ready, so the very first thing the capture tool can grab is
   // a rendered image rather than the clear colour.

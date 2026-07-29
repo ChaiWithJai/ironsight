@@ -28,7 +28,7 @@ export const landDemo: Demo = (root, ctx) => {
   const octIn = root.querySelector<HTMLInputElement>('#oct')!;
   const stats = root.querySelector('#stats')!;
 
-  const repaint = () => {
+  const repaint = (interacted = false) => {
     const sea = Number(seaIn.value);
     const octaves = Number(octIn.value);
     const field = computeField(ctx.seed, octaves, W, H);
@@ -38,11 +38,12 @@ export const landDemo: Demo = (root, ctx) => {
     stats.textContent =
       `heightAt(x, y, ${ctx.seed}) sampled ${(W * H).toLocaleString('en-US')} times · ` +
       `${octaves} octave(s) · ${(land * 100).toFixed(1)}% of the world is land`;
+    ctx.report({ interacted, seaLevel: sea, octaves, landFraction: land });
   };
 
   repaint();
-  seaIn.addEventListener('input', repaint);
-  octIn.addEventListener('input', repaint);
+  seaIn.addEventListener('input', () => repaint(true));
+  octIn.addEventListener('input', () => repaint(true));
 
   const seedIn = root.querySelector<HTMLInputElement>('#seed-in')!;
   seedIn.addEventListener('change', () => ctx.onSeedChange(Math.trunc(Number(seedIn.value) || 0)));

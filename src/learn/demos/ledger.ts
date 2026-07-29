@@ -7,7 +7,7 @@
 import chronicle from '../chronicle.json';
 import type { Demo } from './types';
 
-export const ledgerDemo: Demo = (root) => {
+export const ledgerDemo: Demo = (root, ctx) => {
   const cards = chronicle.eras
     .map(
       (era) => `
@@ -34,9 +34,11 @@ export const ledgerDemo: Demo = (root) => {
   const pre = root.querySelector<HTMLPreElement>('#raw')!;
   pre.querySelector('code')!.textContent = JSON.stringify(chronicle, null, 2);
   const btn = root.querySelector<HTMLButtonElement>('#raw-toggle')!;
+  ctx.report({ rawVisible: false });
   btn.addEventListener('click', () => {
     const showing = pre.style.display !== 'none';
     pre.style.display = showing ? 'none' : 'block';
     btn.textContent = showing ? 'show the raw ledger (JSON)' : 'hide the raw ledger';
+    ctx.report({ rawVisible: !showing });
   });
 };

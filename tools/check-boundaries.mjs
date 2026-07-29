@@ -40,7 +40,7 @@ const LANES = [
   // The teaching lane (the /learn/ academy). Registered here deliberately: it
   // must live under the same law it teaches — shared seams only, no
   // Math.random, no wall clock, no runtime network.
-  'learn',
+  'learn', 'teach', 'forge',
 ];
 /**
  * Importable by anyone. These are the deliberate shared seams: the contract
@@ -57,6 +57,12 @@ const SHARED = [
   'engine/units',
   'engine/clock',
   'engine/macro',
+  // Static world authorship contract shared by LEVEL, TEACH and FORGE. It is
+  // pure URL data: no game implementation and no runtime network.
+  'engine/world-profile',
+  // Optional full-stack publication seam. Default play stays zero-network; a
+  // stable `world` id resolves here and falls back to the complete URL profile.
+  'engine/world-publication',
   // Shared ECS component declarations (Health, Transform, …). These are data
   // definitions every gameplay lane reads and writes through the ComponentStore;
   // routing them via a service would be indirection for its own sake.
@@ -124,8 +130,9 @@ const RULES = [
   {
     id: 'no-runtime-network',
     test: /\b(fetch\s*\(|XMLHttpRequest|new\s+WebSocket|importScripts\s*\()/,
-    allow: () => false,
-    message: 'The build must make zero network requests — everything is generated procedurally.',
+    allow: (f) => f === `engine${sep}world-publication.ts`,
+    message:
+      'Runtime network is confined to the optional world-publication seam; default play remains generated locally.',
   },
   {
     id: 'no-binary-asset-import',

@@ -116,7 +116,12 @@ export function drawObjectiveMarkers(ctx: HudContext): void {
       // always white because it describes what YOU are doing rather than who
       // owns the point.
       const verbColour = verb === 'NEUTRALIZING' ? COLOUR.white : hue;
-      pen.draw(batch, verb, P.x, P.y - 2.6 * u - size * 0.5, {
+      // Authored worlds name the coordinate in the real combat HUD. Keep the
+      // original default frame byte-stable; forge links opt into the extra
+      // meaning without changing objective IDs or simulation rules.
+      const markerVerb =
+        ctx.services.level.name === 'HARBOUR REACH' ? verb : `${verb} · ${def.label}`;
+      pen.draw(batch, markerVerb, P.x, P.y - 2.6 * u - size * 0.5, {
         cap: TYPE.t0.cap * u,
         weight: WEIGHT.bold,
         tracking: 0.11,

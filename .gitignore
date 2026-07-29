@@ -39,3 +39,9 @@ tmp-*/
 # Soak reports — regenerate with ./tools/soak.sh
 tools/soak/
 tools/shots-post-*/
+
+# Full-game teaching smoke evidence — regenerated with npm run teach:smoke.
+tools/teaching/
+
+# Local Netlify folder
+.netlify

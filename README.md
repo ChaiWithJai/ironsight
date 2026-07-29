@@ -45,6 +45,18 @@ tick-stepped agents, build-time data, and the entropy-containing test loop, each
 demo backed by the engine's own infrastructure. See [`docs/TEACHING.md`](docs/TEACHING.md) for the
 why and the roadmap. Capture its deterministic screenshots with `npm run learn:shots`.
 
+After the five academy missions, open **`/forge/`** for the Civilization Forge. A learner changes a
+civilization, sigil, era, and named place; the browser publishes those choices as a URL contract.
+Following the generated link boots the actual FPS, where the real minimap and objective markers use
+the authored names. The `/?teach=1` overlay listens to real player movement, weapon, damage,
+destruction, and capture-point data; it does not pose a lesson-sized simulation or award progress
+for merely viewing a page. See [`docs/VIDEO_ANALYSIS.md`](docs/VIDEO_ANALYSIS.md) for recorded
+gameplay evidence and the remaining unproven human outcomes.
+
+```bash
+npm run teach:smoke   # forge → authored game → movement, firing, and damage proof
+```
+
 ### Controls
 
 | | |
@@ -173,11 +185,19 @@ that the bots did not move.
 ## Development
 
 ```bash
-npm run verify      # typecheck + boundary CI + build. THE gate — keep it green.
-npm run dev         # dev server with HMR
-npm run build       # production build
-npm run boundaries  # architectural rules only
+npm run verify       # app/functions types + boundaries + tests + production build
+npm run dev          # Vite-only HMR; portable URL worlds still work
+npm run netlify:dev  # Functions + local Database + Blob emulation on :8888
+npm run build        # production build
+npm run boundaries   # architectural rules only
 ```
+
+The Civilization Forge at `/forge/` can publish a durable world through
+`POST /api/worlds`, then open the actual game with a stable world ID. The full
+URL-encoded profile always travels with that ID, so an API outage degrades to a
+portable playable link rather than a dead world. Structured learner/world data
+lives in Netlify Database; immutable evidence exports live in Netlify Blobs.
+See the [environment and release runbook](docs/NETLIFY_RUNBOOK.md).
 
 ### Looking at the game without playing it
 
@@ -240,6 +260,8 @@ the measurements those scores were taken against.
 | [`docs/HUD_SPEC.md`](docs/HUD_SPEC.md) | The HUD, element by element. |
 | [`docs/AAA_RUBRIC.md`](docs/AAA_RUBRIC.md) | How frames are scored, and why the scores drift. |
 | [`docs/TEACHING.md`](docs/TEACHING.md) | The `/learn/` academy: teaching the JAMStack through worldbuilding. |
+| [`docs/NETLIFY_RUNBOOK.md`](docs/NETLIFY_RUNBOOK.md) | Local, staging, production, data isolation, release and rollback. |
+| [`docs/adr/0001-fullstack-netlify.md`](docs/adr/0001-fullstack-netlify.md) | Why Netlify Database, Functions, Blobs, and URL fallback coexist. |
 
 ---
 

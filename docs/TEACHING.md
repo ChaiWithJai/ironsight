@@ -17,7 +17,7 @@ possible, and every one of its invariants is already a lesson:
 
 | Repo fact | JAMStack lesson it teaches |
 |---|---|
-| Ships as 3 JS files + 1 HTML page, statically hosted on Vercel | **This is the whole stack.** No server, no database, no backend — and it's a AAA-aspiring FPS. |
+| Builds to static HTML, CSS and JavaScript artifacts | **This is the whole stack.** No server, no database, no backend — and it's a AAA-aspiring FPS. |
 | Zero binary assets; every texture/mesh/sound/font generated in-browser | **JavaScript is a full creative medium.** The client is a build machine. |
 | Zero network requests at runtime | The "A" in JAM can happen **at build time** — data is baked in, served from a CDN edge. |
 | One seeded PCG32 RNG, `Math.random()` is a CI failure | **Determinism** — same seed, same world, forever. State fits in a URL. |
@@ -40,18 +40,20 @@ Capture imagination first, teach second. The mapping:
 | **Symbols / Records** — the civilization's ledger | build-time JSON data, the "A" in JAM | IV. The Ledger |
 | **Law / Dharma** — what keeps the world coherent | `npm run verify`, boundaries, shot harness | V. The Gate |
 
-Each chapter is: *a story beat* (Markdown) → *a live toy* (JavaScript, seeded, deterministic) →
+Each chapter is: *a field mission with observable proof* → *a live toy* (JavaScript, seeded,
+deterministic) → *immediate feedback and durable progress* → *a story beat* (Markdown) →
 *a "lift the curtain" section* pointing at the real engine file that does the same thing at scale.
 
 ## 3. The implementation: a `learn` lane
 
-Rather than refactoring the game (high risk, no teaching payoff), we **add a parallel lane** that
-obeys the same laws as every other lane:
+The academy remains a lightweight parallel lane, but it imports real engine seams and treats
+deterministic systems as learning mechanics rather than illustrations:
 
 ```
 learn/index.html          second Vite entry → deploys at /learn/
 src/learn/
 ├── main.ts               shell: hash routing, chapter nav, demo mounting, __LEARN__ probe
+├── course.ts             mission contracts, observable assessment, immediate feedback
 ├── md.ts                 ~100-line Markdown renderer (Markup is a lesson, not a dependency)
 ├── proc.ts               seeded hashing / value noise / fBm / name generator (shared by demos)
 ├── theme.css             golden-hour academy styling
@@ -82,11 +84,14 @@ Rules the lane obeys (and *teaches by obeying*):
    lesson is pointing at them. → *Chapter V.*
 5. **A tick-stepped agent sim** (a day). Villagers on the fBm map, seeking fertile land, founding
    named settlements — a miniature of the game's bot/intent architecture. → *Chapter III.*
-6. **The game itself as the graduation exercise** (already deployed). The last line of the academy
-   is a link: "now go play the full civilization."
+6. **A URL-authored civilization** (hours). The forge changes identity, sigil, era, and place names,
+   then publishes them as `URLSearchParams`. The same typed profile seam changes the real game's
+   minimap and objective markers without changing simulation IDs. → *Transfer mission.*
 
 Deliberately NOT low-hanging (deferred): embedding the live engine in lesson pages (30–60 s bake,
-WebGL2 requirement, huge bundle); WYSIWYG lesson editing; any server-side anything.
+WebGL2 requirement, huge bundle); WYSIWYG lesson editing; learner accounts. The first server slice
+is deliberately small: Functions validate the same `WorldProfile`, Database durably stores it, and
+Blobs receives an immutable export.
 
 ## 5. The visual feedback loop — how fast, how reliable
 
@@ -95,26 +100,41 @@ imports neither three.js nor rapier, so its dev-server graph is tiny.
 
 **Reliable:** `tools/learn-shots.mjs` (same skeleton as `capture.mjs`): builds, serves `dist/`,
 drives headless Chromium to each chapter with `?frozen`, waits for `window.__LEARN__.ready`,
-writes one PNG per chapter, and **fails on any console error** — so a green run is also a smoke
-test. Because every demo is a pure function of `(seed, params, tick)`, the PNGs are stable
-byte-for-byte candidates for diffing, exactly like the game's shots.
+writes one PNG per chapter, and then completes all five missions through their real controls.
+It **fails on any console error or unreachable mission**. Because every demo is a pure function
+of `(seed, params, tick)`, the PNGs are stable byte-for-byte candidates for diffing.
 
 The loop, end to end: edit lesson → HMR preview → `npm run verify` (types + boundaries + build)
 → `./tools/learn-shots.sh` (pixels). Total cold time ≈ build time + ~2 s/page.
+
+The full-game bridge has a separate proportional gate: `npm run teach:smoke`. It first completes
+the forge through semantic form controls, follows its generated link, pays the actual procedural
+bake, verifies that the authored profile reached the real HUD, sends keyboard/mouse input, proves
+movement and weapon events, then routes the existing combat drill through normal `PlayerIntent`,
+ballistics, and damage. It writes forge/game screenshots and evidence JSON under ignored
+`tools/teaching/`. The named-place mission stays a human/navigation check rather than being
+auto-completed by teleporting the player onto a flag.
 
 ## 6. Testing strategy — containing entropy
 
 Entropy enters a teaching site through three doors; each gets a gate:
 
-1. **Code entropy** → the *existing* gates, extended, not duplicated: `tsc` covers the lane
-   (strict mode), `check-boundaries.mjs` now knows the `learn` lane (shared-seams-only imports,
-   no `Math.random`, no wall clock, no fetch), and `vite build` proves the second entry links.
+1. **Code entropy** → the *existing* gates, extended, not duplicated: `tsc` covers the lanes
+   (strict mode), `check-boundaries.mjs` knows `learn`, `teach`, and `forge`
+   (shared-seams-only imports, no `Math.random`, no wall clock, no fetch), and `vite build` proves
+   all three entries link.
    One command — `npm run verify` — stays THE gate.
 2. **Content entropy** → lessons are **data, not code**. Markdown in, HTML out through one small
    renderer. A broken lesson cannot break a demo; a broken demo cannot break the game bundle.
-3. **Visual entropy** → determinism by construction (seeded RNG, tick-counted animation, `?frozen`
+3. **Interaction entropy** → demos report plain evidence to `course.ts`; evaluators decide
+   completion, and the capture harness proves all five paths through real controls.
+4. **Visual entropy** → determinism by construction (seeded RNG, tick-counted animation, `?frozen`
    capture states), so screenshots regress meaningfully instead of flaking. The lesson pages get
    the same treatment the engine gets, because the treatment is the curriculum.
+5. **Persistence entropy** → one shared validator, repository migrations, relational writes for
+   concurrent progress, immutable-only Blob artifacts, and three proportional layers: pure
+   contract tests, Function↔Database/Blob integration, then Forge→stable ID→actual game acceptance
+   with a forced API outage to prove URL fallback.
 
 The principle throughout: **don't build a second quality system — enroll the new lane in the one
 that already kept 203 subagents honest.**
@@ -125,14 +145,25 @@ Each iteration of this project should close the same loop:
 
 ```
 imagine (story beat) → build (seeded toy) → verify (npm run verify) →
-see (learn-shots PNGs) → teach (does the toy explain the concept in <30 s of play?) → repeat
+see (learn-shots PNGs) → author (can the forge earn 4/4?) → play (can the harness earn 5/5?) →
+teach (does a human transfer the idea?) → repeat
 ```
 
 Roadmap after this first pass:
 
+- **v1.5 — the live field lab:** `/?teach=1` overlays observable missions on the shipped FPS.
+  Movement, weapon fire, damage/destruction, and named-place visits come from real engine services
+  and events. See `docs/VIDEO_ANALYSIS.md`; three of four paths have recorded automated evidence.
+- **v1.6 — the civilization forge:** `/forge/` supplies the missing create-level transfer task.
+  Four authored meanings are carried through a static URL into the real minimap and objective HUD;
+  the production-browser smoke test proves the entire seam.
 - **v2 — deeper toys:** erosion iterations as "the age of rains"; audio DSP as "the bells of the
   harbour" (WebAudio, still zero assets); the SDF font baker as "the scribes' glyphs".
 - **v3 — the bridge:** deep-link lesson pages into the live game with a shared seed, so the map a
   learner shaped in Chapter II is the world they walk in.
-- **v4 — authorship:** learners fork the repo, edit one `.md` and one seed, and deploy their own
-  civilization to a static host — the final JAMStack lesson is *publishing*.
+- **v1.7 — durable publishing (implemented):** anonymous learners publish a validated civilization
+  to Netlify Database, receive a stable ID, retain the complete URL fallback, and generate an
+  immutable Blob export. Staging and production use separate projects, databases, and Blob scopes.
+- **v4 — learner-owned publishing:** learners fork the repo, edit one `.md` and one world
+  parameter, and deploy their civilization. The managed forge proves near transfer; an independent
+  learner deployment remains the far-transfer assessment.

@@ -19,6 +19,7 @@ import { landDemo } from './demos/land';
 import { peopleDemo } from './demos/people';
 import { ledgerDemo } from './demos/ledger';
 import { gateDemo } from './demos/gate';
+import { MISSIONS, type MissionEvidence, type MissionResult } from './course';
 
 import seedMd from './lessons/01-seed.md?raw';
 import landMd from './lessons/02-land.md?raw';
@@ -97,10 +98,24 @@ const CHAPTERS: Chapter[] = [
 ];
 
 const DEFAULT_SEED = 108;
+const PROGRESS_KEY = 'ironsight-academy-progress-v1';
 
 const params = new URLSearchParams(location.search);
 const FROZEN = params.has('frozen');
 let seed = Math.trunc(Number(params.get('seed') ?? DEFAULT_SEED)) || DEFAULT_SEED;
+function storedProgress(): string[] {
+  if (FROZEN) return [];
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(PROGRESS_KEY) ?? '[]');
+    return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+const completed = new Set<string>(storedProgress());
+let evidence: MissionEvidence = {};
+let missionResult: MissionResult = { complete: false, feedback: '' };
 
 const app = document.getElementById('academy')!;
 let disposeDemo: (() => void) | null = null;
@@ -118,21 +133,65 @@ function hrefFor(id: string): string {
   return `${location.pathname}${qs ? '?' + qs : ''}#/${id}`;
 }
 
+function saveProgress(): void {
+  if (!FROZEN) localStorage.setItem(PROGRESS_KEY, JSON.stringify([...completed]));
+}
+
+function updateMissionUi(chapter: Chapter): void {
+  const mission = MISSIONS[chapter.id];
+  const status = document.getElementById('mission-status');
+  if (status) {
+    status.className = `mission-status ${missionResult.complete ? 'complete' : ''}`;
+    status.innerHTML = `
+      <span class="mission-mark">${missionResult.complete ? '✓' : '◇'}</span>
+      <span>${missionResult.feedback}</span>
+    `;
+  }
+  const count = document.getElementById('progress-count');
+  if (count) count.textContent = `${completed.size}/${CHAPTERS.length} missions`;
+  const meter = document.getElementById('progress-meter');
+  if (meter) meter.style.setProperty('--progress', `${(completed.size / CHAPTERS.length) * 100}%`);
+  for (const link of document.querySelectorAll<HTMLElement>('[data-chapter]')) {
+    const mastered = completed.has(link.dataset.chapter ?? '');
+    link.classList.toggle('mastered', mastered);
+    const check = link.querySelector('.chapter-check');
+    if (check) check.textContent = mastered ? '✓' : '';
+  }
+  probe.mission = { id: mission.id, ...missionResult };
+  probe.completed = [...completed];
+  probe.evidence = { ...evidence };
+}
+
+function reportEvidence(chapter: Chapter, next: MissionEvidence): void {
+  evidence = { ...evidence, ...next };
+  missionResult = MISSIONS[chapter.id].evaluate(evidence);
+  if (missionResult.complete && !completed.has(chapter.id)) {
+    completed.add(chapter.id);
+    saveProgress();
+  }
+  updateMissionUi(chapter);
+}
+
 function render(): void {
   if (disposeDemo) {
     disposeDemo();
     disposeDemo = null;
   }
   const chapter = currentChapter();
+  const mission = MISSIONS[chapter.id];
+  evidence = {};
+  missionResult = mission.evaluate(evidence);
   const index = CHAPTERS.indexOf(chapter);
   const prev = CHAPTERS[index - 1];
   const next = CHAPTERS[index + 1];
 
   const nav = CHAPTERS.map(
     (c) => `
-      <a class="chapter ${c === chapter ? 'active' : ''}" href="${hrefFor(c.id)}">
+      <a class="chapter ${c === chapter ? 'active' : ''} ${completed.has(c.id) ? 'mastered' : ''}"
+         data-chapter="${c.id}" href="${hrefFor(c.id)}">
         <span class="sigil">${c.sigil}</span>
         <span>${c.roman}. ${c.title}</span>
+        <span class="chapter-check">${completed.has(c.id) ? '✓' : ''}</span>
       </a>`,
   ).join('');
 
@@ -142,16 +201,27 @@ function render(): void {
         <div class="title">THE CHRONICLE OF<br/>HARBOUR REACH</div>
         <div class="subtitle">a JAMStack academy — JavaScript, APIs, Markup — taught by building a civilization from one seed</div>
       </div>
+      <div class="progress-block">
+        <div><span>civilization progress</span><strong id="progress-count">${completed.size}/${CHAPTERS.length} missions</strong></div>
+        <div class="progress-meter" id="progress-meter" style="--progress:${(completed.size / CHAPTERS.length) * 100}%"></div>
+      </div>
       ${nav}
       <div class="footer">
         a <a href="https://dharmicdata.org" rel="noopener">DharmicData.org</a> teaching world<br/>
         built from the <a href="../" rel="noopener">IRONSIGHT</a> engine ·
-        <a href="https://github.com/gillworks/ironsight" rel="noopener">source</a>
+        <a href="https://github.com/ChaiWithJai/ironsight" rel="noopener">source</a>
       </div>
     </nav>
     <main class="scroll">
       <h1>${chapter.roman}. ${chapter.title}</h1>
       <p class="epigraph">${chapter.epigraph}</p>
+      <section class="mission" aria-labelledby="mission-title">
+        <div class="mission-kicker">Field mission · ${chapter.roman}</div>
+        <h2 id="mission-title">${mission.objective}</h2>
+        <p>${mission.task}</p>
+        <div class="mission-success"><strong>Proof:</strong> ${mission.success}</div>
+        <div class="mission-status" id="mission-status" role="status" aria-live="polite"></div>
+      </section>
       <section class="demo">
         <header><span>${chapter.demoTitle}</span><span class="kind">${chapter.pillar}</span></header>
         <div class="body" id="demo-mount"></div>
@@ -172,10 +242,14 @@ function render(): void {
       history.replaceState(null, '', hrefFor(chapter.id));
       render();
     },
+    report(nextEvidence) {
+      reportEvidence(chapter, nextEvidence);
+    },
   };
   const disposer = chapter.demo(document.getElementById('demo-mount')!, ctx);
   if (disposer) disposeDemo = disposer;
 
+  updateMissionUi(chapter);
   probe.ready = true;
 }
 
@@ -183,9 +257,17 @@ function render(): void {
 const probe = {
   ready: false,
   chapters: CHAPTERS.map((c) => c.id),
+  mission: { id: '', complete: false, feedback: '' },
+  completed: [] as string[],
+  evidence: {} as MissionEvidence,
   goto(id: string) {
     probe.ready = false;
     location.hash = `#/${id}`;
+  },
+  resetProgress() {
+    completed.clear();
+    saveProgress();
+    render();
   },
 };
 declare global {

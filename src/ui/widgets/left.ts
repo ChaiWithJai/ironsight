@@ -277,7 +277,7 @@ export function drawMinimap(ctx: HudContext): void {
   });
 
   /* ---- labels ------------------------------------------------------------ */
-  pen.draw(batch, 'HARBOUR REACH', f.x + f.size * 0.5, f.y + f.size * 0.88, {
+  pen.draw(batch, ctx.services.level.name, f.x + f.size * 0.5, f.y + f.size * 0.88, {
     cap: TYPE.t2.cap * u,
     weight: TYPE.t2.weight,
     tracking: TYPE.t2.tracking,

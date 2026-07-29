@@ -3,11 +3,11 @@ Every well-built world has a wall — not to keep people out, but to keep **entr
 IRONSIGHT was written by more than two hundred AI agents working in parallel on one renderer.
 That should have produced chaos. It produced a game, because every change had to pass through
 gates that a machine — not a mood — controls. This academy walks through the same gates, and this
-final chapter runs some of their rituals *live, in your browser, right now*.
+final chapter lets you run some of their rituals *live, in your browser, right now*.
 
 ## The rituals below
 
-The three checks under this scroll are re-run every time you open this page:
+The three checks under this scroll are re-run when you command the gate:
 
 - **The Rite of the Twin Scribes** — two independent generators are given the same seed and asked
   for 4,096 numbers each. Their fingerprints must match. This is Chapter I's promise, *proven*.
@@ -44,6 +44,8 @@ grade your own work generously).
 ## Graduation
 
 You have held the seed, raised the land, peopled it, read its ledger, and stood at its gate.
-One thing remains: [**walk the world itself**](https://ironsight-tan.vercel.app) — the full
-civilization, baked from nothing in your browser in about a minute. Then clone the repository,
-change one number, and speak a world of your own.
+One thing remains: [**forge your own civilization**](../forge/). Name its people, choose a sigil,
+declare an era, and rename a place. The forge publishes those choices as a static URL contract;
+following it boots the full civilization and changes the real in-game HUD. Its field missions then
+listen to movement, weapon, damage, destruction, and place data from the shipped FPS. This time the
+world—not a miniature—is the lesson.

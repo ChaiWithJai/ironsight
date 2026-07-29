@@ -140,6 +140,7 @@ export const seedDemo: Demo = (root, ctx) => {
     diff === 0
       ? `<span class="ok">✓ ${(da.length / 4).toLocaleString('en-US')} pixels compared — the scribes agree exactly.</span>`
       : `<span class="warn">✗ ${diff} channel(s) differ — determinism is broken; the gate would turn red.</span>`;
+  ctx.report({ seedChanged: ctx.seed !== 108, pixelDiff: diff });
 
   // The fate table: independent forks of the same seed.
   const fresh = () => createRng(ctx.seed, 'fate');

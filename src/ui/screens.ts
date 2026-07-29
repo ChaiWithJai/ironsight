@@ -136,7 +136,7 @@ export function drawDeployScreen(ctx: HudContext): void {
     treatment: 'glow',
     glowAlpha: 0.35,
   });
-  pen.draw(batch, 'HARBOUR REACH', bx, layout.y(17.5), {
+  pen.draw(batch, ctx.services.level.name, bx, layout.y(17.5), {
     cap: TYPE.t5.cap * u * 0.72,
     weight: WEIGHT.display,
     tracking: 0.02,
@@ -241,7 +241,7 @@ export function drawScoreboard(ctx: HudContext): void {
   const rowH = 3.2 * u;
   const maxRows = Math.floor((layout.height * 0.62) / rowH);
 
-  pen.draw(batch, 'CONQUEST — HARBOUR REACH', layout.cx, layout.y(19), {
+  pen.draw(batch, `CONQUEST — ${ctx.services.level.name}`, layout.cx, layout.y(19), {
     cap: TYPE.t3.cap * u,
     weight: TYPE.t3.weight,
     tracking: 0.1,

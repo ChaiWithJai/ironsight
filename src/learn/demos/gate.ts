@@ -1,8 +1,8 @@
 /**
  * Chapter V demo — THE GATE. Three determinism rituals, re-run live on every
- * page load, using the same functions the earlier chapters draw with. The
- * verdicts are computed, not asserted: if determinism ever broke, this page
- * would show it red.
+ * learner request, using the same functions the earlier chapters draw with.
+ * The verdicts are computed, not asserted: if determinism ever broke, this
+ * page would show it red.
  */
 import { createRng } from '@/engine/rng';
 import { fingerprint, heightAt } from '../proc';
@@ -65,23 +65,43 @@ const RITES: Rite[] = [
 ];
 
 export const gateDemo: Demo = (root, ctx) => {
-  const rows = RITES.map((rite) => {
-    const { pass, detail } = rite.run(ctx.seed);
-    return `
-      <div class="gate">
-        <div class="verdict ${pass ? 'pass' : 'fail'}">${pass ? 'PASS' : 'FAIL'}</div>
-        <div>
-          <div class="what">${rite.name}</div>
-          <div class="how">${rite.how}</div>
-          <div class="how">${detail}</div>
-        </div>
-      </div>`;
-  }).join('');
-
   root.innerHTML = `
-    <div class="gate-list">${rows}</div>
-    <div class="readout">rituals were re-run just now, in your browser, at seed ${ctx.seed} —
-reload the page and the fingerprints will not move. That stability is what makes
-screenshots of this academy diffable, and what made 203 parallel agents mergeable.</div>
+    <div class="gate-list" id="gate-list">
+      ${RITES.map(
+        (rite) => `
+        <div class="gate pending">
+          <div class="verdict">WAIT</div>
+          <div>
+            <div class="what">${rite.name}</div>
+            <div class="how">${rite.how}</div>
+          </div>
+        </div>`,
+      ).join('')}
+    </div>
+    <div class="controls"><button id="run-gates">run the three rituals</button></div>
+    <div class="readout" id="gate-readout">The verdicts are waiting for you, not prewritten.</div>
   `;
+  ctx.report({ gateRun: false, passed: 0, total: RITES.length });
+
+  root.querySelector('#run-gates')!.addEventListener('click', () => {
+    const results = RITES.map((rite) => ({ rite, result: rite.run(ctx.seed) }));
+    root.querySelector('#gate-list')!.innerHTML = results
+      .map(
+        ({ rite, result }) => `
+        <div class="gate">
+          <div class="verdict ${result.pass ? 'pass' : 'fail'}">${result.pass ? 'PASS' : 'FAIL'}</div>
+          <div>
+            <div class="what">${rite.name}</div>
+            <div class="how">${rite.how}</div>
+            <div class="how">${result.detail}</div>
+          </div>
+        </div>`,
+      )
+      .join('');
+    const passed = results.filter(({ result }) => result.pass).length;
+    root.querySelector('#gate-readout')!.textContent =
+      `rituals re-run in your browser at seed ${ctx.seed} — ${passed}/${RITES.length} passed. ` +
+      'Reload and the fingerprints will not move.';
+    ctx.report({ gateRun: true, passed, total: RITES.length });
+  });
 };
