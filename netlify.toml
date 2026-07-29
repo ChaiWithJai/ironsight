@@ -18,6 +18,25 @@
 [context.deploy-preview]
   ignore = "node tools/netlify-ignore.mjs deploy-preview"
 
+# Security headers applied to every response. Netlify merges header blocks by
+# path specificity — these apply repo-wide; the more specific blocks below only
+# add/override Cache-Control and X-Content-Type-Options, not these.
+#
+# CSP is scoped to what the app actually does: three JS entry bundles (main,
+# learn, forge), no runtime `fetch`/XHR (client state is a URL-encoded profile —
+# `tools/check-boundaries.mjs` bans `fetch(` from all of `src/`), a WASM physics
+# engine (rapier3d-compat, hence 'wasm-unsafe-eval'), a module Worker for the
+# asset baker, and procedurally generated (data:) textures/fonts/audio — zero
+# binary art assets, zero third-party origins.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=(), usb=(), midi=(), magnetometer=(), gyroscope=(), accelerometer=(), interest-cohort=()"
+    X-Content-Type-Options = "nosniff"
+
 [[headers]]
   for = "/assets/*"
   [headers.values]

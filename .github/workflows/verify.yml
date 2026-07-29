@@ -26,3 +26,18 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run verify
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Fails the job on high/critical advisories in the dependency tree.
+      # Dependabot (.github/dependabot.yml) files the upgrade PRs; this gate
+      # makes sure a vulnerable range doesn't merge silently in between.
+      - run: npm audit --audit-level=high

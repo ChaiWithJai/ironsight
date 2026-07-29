@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # Runtime + dev dependencies (package.json / package-lock.json at repo root,
+  # which also covers netlify/functions since it has no separate lockfile).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      npm-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Keep the CI actions themselves patched (actions/checkout, actions/setup-node).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
