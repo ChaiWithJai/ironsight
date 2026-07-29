@@ -33,6 +33,7 @@
     "netlify:dev": "bash tools/with-node.sh npx netlify-cli@27.0.1 dev",
     "netlify:build": "bash tools/with-node.sh npx netlify-cli@27.0.1 build",
     "smoke:local": "bash tools/with-node.sh node tools/netlify-smoke.mjs local",
+    "smoke:preview": "bash tools/with-node.sh node tools/netlify-smoke.mjs preview",
     "smoke:staging": "bash tools/with-node.sh node tools/netlify-smoke.mjs staging",
     "smoke:production": "bash tools/with-node.sh node tools/netlify-smoke.mjs production",
     "verify": "npm run typecheck && npm run typecheck:functions && npm run boundaries && npm test && npm run build"

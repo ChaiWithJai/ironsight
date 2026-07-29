@@ -73,10 +73,21 @@ environment at execution time.
 
 1. A feature pull request must pass GitHub `Verify` and the staging-project
    Deploy Preview. Apply preview migrations automatically and run browser
-   acceptance against its URL.
+   acceptance against its URL. This is automated: `.github/workflows/verify.yml`
+   runs a `browser-acceptance` job on every pull request that waits for the
+   Deploy Preview at `https://deploy-preview-<PR#>--<NETLIFY_SITE_NAME>.netlify.app`
+   and then runs `npm run smoke:preview` (`tools/netlify-smoke.mjs preview`)
+   against it with Playwright. It requires the repository variable
+   `NETLIFY_SITE_NAME` (the staging project's slug, non-secret) to be set once
+   the Netlify project exists.
 2. Merge the exact reviewed commit to `staging`. Verify the stable staging URL
    with `IRONSIGHT_STAGING_URL=https://… npm run smoke:staging`, then run the
-   full teaching smoke against that origin.
+   full teaching smoke against that origin. This is automated: the
+   `staging-full-gate` job in `.github/workflows/verify.yml` runs on every push
+   to `staging`, waits for the stable origin to answer, then runs
+   `npm run smoke:staging` and `npm run teach:smoke -- --base-url …` against it.
+   It requires the repository variable `IRONSIGHT_STAGING_URL` (non-secret, see
+   above) to be set.
 3. Promote the same commit to `main`. Netlify applies repository migrations
    immediately before publish; a failure blocks the release.
 4. Verify production with

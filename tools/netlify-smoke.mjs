@@ -13,13 +13,14 @@ import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 
 const environment = process.argv[2];
-if (!['local', 'staging', 'production'].includes(environment)) {
-  console.error('usage: node tools/netlify-smoke.mjs <local|staging|production>');
+if (!['local', 'preview', 'staging', 'production'].includes(environment)) {
+  console.error('usage: node tools/netlify-smoke.mjs <local|preview|staging|production>');
   process.exit(2);
 }
 
 const variable = {
   local: 'IRONSIGHT_LOCAL_URL',
+  preview: 'IRONSIGHT_PREVIEW_URL',
   staging: 'IRONSIGHT_STAGING_URL',
   production: 'IRONSIGHT_PRODUCTION_URL',
 }[environment];
