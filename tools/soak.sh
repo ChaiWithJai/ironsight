@@ -9,6 +9,13 @@
 #   ./tools/soak.sh --walk sweep --no-build
 #   ./tools/soak.sh --compare tools/soak/before.json
 #
+# LEAK SOAK (memory / GC / frame-time over 10–30 min):
+#
+#   ./tools/soak.sh --profile                       # 15 min default
+#   ./tools/soak.sh --profile --minutes 30
+#   ./tools/soak.sh --profile --minutes 2 --no-build   # a quick shakedown
+#   ./tools/soak.sh --profile --compare tools/soak/profile-before.json
+#
 # Exit code is the verdict: 0 when no fail-level verdict fired, 1 otherwise.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
