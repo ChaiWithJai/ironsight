@@ -188,22 +188,23 @@ function render(): void {
   const nav = CHAPTERS.map(
     (c) => `
       <a class="chapter ${c === chapter ? 'active' : ''} ${completed.has(c.id) ? 'mastered' : ''}"
-         data-chapter="${c.id}" href="${hrefFor(c.id)}">
-        <span class="sigil">${c.sigil}</span>
+         data-chapter="${c.id}" href="${hrefFor(c.id)}" ${c === chapter ? 'aria-current="page"' : ''}>
+        <span class="sigil" aria-hidden="true">${c.sigil}</span>
         <span>${c.roman}. ${c.title}</span>
-        <span class="chapter-check">${completed.has(c.id) ? '✓' : ''}</span>
+        <span class="chapter-check" aria-hidden="true">${completed.has(c.id) ? '✓' : ''}</span>
+        ${completed.has(c.id) ? '<span class="sr-only">— mission complete</span>' : ''}
       </a>`,
   ).join('');
 
   app.innerHTML = `
-    <nav class="chapters">
+    <nav class="chapters" aria-label="Chapters">
       <div class="masthead">
         <div class="title">THE CHRONICLE OF<br/>HARBOUR REACH</div>
         <div class="subtitle">a JAMStack academy — JavaScript, APIs, Markup — taught by building a civilization from one seed</div>
       </div>
       <div class="progress-block">
-        <div><span>civilization progress</span><strong id="progress-count">${completed.size}/${CHAPTERS.length} missions</strong></div>
-        <div class="progress-meter" id="progress-meter" style="--progress:${(completed.size / CHAPTERS.length) * 100}%"></div>
+        <div><span id="progress-label">civilization progress</span><strong id="progress-count" role="status" aria-live="polite">${completed.size}/${CHAPTERS.length} missions</strong></div>
+        <div class="progress-meter" id="progress-meter" style="--progress:${(completed.size / CHAPTERS.length) * 100}%" role="progressbar" aria-labelledby="progress-label" aria-valuemin="0" aria-valuemax="${CHAPTERS.length}" aria-valuenow="${completed.size}"></div>
       </div>
       ${nav}
       <div class="footer">
@@ -212,7 +213,7 @@ function render(): void {
         <a href="https://github.com/ChaiWithJai/ironsight" rel="noopener">source</a>
       </div>
     </nav>
-    <main class="scroll">
+    <main class="scroll" id="main-content" tabindex="-1">
       <h1>${chapter.roman}. ${chapter.title}</h1>
       <p class="epigraph">${chapter.epigraph}</p>
       <section class="mission" aria-labelledby="mission-title">
@@ -222,15 +223,15 @@ function render(): void {
         <div class="mission-success"><strong>Proof:</strong> ${mission.success}</div>
         <div class="mission-status" id="mission-status" role="status" aria-live="polite"></div>
       </section>
-      <section class="demo">
-        <header><span>${chapter.demoTitle}</span><span class="kind">${chapter.pillar}</span></header>
+      <section class="demo" aria-labelledby="demo-title">
+        <header><span id="demo-title">${chapter.demoTitle}</span><span class="kind">${chapter.pillar}</span></header>
         <div class="body" id="demo-mount"></div>
       </section>
       <div id="lesson">${renderMarkdown(chapter.md)}</div>
-      <div class="pager">
+      <nav class="pager" aria-label="Chapter pagination">
         <span>${prev ? `<a href="${hrefFor(prev.id)}">◂ ${prev.roman}. ${prev.title}</a>` : ''}</span>
         <span>${next ? `<a href="${hrefFor(next.id)}">${next.roman}. ${next.title} ▸</a>` : ''}</span>
-      </div>
+      </nav>
     </main>
   `;
 
@@ -277,5 +278,13 @@ declare global {
 }
 window.__LEARN__ = probe;
 
-window.addEventListener('hashchange', render);
+// On a real chapter navigation (not the initial load, and not a seed/demo
+// re-render), move focus to the new chapter's content. This is the standard
+// a11y pattern for hash-routed SPAs: without it, keyboard and screen-reader
+// users who activate a chapter link get no signal that the page moved — focus
+// stays wherever it was and the new heading is never announced.
+window.addEventListener('hashchange', () => {
+  render();
+  document.getElementById('main-content')?.focus();
+});
 render();
