@@ -6,7 +6,8 @@ import { after, before, test } from 'node:test';
 // Postgres-compatible test server instead of the provisioned deployment DB.
 process.env.NETLIFY_DB_DRIVER = 'server';
 const { NetlifyDB } = await import('@netlify/database-dev');
-const { getDatabase } = await import('@netlify/database');
+const { default: pg } = await import('pg');
+const { waddler } = await import('waddler/node-postgres');
 const { createWorldRepository } = await import('../../netlify/functions/lib/world-store.mts');
 const { createWorldsHandler } = await import('../../netlify/functions/worlds.mts');
 
@@ -30,7 +31,13 @@ before(async () => {
   localDatabase = new NetlifyDB({ logger: () => {} });
   const connectionString = await localDatabase.start();
   await localDatabase.applyMigrations('./netlify/database/migrations');
-  database = getDatabase({ connectionString });
+  const pool = new pg.Pool({ connectionString });
+  database = {
+    driver: 'server',
+    sql: waddler({ client: pool }),
+    pool,
+    connectionString,
+  };
   const artifacts = {
     async set(key, value, options) {
       assert.equal(options?.onlyIfNew, true);
