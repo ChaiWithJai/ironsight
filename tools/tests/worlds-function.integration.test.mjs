@@ -10,22 +10,17 @@ const { default: pg } = await import('pg');
 const { waddler } = await import('waddler/node-postgres');
 const { createWorldRepository } = await import('../../netlify/functions/lib/world-store.mts');
 const { createWorldsHandler } = await import('../../netlify/functions/worlds.mts');
+const { SAMPLE_WORLD_PROFILE } = await import('../fixtures/index.ts');
 
 let localDatabase;
 let handler;
 let database;
 const blobs = new Map();
 
-const profile = {
-  civilization: 'City of Many Rivers',
-  sigil: '☀',
-  era: 'The Dawn Accord',
-  places: {
-    ALPHA: 'Sun Assembly',
-    BRAVO: 'Moon Quay',
-    CHARLIE: 'Archive Hill',
-  },
-};
+// The same canonical civilization asserted in the unit suite, teach:smoke and
+// netlify-smoke, so a schema/validation change surfaces as one failing
+// fixture instead of drifting silently between test tiers.
+const profile = SAMPLE_WORLD_PROFILE;
 
 before(async () => {
   localDatabase = new NetlifyDB({ logger: () => {} });

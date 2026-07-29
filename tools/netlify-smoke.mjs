@@ -11,6 +11,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { chromium } from 'playwright';
+import { createMarkedWorldProfile } from './fixtures/index.ts';
 
 const environment = process.argv[2];
 if (!['local', 'staging', 'production'].includes(environment)) {
@@ -74,16 +75,23 @@ page.on('response', (response) => {
   if (response.status() >= 500) browserErrors.push(`HTTP ${response.status()}: ${response.url()}`);
 });
 
+// The shared marked-profile fixture keeps this canary identifiable (and
+// distinct from the plain SAMPLE_WORLD_PROFILE used elsewhere) so it stays
+// easy to find and clean up in a shared staging/production database.
 const marker = environment === 'production' ? 'CANARY' : environment.toUpperCase();
-const civilization = `${marker} Many Rivers`;
+const markedProfile = createMarkedWorldProfile(marker, {
+  era: 'The Release Accord',
+  places: { ALPHA: 'Verification Gate', BRAVO: 'Synthetic Quay', CHARLIE: 'Rollback Hill' },
+});
+const civilization = markedProfile.civilization;
 await page.goto(`${baseUrl}/forge/`, { waitUntil: 'networkidle' });
 await page.waitForFunction(() => window.__FORGE__?.ready === true);
-await page.getByRole('textbox', { name: 'Civilization identity' }).fill(civilization);
-await page.getByRole('textbox', { name: 'Sigil symbol' }).fill('☀');
-await page.getByRole('textbox', { name: 'Era time' }).fill('The Release Accord');
-await page.getByRole('textbox', { name: 'Alpha' }).fill('Verification Gate');
-await page.getByRole('textbox', { name: 'Bravo' }).fill('Synthetic Quay');
-await page.getByRole('textbox', { name: 'Charlie' }).fill('Rollback Hill');
+await page.getByRole('textbox', { name: 'Civilization identity' }).fill(markedProfile.civilization);
+await page.getByRole('textbox', { name: 'Sigil symbol' }).fill(markedProfile.sigil);
+await page.getByRole('textbox', { name: 'Era time' }).fill(markedProfile.era);
+await page.getByRole('textbox', { name: 'Alpha' }).fill(markedProfile.places.ALPHA);
+await page.getByRole('textbox', { name: 'Bravo' }).fill(markedProfile.places.BRAVO);
+await page.getByRole('textbox', { name: 'Charlie' }).fill(markedProfile.places.CHARLIE);
 await page.waitForFunction(() => window.__FORGE__?.complete === true);
 
 const portable = await page.evaluate(() => window.__FORGE__?.permalink);

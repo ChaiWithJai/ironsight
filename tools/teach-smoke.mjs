@@ -21,6 +21,7 @@ import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SAMPLE_WORLD_PROFILE } from './fixtures/index.ts';
 
 const ROOT = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const DIST = resolve(ROOT, process.env.IRONSIGHT_DIST || 'dist');
@@ -99,10 +100,14 @@ page.on('console', (message) => {
 log('authoring a civilization through the forge…');
 await page.goto(`${baseUrl}/forge/`, { waitUntil: 'load' });
 await page.waitForFunction(() => window.__FORGE__?.ready === true);
-await page.getByRole('textbox', { name: 'Civilization identity' }).fill('City of Many Rivers');
-await page.getByRole('textbox', { name: 'Sigil symbol' }).fill('☀');
-await page.getByRole('textbox', { name: 'Era time' }).fill('The Dawn Accord');
-await page.getByRole('textbox', { name: 'Alpha' }).fill('Sun Assembly');
+// Same canonical fixture the unit and integration suites assert against
+// (tools/fixtures/world-profile.ts), so a validation/schema change surfaces
+// here too instead of this smoke silently authoring a profile the rest of
+// the suite no longer agrees with.
+await page.getByRole('textbox', { name: 'Civilization identity' }).fill(SAMPLE_WORLD_PROFILE.civilization);
+await page.getByRole('textbox', { name: 'Sigil symbol' }).fill(SAMPLE_WORLD_PROFILE.sigil);
+await page.getByRole('textbox', { name: 'Era time' }).fill(SAMPLE_WORLD_PROFILE.era);
+await page.getByRole('textbox', { name: 'Alpha' }).fill(SAMPLE_WORLD_PROFILE.places.ALPHA);
 await page.waitForFunction(() => window.__FORGE__?.complete === true);
 const forge = await page.evaluate(() => window.__FORGE__);
 if (!forge?.permalink) {
@@ -176,7 +181,7 @@ const probe = await page.evaluate(() => window.__TEACH__);
 if (!probe || probe.completed.length < 3) {
   fail(`expected at least 3 proven live mechanics, got ${probe?.completed.length ?? 0}`);
 }
-if (!probe?.authoredWorld || probe.worldProfile.civilization !== 'City of Many Rivers') {
+if (!probe?.authoredWorld || probe.worldProfile.civilization !== SAMPLE_WORLD_PROFILE.civilization) {
   fail(`full game did not consume the authored profile: ${JSON.stringify(probe?.worldProfile)}`);
 }
 const screenshot = await page.screenshot();
