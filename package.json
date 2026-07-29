@@ -24,7 +24,7 @@
     "typecheck": "tsc --noEmit",
     "typecheck:functions": "tsc --noEmit -p netlify/functions/tsconfig.json",
     "boundaries": "bash tools/with-node.sh node tools/check-boundaries.mjs",
-    "test:unit": "bash tools/with-node.sh node --test tools/tests/world-profile.test.mjs",
+    "test:unit": "bash tools/with-node.sh node --test tools/tests/world-profile.test.mjs tools/tests/bundle-budgets.test.mjs",
     "test:integration": "bash tools/with-node.sh node --test tools/tests/worlds-function.integration.test.mjs",
     "test": "npm run test:unit && npm run test:integration",
     "shots": "bash tools/shoot.sh",
@@ -35,7 +35,8 @@
     "smoke:local": "bash tools/with-node.sh node tools/netlify-smoke.mjs local",
     "smoke:staging": "bash tools/with-node.sh node tools/netlify-smoke.mjs staging",
     "smoke:production": "bash tools/with-node.sh node tools/netlify-smoke.mjs production",
-    "verify": "npm run typecheck && npm run typecheck:functions && npm run boundaries && npm test && npm run build"
+    "bundle:budgets": "bash tools/with-node.sh node tools/bundle-budgets.mjs",
+    "verify": "npm run typecheck && npm run typecheck:functions && npm run boundaries && npm test && npm run build && npm run bundle:budgets"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.19.3",
