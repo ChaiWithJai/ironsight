@@ -71,6 +71,44 @@ This scores the design, not learner outcomes.
 Deployment decision: usable as an instrumented first learning loop with monitoring. It is not yet
 evidence of learning transfer.
 
+## Completion evidence — 2026-07-29
+
+The platform implementation is complete at all three operational layers:
+
+- **Local:** Netlify Dev booted Vite and the `worlds.mts` Function at
+  `127.0.0.1:8888`; the repository migration applied from a clean local
+  Postgres-compatible database; Netlify Blobs reported sandbox mode. Contract
+  tests passed 4/4, Function↔Database/Blob integration passed 3/3, all 271
+  boundary checks passed, and Forge→publish→stable ID→actual game plus forced
+  API-outage fallback passed.
+- **Staging:** [ironsight-staging.netlify.app](https://ironsight-staging.netlify.app)
+  is Git-connected to the `staging` branch with its own Database and Blob
+  scope. Netlify applied the migration before publish. `/`, `/learn/`,
+  `/forge/`, POST/GET world publication, immutable assets, revalidated HTML,
+  stable-ID game boot, and complete-URL fallback passed. The deployed teaching
+  smoke carried 4/4 authored meanings into the real game and mechanically proved
+  movement, fire, and damage (15.0 m, 4 shots, 1 hit).
+- **Production:** [ironsight-958.netlify.app](https://ironsight-958.netlify.app)
+  is Git-connected to `main`, with a separate Database/Blob scope and production
+  Deploy Previews blocked. The exact revision promoted from staging passed the
+  same migration and deployed browser smoke. Its disposable `CANARY` world was
+  created and read through the Function; the first slice intentionally has no
+  broad destructive cleanup endpoint. Browser page/console/HTTP error
+  collection was empty. A prior ready deploy still returns HTTP 200, proving a
+  publish rollback candidate exists; schema rollback remains forward-only and
+  backwards-compatible as documented in the runbook.
+
+Account cost controls remained explicit: credit-based Pro, 3,000-credit cycle,
+auto-recharge off, two isolated databases at 1–2 compute units with five-minute
+sleep, and no credentials or project IDs committed. A dashboard credit alert is
+still a human account-setting task because no safe supported CLI/API control was
+available.
+
+This is release evidence for the software and instructional instrument. It is
+not evidence that a human learner completed the named-place navigation mission,
+explained the concepts later, or transferred them independently; those claims
+still require moderated human/video evidence.
+
 ## Highest-value next work
 
 1. Add a two-question entry diagnostic and adapt guidance without locking content.
