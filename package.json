@@ -35,6 +35,7 @@
     "smoke:local": "bash tools/with-node.sh node tools/netlify-smoke.mjs local",
     "smoke:staging": "bash tools/with-node.sh node tools/netlify-smoke.mjs staging",
     "smoke:production": "bash tools/with-node.sh node tools/netlify-smoke.mjs production",
+    "profile": "bash tools/with-node.sh node tools/profile.mjs",
     "verify": "npm run typecheck && npm run typecheck:functions && npm run boundaries && npm test && npm run build"
   },
   "dependencies": {

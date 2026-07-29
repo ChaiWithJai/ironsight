@@ -43,5 +43,8 @@ tools/shots-post-*/
 # Full-game teaching smoke evidence — regenerated with npm run teach:smoke.
 tools/teaching/
 
+# Performance profiles — published per release via CI, never committed
+tools/profiles/
+
 # Local Netlify folder
 .netlify

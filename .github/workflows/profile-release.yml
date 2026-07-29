@@ -1,0 +1,61 @@
+name: Profile and Publish Artifacts
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: profile-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Profile performance
+        run: npm run profile
+        env:
+          IRONSIGHT_LOCAL_URL: http://127.0.0.1:8080
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-profile-${{ github.sha }}
+          path: tools/profiles/
+          retention-days: 90
+
+      - name: Report results
+        if: always()
+        run: |
+          COMMIT_SHORT=$(git rev-parse --short HEAD)
+          PROFILE_DIR="tools/profiles/${COMMIT_SHORT}"
+          if [ -d "$PROFILE_DIR" ]; then
+            # Find the latest profile output
+            LATEST=$(ls -td "$PROFILE_DIR"/*/ | head -1)
+            if [ -f "$LATEST/summary.txt" ]; then
+              echo "## Performance Profile Results" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              cat "$LATEST/summary.txt" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+            if [ -f "$LATEST/report.json" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "Full report: [tools/profiles/$COMMIT_SHORT/$(basename $LATEST)/report.json]()" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
