@@ -7,22 +7,20 @@ import {
   validateWorldProfile,
   worldAuthorshipChecks,
 } from '../../src/engine/world-profile.ts';
+import { INVALID_WORLD_PROFILE_INPUT, SAMPLE_WORLD_PROFILE } from '../fixtures/index.ts';
 
+// Same canonical fixture the integration test, teach:smoke and
+// netlify-smoke consume — plus stray whitespace, to prove `clean()`
+// normalizes untrusted input down to that exact shared shape.
 const authored = {
-  civilization: '  City   of Many Rivers ',
-  sigil: '☀',
-  era: 'The Dawn Accord',
-  places: {
-    ALPHA: 'Sun Assembly',
-    BRAVO: 'Moon Quay',
-    CHARLIE: 'Archive Hill',
-  },
+  ...SAMPLE_WORLD_PROFILE,
+  civilization: `  ${SAMPLE_WORLD_PROFILE.civilization}  `.replace('City', 'City   '),
 };
 
 test('strict publication validation normalizes a complete profile', () => {
   const result = validateWorldProfile(authored);
   assert.equal(result.ok, true);
-  assert.equal(result.profile?.civilization, 'City of Many Rivers');
+  assert.equal(result.profile?.civilization, SAMPLE_WORLD_PROFILE.civilization);
   assert.deepEqual(worldAuthorshipChecks(result.profile), {
     civilization: true,
     symbol: true,
@@ -32,12 +30,7 @@ test('strict publication validation normalizes a complete profile', () => {
 });
 
 test('strict validation rejects missing and oversized fields', () => {
-  const result = validateWorldProfile({
-    civilization: 'x'.repeat(25),
-    sigil: '',
-    era: 'Era',
-    places: { ALPHA: 'One' },
-  });
+  const result = validateWorldProfile(INVALID_WORLD_PROFILE_INPUT);
   assert.equal(result.ok, false);
   assert.ok(result.issues.includes('civilization must be 24 characters or fewer'));
   assert.ok(result.issues.includes('sigil is required'));
