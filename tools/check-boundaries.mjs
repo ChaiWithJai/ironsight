@@ -37,6 +37,10 @@ const JSON_OUT = process.argv.includes('--json');
  */
 const LANES = [
   'engine', 'bootstrap', 'render', 'world', 'game', 'physics', 'audio', 'ui', 'shots', 'gfx',
+  // The teaching lane (the /learn/ academy). Registered here deliberately: it
+  // must live under the same law it teaches — shared seams only, no
+  // Math.random, no wall clock, no runtime network.
+  'learn',
 ];
 /**
  * Importable by anyone. These are the deliberate shared seams: the contract
